@@ -1,3 +1,7 @@
+//! Shared fixtures for integration tests; not every helper is referenced by each test binary.
+
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -72,9 +76,7 @@ pub fn create_large_test_model() -> Model {
         },
     );
 
-    let ln_weight: Vec<u8> = (0..hidden_dim)
-        .flat_map(|_| 1.0f32.to_le_bytes())
-        .collect();
+    let ln_weight: Vec<u8> = (0..hidden_dim).flat_map(|_| 1.0f32.to_le_bytes()).collect();
     tensors.insert(
         "layer0.ln_weight".to_string(),
         TensorData {
@@ -84,9 +86,7 @@ pub fn create_large_test_model() -> Model {
         },
     );
 
-    let ln_bias: Vec<u8> = (0..hidden_dim)
-        .flat_map(|_| 0.0f32.to_le_bytes())
-        .collect();
+    let ln_bias: Vec<u8> = (0..hidden_dim).flat_map(|_| 0.0f32.to_le_bytes()).collect();
     tensors.insert(
         "layer0.ln_bias".to_string(),
         TensorData {
@@ -122,10 +122,7 @@ pub fn create_large_test_model() -> Model {
     }
 }
 
-pub fn create_safetensors_file(
-    path: &Path,
-    tensors: Vec<(&str, &str, Vec<usize>, Vec<u8>)>,
-) {
+pub fn create_safetensors_file(path: &Path, tensors: Vec<(&str, &str, Vec<usize>, Vec<u8>)>) {
     let mut sorted: Vec<_> = tensors.into_iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
 
@@ -139,15 +136,28 @@ pub fn create_safetensors_file(
     let mut entries = Vec::new();
     for (name, dtype, shape, data) in sorted {
         let end = offset + data.len();
-        entries.push((name.to_string(), dtype.to_string(), shape, data, offset, end));
+        entries.push((
+            name.to_string(),
+            dtype.to_string(),
+            shape,
+            data,
+            offset,
+            end,
+        ));
         offset = end;
     }
 
     for (name, dtype, shape, _, start, end) in &entries {
         let mut obj = serde_json::Map::new();
-        obj.insert("dtype".to_string(), serde_json::Value::String(dtype.clone()));
+        obj.insert(
+            "dtype".to_string(),
+            serde_json::Value::String(dtype.clone()),
+        );
         obj.insert("shape".to_string(), serde_json::json!(shape));
-        obj.insert("data_offsets".to_string(), serde_json::json!([*start, *end]));
+        obj.insert(
+            "data_offsets".to_string(),
+            serde_json::json!([*start, *end]),
+        );
         header.insert(name.clone(), serde_json::Value::Object(obj));
     }
 
@@ -155,7 +165,8 @@ pub fn create_safetensors_file(
     let header_bytes = header_json.as_bytes();
 
     let mut file = std::fs::File::create(path).unwrap();
-    file.write_all(&(header_bytes.len() as u64).to_le_bytes()).unwrap();
+    file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+        .unwrap();
     file.write_all(header_bytes).unwrap();
     for (_, _, _, data, _, _) in &entries {
         file.write_all(data).unwrap();
@@ -167,5 +178,8 @@ pub fn f32_to_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }

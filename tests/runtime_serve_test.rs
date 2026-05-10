@@ -29,18 +29,35 @@ fn test_runtime_from_raw_bias() {
 }
 
 #[test]
-fn test_runtime_skips_non_f32() {
+fn test_runtime_from_raw_f16() {
     let mut tensors = HashMap::new();
     tensors.insert(
-        "data_f16".to_string(),
+        "h".to_string(),
         TensorData {
             shape: vec![2],
             dtype: DataType::F16,
-            data: vec![0u8; 4],
+            data: vec![0x00, 0x3c, 0x00, 0x40],
+        },
+    );
+    let runtime = Runtime::from_raw(&tensors);
+    let t = runtime.get("h").unwrap();
+    assert!((t.data[0] - 1.0).abs() < 1e-3);
+    assert!((t.data[1] - 2.0).abs() < 1e-3);
+}
+
+#[test]
+fn test_runtime_mixed_dtypes_truncated_skipped() {
+    let mut tensors = HashMap::new();
+    tensors.insert(
+        "trunc_f32".to_string(),
+        TensorData {
+            shape: vec![2],
+            dtype: DataType::F32,
+            data: vec![0],
         },
     );
     tensors.insert(
-        "data_f32".to_string(),
+        "ok_f32".to_string(),
         TensorData {
             shape: vec![2],
             dtype: DataType::F32,
@@ -49,8 +66,8 @@ fn test_runtime_skips_non_f32() {
     );
 
     let runtime = Runtime::from_raw(&tensors);
-    assert!(runtime.get("data_f32").is_some());
-    assert!(runtime.get("data_f16").is_none());
+    assert!(runtime.get("ok_f32").is_some());
+    assert!(runtime.get("trunc_f32").is_none());
 }
 
 #[test]

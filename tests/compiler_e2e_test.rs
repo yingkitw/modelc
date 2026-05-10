@@ -1,9 +1,10 @@
 mod common;
 
 use std::fs;
+use std::net::SocketAddr;
 
-use modelc::compiler;
 use modelc::cli::WeightFormat;
+use modelc::compiler;
 
 #[test]
 #[ignore]
@@ -26,7 +27,8 @@ fn test_e2e_compile_safetensors() {
         &weights_path,
         Some(&output_path),
         Some(&WeightFormat::Safetensors),
-        18080,
+        None,
+        SocketAddr::from(([127, 0, 0, 1], 18080)),
         None,
         false,
     );
@@ -51,16 +53,14 @@ fn test_e2e_compile_detect_format() {
     let output_path = dir.path().join("auto_serve");
 
     let data = common::f32_to_bytes(&[1.0, 0.0, 0.0, 1.0]);
-    common::create_safetensors_file(
-        &weights_path,
-        vec![("eye", "F32", vec![2, 2], data)],
-    );
+    common::create_safetensors_file(&weights_path, vec![("eye", "F32", vec![2, 2], data)]);
 
     let result = compiler::compile(
         &weights_path,
         Some(&output_path),
         None,
-        18081,
+        None,
+        SocketAddr::from(([127, 0, 0, 1], 18081)),
         None,
         false,
     );
@@ -81,10 +81,7 @@ fn test_inspect_safetensors() {
     let path = dir.path().join("inspect.safetensors");
 
     let w_data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0]);
-    common::create_safetensors_file(
-        &path,
-        vec![("kernel", "F32", vec![2, 2], w_data)],
-    );
+    common::create_safetensors_file(&path, vec![("kernel", "F32", vec![2, 2], w_data)]);
 
     let result = compiler::inspect(&path, Some(&WeightFormat::Safetensors));
     assert!(result.is_ok());
@@ -96,10 +93,7 @@ fn test_inspect_detect_format() {
     let path = dir.path().join("detect.safetensors");
 
     let data = common::f32_to_bytes(&[1.0]);
-    common::create_safetensors_file(
-        &path,
-        vec![("x", "F32", vec![1], data)],
-    );
+    common::create_safetensors_file(&path, vec![("x", "F32", vec![1], data)]);
 
     let result = compiler::inspect(&path, None);
     assert!(result.is_ok());
@@ -107,10 +101,7 @@ fn test_inspect_detect_format() {
 
 #[test]
 fn test_inspect_nonexistent() {
-    let result = compiler::inspect(
-        std::path::Path::new("/nonexistent.safetensors"),
-        None,
-    );
+    let result = compiler::inspect(std::path::Path::new("/nonexistent.safetensors"), None);
     assert!(result.is_err());
 }
 
@@ -130,6 +121,14 @@ fn test_compile_unknown_format_no_flag() {
     let path = dir.path().join("unknown.xyz");
     std::fs::write(&path, b"data").unwrap();
 
-    let result = compiler::compile(&path, None, None, 8080, None, false);
+    let result = compiler::compile(
+        &path,
+        None,
+        None,
+        None,
+        SocketAddr::from(([0, 0, 0, 0], 8080)),
+        None,
+        false,
+    );
     assert!(result.is_err());
 }

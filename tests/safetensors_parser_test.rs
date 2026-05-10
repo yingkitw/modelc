@@ -1,7 +1,7 @@
 mod common;
 
-use modelc::parsers::safetensors::SafetensorsParser;
 use modelc::parsers::WeightParser;
+use modelc::parsers::safetensors::SafetensorsParser;
 
 #[test]
 fn test_parse_single_f32_tensor() {
@@ -9,10 +9,7 @@ fn test_parse_single_f32_tensor() {
     let path = dir.path().join("single.safetensors");
 
     let data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0]);
-    common::create_safetensors_file(
-        &path,
-        vec![("weights", "F32", vec![2, 2], data)],
-    );
+    common::create_safetensors_file(&path, vec![("weights", "F32", vec![2, 2], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();
@@ -57,10 +54,7 @@ fn test_parse_f16_tensor() {
     let path = dir.path().join("f16.safetensors");
 
     let data = vec![0u8; 8]; // 4 elements * 2 bytes each
-    common::create_safetensors_file(
-        &path,
-        vec![("data", "F16", vec![4], data)],
-    );
+    common::create_safetensors_file(&path, vec![("data", "F16", vec![4], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();
@@ -92,10 +86,7 @@ fn test_parse_metadata() {
     let path = dir.path().join("test.safetensors");
 
     let data = common::f32_to_bytes(&[1.0]);
-    common::create_safetensors_file(
-        &path,
-        vec![("x", "F32", vec![1], data)],
-    );
+    common::create_safetensors_file(&path, vec![("x", "F32", vec![1], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();
@@ -110,10 +101,7 @@ fn test_parse_1d_tensor() {
     let path = dir.path().join("vec.safetensors");
 
     let data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-    common::create_safetensors_file(
-        &path,
-        vec![("vec", "F32", vec![5], data)],
-    );
+    common::create_safetensors_file(&path, vec![("vec", "F32", vec![5], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();
@@ -127,11 +115,8 @@ fn test_parse_scalar_tensor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scalar.safetensors");
 
-    let data = common::f32_to_bytes(&[3.14]);
-    common::create_safetensors_file(
-        &path,
-        vec![("value", "F32", vec![1], data)],
-    );
+    let data = common::f32_to_bytes(&[42.0]);
+    common::create_safetensors_file(&path, vec![("value", "F32", vec![1], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();
@@ -147,10 +132,7 @@ fn test_parse_3d_tensor() {
     let path = dir.path().join("cube.safetensors");
 
     let data = common::f32_to_bytes(&[0.0; 24]);
-    common::create_safetensors_file(
-        &path,
-        vec![("cube", "F32", vec![2, 3, 4], data)],
-    );
+    common::create_safetensors_file(&path, vec![("cube", "F32", vec![2, 3, 4], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();
@@ -202,11 +184,11 @@ fn test_parse_i32_tensor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("int.safetensors");
 
-    let data: Vec<u8> = [1i32, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect();
-    common::create_safetensors_file(
-        &path,
-        vec![("indices", "I32", vec![4], data)],
-    );
+    let data: Vec<u8> = [1i32, 2, 3, 4]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    common::create_safetensors_file(&path, vec![("indices", "I32", vec![4], data)]);
 
     let parser = SafetensorsParser;
     let model = parser.parse(&path).unwrap();

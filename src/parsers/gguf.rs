@@ -10,8 +10,9 @@ pub struct GgufParser;
 impl WeightParser for GgufParser {
     fn parse(&self, _path: &Path) -> Result<Model> {
         anyhow::bail!(
-            "GGUF parsing is not yet implemented. \
-             Contribute or use safetensors format for now."
+            "GGUF parsing is not implemented in this tree (format: \
+             https://github.com/ggerganov/ggml/blob/master/docs/gguf.md). \
+             Use safetensors or pass a different path."
         )
     }
 

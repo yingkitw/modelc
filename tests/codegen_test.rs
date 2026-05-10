@@ -1,24 +1,28 @@
 mod common;
 
 use std::fs;
+use std::net::SocketAddr;
 
-use modelc::codegen::native::NativeCodegen;
 use modelc::codegen::CodeGenerator;
+use modelc::codegen::native::NativeCodegen;
+
+fn addr(host_port: &str) -> SocketAddr {
+    host_port.parse().expect("socket addr")
+}
 
 #[test]
 fn test_codegen_creates_project_structure() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("weights.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("0.0.0.0:8080"))
+        .unwrap();
 
     assert!(project_dir.join("Cargo.toml").exists());
     assert!(project_dir.join("src/main.rs").exists());
-    assert!(project_dir.join("weights.safetensors").exists());
+    assert!(project_dir.join("embedded_weights.bin").exists());
 }
 
 #[test]
@@ -26,11 +30,10 @@ fn test_codegen_cargo_toml_content() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("test.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 9090).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("[::1]:9090"))
+        .unwrap();
 
     let cargo_toml = fs::read_to_string(project_dir.join("Cargo.toml")).unwrap();
     assert!(cargo_toml.contains("model-serve"));
@@ -45,11 +48,10 @@ fn test_codegen_main_rs_contains_model_name() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("test.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
 
     let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
     assert!(main_rs.contains("test_model"));
@@ -63,11 +65,10 @@ fn test_codegen_main_rs_contains_tensor_metadata() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("test.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
 
     let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
     assert!(main_rs.contains("\"weight\""));
@@ -76,34 +77,38 @@ fn test_codegen_main_rs_contains_tensor_metadata() {
 }
 
 #[test]
-fn test_codegen_embeds_port() {
+fn test_codegen_embeds_listen_address() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("test.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 9999).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("0.0.0.0:9999"))
+        .unwrap();
 
     let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
-    assert!(main_rs.contains("9999"));
+    assert!(main_rs.contains("0.0.0.0:9999"));
 }
 
 #[test]
-fn test_codegen_weight_file_copied() {
+fn test_codegen_embedded_blob_matches_model() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_data = b"some weight data here";
-    let weights_path = dir.path().join("my_weights.safetensors");
-    fs::write(&weights_path, weights_data).unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
 
-    let copied = fs::read(project_dir.join("my_weights.safetensors")).unwrap();
-    assert_eq!(copied, weights_data);
+    let mut names: Vec<&String> = model.tensors.keys().collect();
+    names.sort();
+    let mut expected: Vec<u8> = Vec::new();
+    for n in &names {
+        expected.extend_from_slice(&model.tensors[*n].data);
+    }
+
+    let embedded = fs::read(project_dir.join("embedded_weights.bin")).unwrap();
+    assert_eq!(embedded, expected);
 }
 
 #[test]
@@ -111,11 +116,10 @@ fn test_codegen_main_rs_compilable_structure() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("test.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
 
     let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
     assert!(main_rs.contains("#[tokio::main]"));
@@ -127,6 +131,7 @@ fn test_codegen_main_rs_compilable_structure() {
     assert!(main_rs.contains("InferRequest"));
     assert!(main_rs.contains("InferResponse"));
     assert!(main_rs.contains("ModelInfo"));
+    assert!(main_rs.contains("MODEL_ARCHITECTURE"));
 }
 
 #[test]
@@ -134,11 +139,10 @@ fn test_codegen_large_model() {
     let model = common::create_large_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("large.safetensors");
-    fs::write(&weights_path, b"dummy_large").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
 
     let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
     assert!(main_rs.contains("layer0.weight"));
@@ -154,11 +158,10 @@ fn test_codegen_total_params_in_output() {
     let model = common::create_test_model();
     let dir = tempfile::tempdir().unwrap();
 
-    let weights_path = dir.path().join("test.safetensors");
-    fs::write(&weights_path, b"dummy").unwrap();
-
     let codegen = NativeCodegen;
-    let project_dir = codegen.generate(&model, &weights_path, dir.path(), 8080).unwrap();
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
 
     let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
     let expected_params = model.total_params();

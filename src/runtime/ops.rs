@@ -34,10 +34,7 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     } else if a.shape.len() == 1 && b.shape.len() == 2 && a.shape[0] == b.shape[1] {
         add(b, a)
     } else {
-        panic!(
-            "add: incompatible shapes {:?} and {:?}",
-            a.shape, b.shape
-        );
+        panic!("add: incompatible shapes {:?} and {:?}", a.shape, b.shape);
     }
 }
 
@@ -83,7 +80,7 @@ pub fn relu(a: &Tensor) -> Tensor {
 }
 
 pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
-    assert!(a.shape.len() >= 1);
+    assert!(!a.shape.is_empty());
     let last_dim = *a.shape.last().unwrap();
     let n_elements = a.data.len();
     let n_vectors = n_elements / last_dim;
@@ -99,8 +96,7 @@ pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tenso
             / last_dim as f32;
         let inv_std = 1.0 / (var + eps).sqrt();
         for j in 0..last_dim {
-            data[base + j] =
-                (data[base + j] - mean) * inv_std * weight.data[j] + bias.data[j];
+            data[base + j] = (data[base + j] - mean) * inv_std * weight.data[j] + bias.data[j];
         }
     }
     Tensor::from_vec(data, a.shape.clone())

@@ -7,6 +7,11 @@ license = "Apache-2.0"
 repository = "https://github.com/yingkitw/modelc"
 homepage = "https://github.com/yingkitw/modelc"
 documentation = "https://docs.rs/modelc"
+build = "build.rs"
+
+[[bin]]
+name = "modelc"
+path = "src/bin/modelc.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -16,3 +21,4 @@ anyhow = "1"
 safetensors = "0.4"
 byteorder = "1"
 tempfile = "3"
+half = "2"

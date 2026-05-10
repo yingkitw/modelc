@@ -1,3 +1,5 @@
+//! `modelc` CLI entrypoint (`cargo install` / `cargo run --bin modelc`).
+
 use anyhow::Result;
 use clap::Parser;
 

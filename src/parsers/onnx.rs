@@ -10,8 +10,9 @@ pub struct OnnxParser;
 impl WeightParser for OnnxParser {
     fn parse(&self, _path: &Path) -> Result<Model> {
         anyhow::bail!(
-            "ONNX parsing is not yet implemented. \
-             Contribute or use safetensors format for now."
+            "ONNX parsing is not implemented here (spec: \
+             https://onnx.ai/onnx/intro/). \
+             Export to safetensors or use the onnx format with a future parser."
         )
     }
 

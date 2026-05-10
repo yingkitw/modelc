@@ -1,17 +1,18 @@
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use crate::cli::WeightFormat;
-use crate::codegen::native::NativeCodegen;
+use crate::cli::{ModelArch, WeightFormat, apply_arch_hint};
 use crate::codegen::CodeGenerator;
+use crate::codegen::native::NativeCodegen;
+use crate::parsers::WeightParser;
 use crate::parsers::gguf::GgufParser;
 use crate::parsers::onnx::OnnxParser;
 use crate::parsers::pytorch::PytorchParser;
 use crate::parsers::safetensors::SafetensorsParser;
-use crate::parsers::WeightParser;
 
 fn get_parser(format: &WeightFormat) -> Box<dyn WeightParser> {
     match format {
@@ -26,22 +27,25 @@ pub fn compile(
     input: &Path,
     output: Option<&Path>,
     format: Option<&WeightFormat>,
-    port: u16,
+    arch: Option<&ModelArch>,
+    listen: SocketAddr,
     target: Option<&str>,
     release: bool,
 ) -> Result<PathBuf> {
     let weight_format = format
         .cloned()
-        .or_else(|| WeightFormat::detect(&input.to_path_buf()))
+        .or_else(|| WeightFormat::detect(input))
         .context("could not detect weight format; specify with -f/--format")?;
 
     eprintln!("modelc: parsing {:?} ({:?})...", input, weight_format);
     let start = Instant::now();
 
     let parser = get_parser(&weight_format);
-    let model = parser.parse(input).with_context(|| {
-        format!("failed to parse {:?} as {}", input, parser.format_name())
-    })?;
+    let mut model = parser
+        .parse(input)
+        .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
+
+    apply_arch_hint(&mut model, arch);
 
     eprintln!(
         "  parsed {} tensors ({} params, {:.2} MB) in {:.2}s",
@@ -51,21 +55,18 @@ pub fn compile(
         start.elapsed().as_secs_f64(),
     );
 
-    eprintln!("modelc: generating native binary...");
+    eprintln!("modelc: generating native binary (listen: {})...", listen);
     let gen_start = Instant::now();
 
-    let output_path = output
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            let mut p = input.to_path_buf();
-            p.set_extension("");
-            PathBuf::from(format!("{}_serve", p.display()))
-        });
+    let output_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        let mut p = input.to_path_buf();
+        p.set_extension("");
+        PathBuf::from(format!("{}_serve", p.display()))
+    });
 
     let build_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let codegen = NativeCodegen;
-    let project_dir =
-        codegen.generate(&model, input, build_dir.path(), port)?;
+    let project_dir = codegen.generate(&model, build_dir.path(), listen)?;
 
     eprintln!(
         "  generated project in {:.2}s",
@@ -103,15 +104,12 @@ pub fn compile(
             project_dir.join(format!("target/{}/debug/model-serve", t))
         };
         if with_target.exists() {
-            std::fs::copy(&with_target, &output_path)
-                .context("failed to copy binary to output")?;
+            std::fs::copy(&with_target, &output_path).context("failed to copy binary to output")?;
         } else {
-            std::fs::copy(&bin_path, &output_path)
-                .context("failed to copy binary to output")?;
+            std::fs::copy(&bin_path, &output_path).context("failed to copy binary to output")?;
         }
     } else {
-        std::fs::copy(&bin_path, &output_path)
-            .context("failed to copy binary to output")?;
+        std::fs::copy(&bin_path, &output_path).context("failed to copy binary to output")?;
     }
 
     #[cfg(unix)]
@@ -134,13 +132,13 @@ pub fn compile(
 pub fn inspect(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
     let weight_format = format
         .cloned()
-        .or_else(|| WeightFormat::detect(&input.to_path_buf()))
+        .or_else(|| WeightFormat::detect(input))
         .context("could not detect weight format; specify with -f/--format")?;
 
     let parser = get_parser(&weight_format);
-    let model = parser.parse(input).with_context(|| {
-        format!("failed to parse {:?} as {}", input, parser.format_name())
-    })?;
+    let model = parser
+        .parse(input)
+        .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
 
     println!("Model: {}", model.name);
     println!("Architecture: {}", model.architecture);
