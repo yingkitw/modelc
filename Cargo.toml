@@ -1,0 +1,18 @@
+[package]
+name = "modelc"
+version = "0.1.0"
+edition = "2024"
+description = "Compile model weight files to standalone executable binaries"
+license = "Apache-2.0"
+repository = "https://github.com/yingkitw/modelc"
+homepage = "https://github.com/yingkitw/modelc"
+documentation = "https://docs.rs/modelc"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+safetensors = "0.4"
+byteorder = "1"
+tempfile = "3"
