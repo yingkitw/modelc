@@ -43,8 +43,8 @@ The primary user outcome: ship a **single binary** per model for serving or inte
 | Format       | Parser status |
 |-------------|---------------|
 | Safetensors | Implemented (`safetensors` crate). |
-| GGUF        | Implemented for **F32/F16/BF16** and contiguous integer blobs; quantized GGUF types error until dequant tooling exists. |
-| ONNX        | Implemented for inlined **initializer** tensors via [`onnx-rs`](https://crates.io/crates/onnx-rs); external/tensor-segment payloads rejected. |
+| GGUF        | Implemented for **F32/F16/BF16** and contiguous integer blobs; **Q4_0** and **Q8_0** blocks are **dequantized to F32** in IR. Other GGML quant types still error with a named type hint. |
+| ONNX        | Implemented for **initializer** tensors: inlined `raw_data` / typed fields, or **external** payloads (`external_data` `location` relative to the `.onnx` parent directory, optional `offset` / `length`) for the same supported dtypes as inline import. **Segmented** initializers are still rejected. |
 | PyTorch     | Implemented for **Safetensors-in-ZIP** (and standalone Safetensors mislabeled `.pt`/`.pth`); pickle-only checkpoints need export outside `modelc`. |
 
 ## Format detection

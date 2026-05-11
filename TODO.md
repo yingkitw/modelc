@@ -11,7 +11,7 @@ Previously listed follow-ups are **done** as of this tree:
 
 ## Optional next steps
 
-- Dequantize common GGUF block types → IR (or refuse with richer diagnostics).
-- ONNX: external/tensor-segment loaders; more dtypes without raw-only restriction.
+- GGUF: dequantize additional block types (e.g. Q4_K, Q5_0) or richer error recovery.
+- ONNX: tensor-segment loaders; more dtypes without raw-only restriction.
 - PyTorch: optional Python bridge or minimal pickle reconstruction (high effort).
 - Broader codegen: `gpt2`, `llama`, etc., beyond stacked linear + ReLU.

@@ -1,8 +1,5 @@
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-
-use modelc::model::{DataType, Model, TensorData};
 
 fn f32_to_bytes(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|f| f.to_le_bytes()).collect()
@@ -97,29 +94,14 @@ fn main() {
         ],
     );
 
-    let model = Model {
-        name: "simple_mlp".to_string(),
-        architecture: "mlp".to_string(),
-        tensors: {
-            let mut m = HashMap::new();
-            m.insert(
-                "layer1.weight".to_string(),
-                TensorData {
-                    shape: vec![hidden, hidden],
-                    dtype: DataType::F32,
-                    data: layer1_weight,
-                },
-            );
-            m
-        },
-        metadata: HashMap::new(),
-    };
-
-    eprintln!("Created {} with {} tensors", output_path.display(), 4,);
+    let param_count = hidden * hidden + hidden + hidden + 1;
+    let bytes_approx = (hidden * hidden + hidden + hidden + 1) * std::mem::size_of::<f32>();
     eprintln!(
-        "Model: {} ({} params, {:.2} KB)",
-        model.name,
-        hidden * hidden + hidden + hidden + 1,
-        (hidden * hidden * 4 + hidden * 4 + hidden * 4 + 4) as f64 / 1024.0,
+        "Wrote {} (~{} float params, ~{:.1} KiB of F32 weights). Try:\n  modelc inspect {:?}\n  modelc compile {:?} -o ./simple_mlp_serve",
+        output_path.display(),
+        param_count,
+        bytes_approx as f64 / 1024.0,
+        output_path,
+        output_path,
     );
 }

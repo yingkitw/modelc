@@ -1,5 +1,5 @@
-//! Minimal GGUF reader (little-endian layouts). Loads only contiguous (non‑quantized) tensors into
-//! [`Model`] IR; quantized blocks return a clear error. See
+//! GGUF reader (little-endian). Loads dense tensors and **Q4_0 / Q8_0** GGML blocks expanded to
+//! **`f32`** payloads in IR. Other quant types still error with a descriptive message. See
 //! [GGUF spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md).
 
 use std::collections::HashMap;
@@ -7,6 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use byteorder::{ByteOrder, LittleEndian};
+use half::f16;
 
 use crate::model::{DataType, Model, TensorData};
 use crate::parsers::WeightParser;
@@ -15,6 +16,8 @@ pub struct GgufParser;
 
 const GGML_TYPE_F32: u32 = 0;
 const GGML_TYPE_F16: u32 = 1;
+const GGML_TYPE_Q4_0: u32 = 2;
+const GGML_TYPE_Q8_0: u32 = 8;
 const GGML_TYPE_I8: u32 = 24;
 const GGML_TYPE_I16: u32 = 25;
 const GGML_TYPE_I32: u32 = 26;
@@ -106,9 +109,6 @@ fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
 
     let mut tensors = HashMap::new();
     for ti in &infos {
-        let dtype = ggml_type_to_datatype(ti.ggml_ty).with_context(|| {
-            format!("tensor {:?} unsupported GGML type {}", ti.name, ti.ggml_ty)
-        })?;
         let mut nelem: usize = 1;
         for d in &ti.dims {
             let du =
@@ -118,8 +118,14 @@ fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
                 .ok_or_else(|| anyhow!("tensor {:?} dimension product overflow", ti.name))?;
         }
 
-        let expected = tensor_elem_bytes(ti.ggml_ty, nelem)
-            .with_context(|| format!("tensor {:?}: cannot compute GGML blob size", ti.name))?;
+        let (dtype, expected) = descriptor_for_ggml(ti.ggml_ty, nelem).with_context(|| {
+            format!(
+                "tensor {:?}: {} (ggml type id {})",
+                ti.name,
+                ggml_type_hint(ti.ggml_ty),
+                ti.ggml_ty
+            )
+        })?;
         let ti_off_usize =
             usize::try_from(ti.offset).map_err(|_| anyhow!("tensor offset overflow"))?;
         let absolute = tensor_base
@@ -143,15 +149,9 @@ fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
             .map(|d| usize::try_from(*d).map_err(|_| anyhow!("tensor dim does not fit in usize")))
             .collect::<Result<Vec<_>>>()?;
 
-        if dtype == DataType::F32 && ti.ggml_ty == GGML_TYPE_F64 {
-            let n = raw_slice.len() / 8;
-            let mut f32blob = Vec::with_capacity(n * 4);
-            for chunk in raw_slice.chunks_exact(8) {
-                let f = f64::from_le_bytes(chunk.try_into().unwrap()) as f32;
-                f32blob.extend_from_slice(&f.to_le_bytes());
-            }
-            raw_slice = f32blob;
-        }
+        raw_slice = unpack_ggml_payload(ti.ggml_ty, &raw_slice, nelem).with_context(|| {
+            format!("tensor {:?} (type {}): payload decode", ti.name, ti.ggml_ty)
+        })?;
 
         tensors.insert(
             ti.name.clone(),
@@ -195,36 +195,150 @@ fn align_offset(pos: usize, alignment: usize) -> usize {
     if r == 0 { pos } else { pos + alignment - r }
 }
 
-fn ggml_type_to_datatype(ty: u32) -> Result<DataType> {
-    Ok(match ty {
-        GGML_TYPE_F32 => DataType::F32,
-        GGML_TYPE_F16 => DataType::F16,
-        GGML_TYPE_BF16 => DataType::BF16,
-        GGML_TYPE_I8 => DataType::I8,
-        GGML_TYPE_I16 => DataType::I16,
-        GGML_TYPE_I32 => DataType::I32,
-        GGML_TYPE_I64 => DataType::I64,
-        GGML_TYPE_F64 => DataType::F32,
+/// `(IR dtype, on-disk byte span for this tensor)`
+fn descriptor_for_ggml(ggml_ty: u32, nelem: usize) -> Result<(DataType, usize)> {
+    Ok(match ggml_ty {
+        GGML_TYPE_F32 => (DataType::F32, dense_byte_len(4, nelem)?),
+        GGML_TYPE_F16 | GGML_TYPE_BF16 => (dense_dtype(ggml_ty)?, dense_byte_len(2, nelem)?),
+        GGML_TYPE_I8 => (DataType::I8, dense_byte_len(1, nelem)?),
+        GGML_TYPE_I16 => (DataType::I16, dense_byte_len(2, nelem)?),
+        GGML_TYPE_I32 => (DataType::I32, dense_byte_len(4, nelem)?),
+        GGML_TYPE_I64 => (DataType::I64, dense_byte_len(8, nelem)?),
+        GGML_TYPE_F64 => (DataType::F32, dense_byte_len(8, nelem)?),
+        GGML_TYPE_Q4_0 | GGML_TYPE_Q8_0 => {
+            ensure_multiple_of(nelem, GGML_BLOCK_ELEMENTS, ggml_ty)?;
+            let bytes = quant_block_byte_len(ggml_ty, nelem)?;
+            (DataType::F32, bytes)
+        }
         _ => anyhow::bail!(
-            "quantized/exotic GGUF tensor type {ty}; export F32/F16/I* GGUF if you need this path",
+            "unsupported GGML type {ty} ({hint}) — convert to F32/F16/Q4_0/Q8_0 GGUF or strip weights",
+            ty = ggml_ty,
+            hint = ggml_type_hint(ggml_ty),
         ),
     })
 }
 
-fn tensor_elem_bytes(ggml_ty: u32, nelem: usize) -> Result<usize> {
-    Ok(match ggml_ty {
-        GGML_TYPE_F32 => nelem.checked_mul(4).context("byte size overflow for F32")?,
-        GGML_TYPE_F16 | GGML_TYPE_BF16 => nelem
-            .checked_mul(2)
-            .context("byte size overflow for F16/BF16")?,
-        GGML_TYPE_I8 => nelem,
-        GGML_TYPE_I16 => nelem.checked_mul(2).context("byte size overflow for I16")?,
-        GGML_TYPE_I32 => nelem.checked_mul(4).context("byte size overflow for I32")?,
-        GGML_TYPE_I64 | GGML_TYPE_F64 => nelem
-            .checked_mul(8)
-            .context("byte size overflow for I64/F64")?,
-        _ => anyhow::bail!("unsupported ggml tensor type {ggml_ty}"),
+const GGML_BLOCK_ELEMENTS: usize = 32;
+
+fn dense_byte_len(width: usize, nelem: usize) -> Result<usize> {
+    nelem
+        .checked_mul(width)
+        .filter(|&b| b > 0 || nelem == 0)
+        .context("dense tensor byte size overflow")
+}
+
+fn dense_dtype(ty: u32) -> Result<DataType> {
+    Ok(match ty {
+        GGML_TYPE_F16 => DataType::F16,
+        GGML_TYPE_BF16 => DataType::BF16,
+        _ => anyhow::bail!("internal: not a 2-byte dense type"),
     })
+}
+
+fn ensure_multiple_of(nelem: usize, k: usize, ty: u32) -> Result<()> {
+    if nelem == 0 {
+        return Ok(());
+    }
+    if !nelem.is_multiple_of(k) {
+        anyhow::bail!(
+            "element count {nelem} is not divisible by block size {k} for {}",
+            ggml_type_hint(ty)
+        );
+    }
+    Ok(())
+}
+
+fn quant_block_byte_len(ty: u32, nelem: usize) -> Result<usize> {
+    let blocks = nelem / GGML_BLOCK_ELEMENTS;
+    let per_block = match ty {
+        GGML_TYPE_Q4_0 => 18,
+        GGML_TYPE_Q8_0 => 34,
+        _ => anyhow::bail!("not a handled block-quant layout"),
+    };
+    blocks
+        .checked_mul(per_block)
+        .context("quant tensor byte overflow")
+}
+
+fn unpack_ggml_payload(ty: u32, blob: &[u8], nelem: usize) -> Result<Vec<u8>> {
+    Ok(match ty {
+        GGML_TYPE_F64 => f64_blob_to_f32(blob)?,
+        GGML_TYPE_Q4_0 => f32_blob_bytes(&dequantize_q4_0(blob, nelem)?),
+        GGML_TYPE_Q8_0 => f32_blob_bytes(&dequantize_q8_0(blob, nelem)?),
+        _ => blob.to_vec(),
+    })
+}
+
+fn f64_blob_to_f32(blob: &[u8]) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        blob.len().is_multiple_of(8),
+        "unexpected f64 payload length {}",
+        blob.len()
+    );
+    let mut out = Vec::with_capacity(blob.len() / 2);
+    for chunk in blob.chunks_exact(8) {
+        let f = f64::from_le_bytes(chunk.try_into().unwrap()) as f32;
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    Ok(out)
+}
+
+fn f32_blob_bytes(vals: &[f32]) -> Vec<u8> {
+    vals.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+fn dequantize_q4_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
+    anyhow::ensure!(nelem.is_multiple_of(GGML_BLOCK_ELEMENTS), "q4_0 uneven row");
+    const BLK_BYTES: usize = 18;
+    let nb = nelem / GGML_BLOCK_ELEMENTS;
+    anyhow::ensure!(src.len() == nb * BLK_BYTES);
+    let mut y = vec![0f32; nelem];
+
+    // Matches `dequantize_row_q4_0` in llama.cpp / ggml.
+    for i in 0..nb {
+        let bo = i * BLK_BYTES;
+        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let qs = &src[bo + 2..bo + BLK_BYTES];
+        for j in 0..16 {
+            let x0 = (qs[j] & 0x0F) as i32 - 8;
+            let x1 = (qs[j] >> 4) as i32 - 8;
+            y[i * GGML_BLOCK_ELEMENTS + j] = x0 as f32 * d;
+            y[i * GGML_BLOCK_ELEMENTS + j + GGML_BLOCK_ELEMENTS / 2] = x1 as f32 * d;
+        }
+    }
+    Ok(y)
+}
+
+fn dequantize_q8_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
+    anyhow::ensure!(nelem.is_multiple_of(GGML_BLOCK_ELEMENTS), "q8_0 uneven row");
+    const BLK_BYTES: usize = 34;
+    let nb = nelem / GGML_BLOCK_ELEMENTS;
+    anyhow::ensure!(src.len() == nb * BLK_BYTES);
+    let mut y = vec![0f32; nelem];
+    // Matches `dequantize_row_q8_0`: `half` delta × int8 quants (ggml-common.h layout).
+    for i in 0..nb {
+        let bo = i * BLK_BYTES;
+        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        for j in 0..GGML_BLOCK_ELEMENTS {
+            let q = src[bo + 2 + j] as i8;
+            y[i * GGML_BLOCK_ELEMENTS + j] = q as f32 * d;
+        }
+    }
+    Ok(y)
+}
+
+fn ggml_type_hint(ty: u32) -> &'static str {
+    match ty {
+        0 => "F32",
+        1 => "F16",
+        2 => "Q4_0",
+        3 => "Q4_1",
+        8 => "Q8_0",
+        28 => "F64",
+        24 => "I8",
+        30 => "BF16",
+        _ => "see ggml.ggml_type docs",
+    }
 }
 
 struct Cursor<'a> {
@@ -418,6 +532,8 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
+    use half::f16;
+
     use super::*;
 
     #[test]
@@ -477,19 +593,163 @@ mod tests {
 
     #[test]
     fn quantized_tensor_rejected() {
+        /// GGML_TYPE_Q4_K — still unsupported here (Q4_0 / Q8_0 are expanded to F32).
+        const GGML_TYPE_Q4_K: u32 = 12;
+
         let kv_block = encode_minimal_kv_generic();
         let w_name_block = gguf_string_bytes("w");
         let mut ti = Vec::new();
         ti.extend_from_slice(&w_name_block);
         ti.extend_from_slice(&1u32.to_le_bytes());
         ti.extend_from_slice(&128u64.to_le_bytes());
-        ti.extend_from_slice(&2u32.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q4_K.to_le_bytes());
         ti.extend_from_slice(&0u64.to_le_bytes());
 
         let r = build_minimal_roundtrip(kv_block, ti, &[0u8; 512]);
-        let err = r.expect_err("Q4 tensors should fail");
+        let err = r.expect_err("Q4_K tensors should fail");
         let s = format!("{err:#}");
-        assert!(s.contains("quantized/exotic GGUF tensor type"), "{s}",);
+        assert!(
+            s.contains("unsupported GGML type 12"),
+            "unexpected diagnostic: {s}"
+        );
+    }
+
+    #[test]
+    fn roundtrip_q4_0_zeros() -> Result<()> {
+        let kv_block = encode_minimal_kv_generic();
+        let w_name_block = gguf_string_bytes("w");
+        let mut ti = Vec::new();
+        ti.extend_from_slice(&w_name_block);
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&32u64.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q4_0.to_le_bytes());
+        ti.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut block = Vec::with_capacity(18);
+        block.extend_from_slice(&f16::from_f32(2.0).to_bits().to_le_bytes());
+        block.extend(vec![0x88u8; 16]);
+
+        let tensor_count: u64 = 1;
+        let kv_count: u64 = 1;
+        let alignment = 32usize;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+        buf.extend_from_slice(&kv_block);
+        buf.extend_from_slice(&ti);
+        buf.extend(std::iter::repeat_n(
+            0u8,
+            align_offset(buf.len(), alignment) - buf.len(),
+        ));
+        buf.extend_from_slice(&block);
+
+        let m = parse_gguf_bytes(&buf, Path::new("q4.gguf"))?;
+        let t = &m.tensors["w"];
+        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.shape, vec![32usize]);
+        assert_eq!(t.data, vec![0u8; 32 * 4]);
+        Ok(())
+    }
+
+    /// Q8_0: one 32-wide block, delta 1.0, first int8 quant = 3 ⇒ first dequant value 3.0, rest 0.
+    #[test]
+    fn roundtrip_q8_0_scaled_first_element() -> Result<()> {
+        let kv_block = encode_minimal_kv_generic();
+        let w_name_block = gguf_string_bytes("w");
+        let mut ti = Vec::new();
+        ti.extend_from_slice(&w_name_block);
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&32u64.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q8_0.to_le_bytes());
+        ti.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut block = Vec::with_capacity(34);
+        block.extend_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        for j in 0..GGML_BLOCK_ELEMENTS {
+            block.push(if j == 0 { 3i8 as u8 } else { 0 });
+        }
+
+        let tensor_count: u64 = 1;
+        let kv_count: u64 = 1;
+        let alignment = 32usize;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+        buf.extend_from_slice(&kv_block);
+        buf.extend_from_slice(&ti);
+        buf.extend(std::iter::repeat_n(
+            0u8,
+            align_offset(buf.len(), alignment) - buf.len(),
+        ));
+        buf.extend_from_slice(&block);
+
+        let m = parse_gguf_bytes(&buf, Path::new("q8.gguf"))?;
+        let t = &m.tensors["w"];
+        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.shape, vec![32usize]);
+        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
+        assert!((first - 3.0).abs() < 1e-5, "got {first}");
+        for i in 1..32 {
+            let v = f32::from_le_bytes(
+                std::convert::TryInto::try_into(&t.data[i * 4..(i + 1) * 4]).unwrap(),
+            );
+            assert!((v - 0.0).abs() < 1e-6, "idx {i} got {v}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn roundtrip_f64_tensor_to_f32_payload() -> Result<()> {
+        let kv_count: u64 = 1;
+        let tensor_count: u64 = 1;
+
+        let mut kv_block = Vec::new();
+        kv_block.extend_from_slice(&gguf_string_bytes("general.architecture"));
+        kv_block.extend_from_slice(&VAL_STRING.to_le_bytes());
+        kv_block.extend_from_slice(&gguf_string_bytes("custom"));
+
+        let mut ti = Vec::new();
+        ti.extend_from_slice(&gguf_string_bytes("d"));
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&2u64.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_F64.to_le_bytes());
+        ti.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+        buf.extend_from_slice(&kv_block);
+        buf.extend_from_slice(&ti);
+        let alignment = 32usize;
+        buf.extend(std::iter::repeat_n(
+            0u8,
+            align_offset(buf.len(), alignment) - buf.len(),
+        ));
+
+        let f64_blob: Vec<u8> = [1.25f64, -0.5f64]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        buf.extend_from_slice(&f64_blob);
+
+        let m = parse_gguf_bytes(&buf, Path::new("f64.gguf"))?;
+        assert_eq!(m.architecture, "custom");
+        let t = &m.tensors["d"];
+        assert_eq!(t.dtype, DataType::F32);
+        let out: Vec<f32> = t
+            .data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert!((out[0] - 1.25f32).abs() < 1e-5);
+        assert!((out[1] - (-0.5f32)).abs() < 1e-5);
+        Ok(())
     }
 
     fn gguf_string_bytes(s: &str) -> Vec<u8> {

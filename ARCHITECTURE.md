@@ -17,7 +17,7 @@ The **compiler** orchestrates parsing, optional `--arch` override, codegen, and 
 | `src/lib.rs` | Re-exports modules; `CLI_VERSION` (`CARGO_PKG_VERSION` + `MODELC_GIT_SHA` from `build.rs`). |
 | `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers. |
 | `src/compiler.rs` | Parser selection, `apply_arch_hint`, `compile`, `inspect`; tempfile + `cargo` subprocess. |
-| `src/parsers/` | Format parsers (`WeightParser` trait). Safetensors, **GGUF (non‑quant contiguous)**, **ONNX initializers**, and **Safetensors-in-ZIP / raw Safetensors** PyTorch paths are implemented (`onnx-rs`, `zip`; see each module for limits). |
+| `src/parsers/` | Format parsers (`WeightParser` trait). Safetensors, **GGUF** (dense + **Q4_0 / Q8_0 → F32** expansion), **ONNX initializers** (inline or **external_data** next to the model), and **Safetensors-in-ZIP / raw Safetensors** PyTorch paths are implemented (`onnx-rs`, `zip`; ONNX segment slices and many quant dtypes are still out of scope). |
 | `src/codegen/` | `CodeGenerator`; `native.rs` **streams** `embedded_weights.bin` (sorted tensors), `Cargo.toml`, `main.rs` with `/info` + `/infer`, optional **MLP GEMV/ReLU forward** when `architecture == "mlp"` naming matches; embeds listen `SocketAddr`. |
 | `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`). |
 

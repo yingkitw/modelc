@@ -41,6 +41,16 @@ cargo install --path .
 cargo test
 ```
 
+## Examples
+
+Runnable programs live under [`examples/`](./examples/); see [`examples/README.md`](./examples/README.md) for a table and quick flows. Typical invocations:
+
+```bash
+cargo run --example create_simple_model -- ./demo_mlp.safetensors
+cargo run --example parse_weights -- ./demo_mlp.safetensors safetensors
+cargo run --example runtime_inference
+```
+
 ## Usage
 
 Examples use the **`modelc`** command. Put it on your `PATH` with `cargo install --path .`, or after `cargo build --release` call the binary by path (see **Build**).
@@ -117,7 +127,7 @@ Before the first (`modelc`) publish:
 ## Repository layout
 
 - `src/` — CLI, parsers, `Model` IR, codegen, runtime helpers.
-- `examples/` — usage examples.
+- `examples/` — runnable `cargo --example` programs ([`examples/README.md`](./examples/README.md)).
 - `tests/` — integration tests.
 
 See [SPEC.md](./SPEC.md), [ARCHITECTURE.md](./ARCHITECTURE.md), and [TODO.md](./TODO.md).
