@@ -28,12 +28,12 @@ fn test_parse_multiple_tensors() {
     let path = dir.path().join("multi.safetensors");
 
     let w_data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    let b_data = common::f32_to_bytes(&[0.1, 0.2, 0.3]);
+    let b_data = common::f32_to_bytes(&[0.1, 0.2]);
 
     common::create_safetensors_file(
         &path,
         vec![
-            ("bias", "F32", vec![3], b_data),
+            ("bias", "F32", vec![2], b_data),
             ("weight", "F32", vec![2, 3], w_data),
         ],
     );
@@ -45,7 +45,7 @@ fn test_parse_multiple_tensors() {
     assert!(model.tensors.contains_key("weight"));
     assert!(model.tensors.contains_key("bias"));
     assert_eq!(model.tensors["weight"].shape, vec![2, 3]);
-    assert_eq!(model.tensors["bias"].shape, vec![3]);
+    assert_eq!(model.tensors["bias"].shape, vec![2]);
 }
 
 #[test]

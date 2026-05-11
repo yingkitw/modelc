@@ -17,8 +17,8 @@ The **compiler** orchestrates parsing, optional `--arch` override, codegen, and 
 | `src/lib.rs` | Re-exports modules; `CLI_VERSION` (`CARGO_PKG_VERSION` + `MODELC_GIT_SHA` from `build.rs`). |
 | `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers. |
 | `src/compiler.rs` | Parser selection, `apply_arch_hint`, `compile`, `inspect`; tempfile + `cargo` subprocess. |
-| `src/parsers/` | Format parsers (`WeightParser` trait). Safetensors is complete; GGUF / ONNX / PyTorch return structured errors pointing at upstream specs until implemented. |
-| `src/codegen/` | `CodeGenerator`; `native.rs` writes `embedded_weights.bin` (sorted tensor concat), `Cargo.toml`, `main.rs` with `/info` + `/infer` and embedded `SocketAddr`. |
+| `src/parsers/` | Format parsers (`WeightParser` trait). Safetensors, **GGUF (non‑quant contiguous)**, **ONNX initializers**, and **Safetensors-in-ZIP / raw Safetensors** PyTorch paths are implemented (`onnx-rs`, `zip`; see each module for limits). |
+| `src/codegen/` | `CodeGenerator`; `native.rs` **streams** `embedded_weights.bin` (sorted tensors), `Cargo.toml`, `main.rs` with `/info` + `/infer`, optional **MLP GEMV/ReLU forward** when `architecture == "mlp"` naming matches; embeds listen `SocketAddr`. |
 | `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`). |
 
 ## Key abstractions
@@ -58,11 +58,11 @@ Safetensors: optional header `__metadata__` is merged into `Model.metadata`; `ar
 
 - New formats: implement `WeightParser`, extend `WeightFormat` + detector.
 - Alternative emitters: new `CodeGenerator` impl(s).
-- Real inference: grow `runtime::ops`, then teach `native.rs` codegen to emit a non-placeholder `forward`.
+- Broader codegen: architectures beyond **`mlp`** stacked linear (+ library `runtime::ops` helpers).
 
 ## Dependencies (compiler crate)
 
-clap, serde/serde_json, anyhow, safetensors, byteorder, tempfile, **half** (F16/BF16 → f32 for `Runtime`), plus generated HTTP stack (axum/tokio) in emitted projects.
+clap, serde/serde_json, anyhow, safetensors, byteorder, tempfile, **half**, **onnx-rs**, **zip**, plus generated HTTP stack (axum/tokio) in emitted projects. **`half`** underpins FP16/BF16 → FP32 casts in `runtime::serve`.
 
 ## Design principles
 

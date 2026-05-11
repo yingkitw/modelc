@@ -69,13 +69,13 @@ fn test_tensor_data_f16() {
 #[test]
 fn test_model_total_params() {
     let model = common::create_test_model();
-    assert_eq!(model.total_params(), 9); // 6 (weight 2x3) + 3 (bias 3)
+    assert_eq!(model.total_params(), 8); // 6 (weight 2×3) + 2 bias
 }
 
 #[test]
 fn test_model_total_bytes() {
     let model = common::create_test_model();
-    assert_eq!(model.total_bytes(), 36); // 24 + 12
+    assert_eq!(model.total_bytes(), 32); // 24 + 8
 }
 
 #[test]
@@ -130,5 +130,5 @@ fn test_model_binary_serialization_roundtrip() {
     let bincode = serde_json::to_vec(&model).unwrap();
     let deserialized: Model = serde_json::from_slice(&bincode).unwrap();
     assert_eq!(deserialized.tensors["weight"].shape, vec![2, 3]);
-    assert_eq!(deserialized.tensors["bias"].shape, vec![3]);
+    assert_eq!(deserialized.tensors["bias"].shape, vec![2]);
 }

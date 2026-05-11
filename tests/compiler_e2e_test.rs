@@ -14,11 +14,11 @@ fn test_e2e_compile_safetensors() {
     let output_path = dir.path().join("test_model_serve");
 
     let w_data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    let b_data = common::f32_to_bytes(&[0.1, 0.2, 0.3]);
+    let b_data = common::f32_to_bytes(&[0.1, 0.2]);
     common::create_safetensors_file(
         &weights_path,
         vec![
-            ("bias", "F32", vec![3], b_data),
+            ("bias", "F32", vec![2], b_data),
             ("weight", "F32", vec![2, 3], w_data),
         ],
     );

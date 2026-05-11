@@ -21,8 +21,8 @@ fn test_runtime_from_raw_bias() {
     let runtime = Runtime::from_raw(&model.tensors);
 
     let bias = runtime.get("bias").unwrap();
-    assert_eq!(bias.shape, vec![3]);
-    let expected: Vec<f32> = vec![0.1, 0.2, 0.3];
+    assert_eq!(bias.shape, vec![2]);
+    let expected: Vec<f32> = vec![0.1, 0.2];
     for (a, b) in bias.data.iter().zip(expected.iter()) {
         assert!((a - b).abs() < 1e-6);
     }

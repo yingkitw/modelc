@@ -12,7 +12,7 @@ The primary user outcome: ship a **single binary** per model for serving or inte
 
 ## Non-goals (current scope)
 
-- Full graph capture and arbitrary framework-accurate inference for every ONNX or PyTorch export (parsers focus on **weights** into the IR; execution is still a placeholder forward pass in generated servers).
+- Full graph capture and arbitrary framework-accurate inference for every ONNX or PyTorch export (parsers focus on **weights** into the IR; generated servers emit a real **FP32 MLP** forward when `--arch mlp` matches `layerN.(weight,bias)` or `weight`/`bias`, otherwise `/infer` still echoes input).
 - Training or fine-tuning.
 - Replacing general-purpose inference servers (e.g. full ONNX Runtime) unless explicitly extended later.
 
@@ -43,9 +43,9 @@ The primary user outcome: ship a **single binary** per model for serving or inte
 | Format       | Parser status |
 |-------------|---------------|
 | Safetensors | Implemented (`safetensors` crate). |
-| GGUF        | Stub (helpful error + format doc link). |
-| ONNX        | Stub. |
-| PyTorch     | Stub (pickle/zip; export to Safetensors recommended). |
+| GGUF        | Implemented for **F32/F16/BF16** and contiguous integer blobs; quantized GGUF types error until dequant tooling exists. |
+| ONNX        | Implemented for inlined **initializer** tensors via [`onnx-rs`](https://crates.io/crates/onnx-rs); external/tensor-segment payloads rejected. |
+| PyTorch     | Implemented for **Safetensors-in-ZIP** (and standalone Safetensors mislabeled `.pt`/`.pth`); pickle-only checkpoints need export outside `modelc`. |
 
 ## Format detection
 
@@ -63,13 +63,13 @@ Serialization via `serde` for tests and tooling.
 ## Generated artifact (`model-serve`)
 
 - Rust edition **2021** in the emitted crate; **axum**, **tokio**, **serde**, **serde_json**.
-- Static bytes: `include_bytes!("../embedded_weights.bin")` built from the IR (sorted tensor names, concatenated raw payloads) so `byte_offset` / `byte_len` match the blob.
+- Static bytes: `include_bytes!("../embedded_weights.bin")` built from the IR (sorted tensor names, streamed concatenation straight to disk) so `byte_offset` / `byte_len` match the blob **without retaining a second full in-memory blob copy** during codegen.
 - **Listen address** parsed at runtime from a string literal produced from `modelc compile` (`--listen` or `--bind` + `--port`).
 
 ### HTTP API (stable enough to document)
 
 - **`GET /info`** — JSON object: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (array of tensor name strings).
-- **`POST /infer`** — request JSON `{ "input": number[] }` (`f32`), response `{ "output": number[] }`. Current implementation is a **placeholder** (echo / pass-through of `input`); real inference will map architecture + weights to ops over time.
+- **`POST /infer`** — request JSON `{ "input": number[] }` (`f32`), response `{ "output": number[] }`. When the manifest `architecture` is **`mlp`**, codegen lowers a **GEMV stack with bias (+ ReLU between hidden layers)** for strict `layerN.weight`/`layerN.bias` pairs (contiguous IDs) or a single `weight`/`bias`; all other architectures still **echo** the input until expanded.
 
 ## Library runtime
 

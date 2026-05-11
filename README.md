@@ -11,7 +11,7 @@ A **weight-file** workflow keeps checkpoints on disk (or blob storage): a generi
 - **Single deployable artifact.** One executable embeds that snapshot’s weights at compile time (`embedded_weights.bin` in the generated crate). Fewer broken paths and “wrong checkpoint on prod” drift.
 - **Reproducible bundles.** Build once; the binary ties together weights, embedded listen address, and metadata (`/info`) for a frozen snapshot auditors and CI can pin.
 - **Simpler operations.** Serve a minimal HTTP binary without shipping a separate weight tree next to every replica (you still pay image/binary size instead of mounting files).
-- **Clear boundary.** Parsing and tensor layout happen at **compile** time; runtime is deliberately small (`/infer` is still evolving toward real forward passes).
+- **Clear boundary.** Parsing and tensor layout happen at **compile** time; generated `model-serve` stays small (**stacked GEMV/ReLU when `architecture` is `mlp`**, echo stub otherwise).
 
 **When weight files remain the better fit:** rapid A/B swaps without rebuilds, very large checkpoints where embedding blows up images, multitenant “one server, many paths,” or ecosystems that assume on-disk formats (mmap, GGUF loaders, ONNX Runtime with external weights).
 
@@ -94,16 +94,25 @@ Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GG
 | Method | Path     | Body / response |
 |--------|----------|-----------------|
 | `GET`  | `/info`  | JSON: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (names). |
-| `POST` | `/infer` | Request JSON: `{ "input": [f32, ...] }`. Response: `{ "output": [f32, ...] }` (placeholder passthrough until real graph lowering exists). |
+| `POST` | `/infer` | Request JSON: `{ "input": [f32, ...] }`. Response: `{ "output": [f32, ...] }`. If the embedded **`architecture`** is **`mlp`**, codegen emits a **stacked GEMV + bias (+ ReLU between hidden layers)** using `layerN.weight`/`layerN.bias` (strictly contiguous indices) or a single `weight`/`bias`; other architectures keep the lightweight input echo stub. |
 
 Both responses are `application/json`.
+
+## crates.io checklist
+
+Before the first (`modelc`) publish:
+
+1. Bump `Cargo.toml` `version`, tag `vX.Y.Z`, run `cargo publish --dry-run`.
+2. Snapshot `modelc --help` / subcommand help after any CLI churn (crate README can embed the summary).
+3. After the first publish, add a crates.io version badge ([shields.io versioning](https://shields.io/category/version); crate URL https://crates.io/crates/modelc once live).
+4. Maintain a concise changelog (`CHANGELOG.md` optional) noting parser/format support changes.
 
 ## Format references (parsers / exports)
 
 - Safetensors — [huggingface/safetensors](https://github.com/huggingface/safetensors)
 - GGUF — [GGML GGUF notes](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
 - ONNX — [onnx.ai](https://onnx.ai/onnx/intro/)
-- PyTorch checkpoints — pickle/zip layouts; prefer Safetensors exports for portability.
+- PyTorch checkpoints — accepts mislabeled standalone Safetensors bytes and Torch **ZIP** containers that nest `*.safetensors` payloads; pickled-only checkpoints should be exported to Safetensors, ONNX, or GGUF externally.
 
 ## Repository layout
 

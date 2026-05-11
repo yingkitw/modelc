@@ -24,14 +24,11 @@ pub fn create_test_model() -> Model {
         },
     );
 
-    let bias_data: Vec<u8> = [0.1f32, 0.2, 0.3]
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    let bias_data: Vec<u8> = [0.1f32, 0.2].iter().flat_map(|f| f.to_le_bytes()).collect();
     tensors.insert(
         "bias".to_string(),
         TensorData {
-            shape: vec![3],
+            shape: vec![2],
             dtype: DataType::F32,
             data: bias_data,
         },

@@ -22,3 +22,5 @@ safetensors = "0.4"
 byteorder = "1"
 tempfile = "3"
 half = "2"
+onnx-rs = "0.1.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

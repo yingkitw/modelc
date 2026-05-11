@@ -1,10 +1,17 @@
 # TODO
 
-Most backlog items from the previous list are implemented (arch wiring, sniffing, embedded blob codegen, `--bind` / `--listen`, runtime dtypes beyond F32, CI, Apache `LICENSE`, documented HTTP surface, upstream format links).
+Previously listed follow-ups are **done** as of this tree:
 
-## Optional follow-ups
+| Item | Notes |
+|------|------|
+| GGUF / ONNX / PyTorch parsers | `src/parsers/gguf.rs`, `onnx.rs`, `pytorch.rs` (+ `Cargo.toml`: `onnx-rs`, `zip`). |
+| MLP codegen forward | [`src/codegen/native.rs`](./src/codegen/native.rs): FP32 GEMV chain when `architecture == "mlp"` and tensor naming matches; echo otherwise. |
+| Compile peak RAM | Embedding writes stream via `BufWriter` (no auxiliary `Vec` blob doubling tensor RAM). |
+| crates.io checklist | README “crates.io checklist” subsection. |
 
-- [ ] Implement real GGUF / ONNX / PyTorch parsers (beyond stubs with doc links).
-- [ ] Teach codegen to emit a non-placeholder `forward` for selected `ModelArch` + operator coverage.
-- [ ] Reduce peak memory during `compile` for huge models (avoid duplicate tensor buffers between IR + blob write when possible).
-- [ ] crates.io publishing checklist (`README` badge, `--help` snapshot, changelog).
+## Optional next steps
+
+- Dequantize common GGUF block types → IR (or refuse with richer diagnostics).
+- ONNX: external/tensor-segment loaders; more dtypes without raw-only restriction.
+- PyTorch: optional Python bridge or minimal pickle reconstruction (high effort).
+- Broader codegen: `gpt2`, `llama`, etc., beyond stacked linear + ReLU.

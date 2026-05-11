@@ -151,6 +151,40 @@ fn test_codegen_large_model() {
     assert!(main_rs.contains("layer0.ln_bias"));
     assert!(main_rs.contains("layer1.weight"));
     assert!(main_rs.contains("layer1.bias"));
+    assert!(main_rs.contains("matmul_bias"));
+    assert!(main_rs.contains("relu_inplace"));
+}
+
+#[test]
+fn codegen_mlp_single_stack_emits_matmul() {
+    let mut model = common::create_test_model();
+    model.architecture = "mlp".to_string();
+    let dir = tempfile::tempdir().unwrap();
+
+    let codegen = NativeCodegen;
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8080"))
+        .unwrap();
+
+    let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
+    assert!(main_rs.contains("matmul_bias"));
+    assert!(main_rs.contains("decode_f32"));
+}
+
+#[test]
+fn codegen_generic_arch_keeps_echo_forward() {
+    let mut model = common::create_test_model();
+    model.architecture = "generic".to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let codegen = NativeCodegen;
+    let project_dir = codegen
+        .generate(&model, dir.path(), addr("127.0.0.1:8081"))
+        .unwrap();
+
+    let main_rs = fs::read_to_string(project_dir.join("src/main.rs")).unwrap();
+    assert!(!main_rs.contains("matmul_bias"));
+    assert!(main_rs.contains("input.to_vec()"));
 }
 
 #[test]
