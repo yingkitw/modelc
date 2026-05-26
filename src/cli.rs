@@ -15,7 +15,7 @@ const MAX_FULL_SNIFF_BYTES: u64 = 64 * 1024 * 1024;
 #[command(
     name = "modelc",
     version = crate::CLI_VERSION,
-    about = "Compile model weight files to standalone executable binaries"
+    about = "Package and run model files — single-file artifacts, local inference"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -82,6 +82,62 @@ pub enum Commands {
 
         #[arg(short = 'f', long = "format", help = "Input weight format", value_enum)]
         format: Option<WeightFormat>,
+    },
+
+    #[command(about = "Pack model weights into a single .modelc artifact")]
+    Pack {
+        #[arg(help = "Path to model weights file", value_hint = ValueHint::FilePath)]
+        input: PathBuf,
+
+        #[arg(short, long, help = "Output artifact path", value_hint = ValueHint::FilePath)]
+        output: Option<PathBuf>,
+
+        #[arg(short = 'f', long = "format", help = "Input weight format", value_enum)]
+        format: Option<WeightFormat>,
+
+        #[arg(
+            long,
+            help = "Model architecture hint (overrides parsed value when set)",
+            value_enum
+        )]
+        arch: Option<ModelArch>,
+
+        #[arg(long, help = "Compress tensor data with zstd")]
+        compress: bool,
+    },
+
+    #[command(about = "Run a .modelc artifact (starts local HTTP server)")]
+    Run {
+        #[arg(help = "Path to .modelc artifact or model name", value_hint = ValueHint::FilePath)]
+        input: String,
+
+        #[arg(
+            short = 'p',
+            long,
+            default_value_t = 8080u16,
+            help = "Listening port"
+        )]
+        port: u16,
+
+        #[arg(
+            long,
+            default_value = "127.0.0.1",
+            value_name = "IP",
+            help = "IP address to bind"
+        )]
+        bind: String,
+    },
+
+    #[command(about = "List installed model packages")]
+    List,
+
+    #[command(about = "Pull a model package from a URL or path into the local store")]
+    Pull {
+        #[arg(help = "Source URL or file path")]
+        source: String,
+
+        #[arg(short, long, help = "Local name for the model")]
+        name: Option<String>,
     },
 }
 

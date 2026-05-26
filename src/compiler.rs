@@ -118,6 +118,10 @@ pub fn compile(
         std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o755))
             .context("failed to set executable permissions")?;
     }
+    #[cfg(windows)]
+    {
+        // Windows does not use POSIX executable bits; the file is already runnable.
+    }
 
     eprintln!(
         "  compiled in {:.2}s -> {:?}",
@@ -125,6 +129,43 @@ pub fn compile(
         output_path,
     );
     eprintln!("modelc: done.");
+
+    Ok(output_path)
+}
+
+pub fn pack(
+    input: &Path,
+    output: Option<&Path>,
+    format: Option<&WeightFormat>,
+    arch: Option<&ModelArch>,
+    compress: bool,
+) -> Result<PathBuf> {
+    let weight_format = format
+        .cloned()
+        .or_else(|| WeightFormat::detect(input))
+        .context("could not detect weight format; specify with -f/--format")?;
+
+    let parser = get_parser(&weight_format);
+    let mut model = parser
+        .parse(input)
+        .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
+
+    apply_arch_hint(&mut model, arch);
+
+    let output_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        let mut p = input.to_path_buf();
+        p.set_extension("modelc");
+        p
+    });
+
+    eprintln!("modelc: packing {} tensors -> {:?}...", model.tensors.len(), output_path);
+    crate::pack::pack(&model, &output_path, compress)?;
+    if compress {
+        let raw = model.total_bytes();
+        let packed = std::fs::metadata(&output_path)?.len();
+        eprintln!("  compressed: {} bytes -> {} bytes ({:.1}%)", raw, packed, 100.0 * packed as f64 / raw.max(1) as f64);
+    }
+    eprintln!("modelc: done -> {:?}", output_path);
 
     Ok(output_path)
 }

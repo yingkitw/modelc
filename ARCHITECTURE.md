@@ -3,10 +3,10 @@
 ## High-level pipeline
 
 ```
-weights file → WeightParser → Model → NativeCodegen → temp crate → cargo build → model-serve binary
+weights file → WeightParser → Model → NativeCodegen → temp crate → cargo build → single-file artifact
 ```
 
-The **compiler** orchestrates parsing, optional `--arch` override, codegen, and the external `cargo` invocation. The **CLI** (`clap`) dispatches `compile` and `inspect`.
+The **compiler** orchestrates parsing, optional `--arch` override, codegen, and the external `cargo` invocation. The **CLI** (`clap`) dispatches `inspect`, `compile`, and `run`. The final output is a **single-file artifact** containing all model data, optimized for size and fast loading, runnable on macOS/Windows/Linux with Apple Silicon acceleration where available.
 
 ## Crate layout
 
@@ -59,6 +59,7 @@ Safetensors: optional header `__metadata__` is merged into `Model.metadata`; `ar
 - New formats: implement `WeightParser`, extend `WeightFormat` + detector.
 - Alternative emitters: new `CodeGenerator` impl(s).
 - Broader codegen: architectures beyond **`mlp`** stacked linear (+ library `runtime::ops` helpers).
+- Platform backends: Metal for Apple Silicon, CPU SIMD paths (AVX/NEON) for other targets.
 
 ## Dependencies (compiler crate)
 
@@ -68,4 +69,6 @@ clap, serde/serde_json, anyhow, safetensors, byteorder, tempfile, **half**, **on
 
 - Keep **`Model`** small and stable.
 - Embedding uses a **single blob** so tensor metadata offsets are truthful.
+- The packaged artifact is a **single file** optimized for size and fast loading.
 - **Explicit** `-f/--format` when sniffing hits the 64 MiB Safetensors cap or ambiguous huge files.
+- Cross-platform by default; acceleration is opt-in per platform backend.

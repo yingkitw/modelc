@@ -2,13 +2,14 @@
 
 ## Purpose
 
-**modelc** is a command-line tool and library that:
+**modelc** is a Rust-based command-line tool and library that:
 
-1. **Loads** neural network **weights** from supported on-disk formats.
-2. **Normalizes** them into an internal **`Model`** (named tensors with shape, dtype, and raw bytes).
-3. **Emits** a temporary Rust **crate** that embeds tensors in a **single contiguous blob** (`embedded_weights.bin`) plus static `TensorMeta` offsets, and builds to a **standalone executable** (`model-serve`) with an HTTP listener address fixed at compile time.
+1. **Loads** neural network **weights** from supported on-disk formats (Safetensors, GGUF, ONNX, PyTorch).
+2. **Normalizes** them into an internal **`Model`** IR (named tensors with shape, dtype, and raw bytes).
+3. **Packages** them into a **single optimized artifact** that contains all model data and can be loaded by the CLI for inference.
+4. **Runs** inference locally with an HTTP API, optimized for size, footprint, and performance.
 
-The primary user outcome: ship a **single binary** per model for serving or integration, without requiring Python or the original framework at runtime.
+The primary user outcome: a **single file** per model that can be inspected, moved, and run without Python or the original framework at runtime — similar to the experience of Ollama, vLLM, or SGLang.
 
 ## Non-goals (current scope)
 
@@ -75,6 +76,17 @@ Serialization via `serde` for tests and tooling.
 
 `modelc::runtime::ops` exposes tensor helpers (`matmul`, `linear`, `softmax`, …). `Runtime::from_raw` loads tensors from `TensorData` into `f32` buffers for **F32, F16, BF16, I64, I32, I16, I8, U8, Bool** (integer/bool values are cast to `f32` for the internal representation).
 
+## Platform support
+
+- **macOS** — primary development and runtime target; Apple Silicon M-series acceleration via Metal.
+- **Windows** — runtime target; CLI and generated server build and run.
+- **Linux** — runtime target; CLI and generated server build and run.
+
+## Acceleration
+
+- **Apple Silicon (M-series):** Metal GPU acceleration for compatible operations.
+- **Future:** CPU-optimized paths (AVX, NEON) for non-Metal targets.
+
 ## Compatibility
 
 - **Host:** `cargo` required for `compile`.
@@ -84,3 +96,5 @@ Serialization via `serde` for tests and tooling.
 
 - `cargo test` and CI (`fmt`, `clippy -D warnings`, `test`) pass.
 - `inspect` / `compile` succeed on supported fixtures and examples where parsers are implemented.
+- Packaged artifact is a **single file** containing all model data.
+- Artifact size and load time are optimized relative to raw weight directories.

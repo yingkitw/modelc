@@ -1,19 +1,17 @@
 # modelc
 
-**modelc** compiles model weight files into standalone executable binaries that embed a **deterministic weight blob** (`embedded_weights.bin`) and expose a small HTTP API ([Axum](https://github.com/tokio-rs/axum) / Tokio).
+**modelc** is a Rust-based CLI that packages model files into a **single, self-contained artifact** optimized for size, footprint, and performance. It supports multiple model formats and provides an inference experience similar to **Ollama**, **vLLM**, and **SGLang** — run models locally with minimal setup.
 
-## Why modelc (vs. loading weights from disk)
+## Why modelc
 
-A **weight-file** workflow keeps checkpoints on disk (or blob storage): a generic runtime parses the format, memory-maps tensors, then runs inference. That is flexible—swap files without rebuilding—but you always coordinate **runner + paths + versioning + mounts**.
+- **Single-file packaging.** One file contains all model data and can be loaded directly by the CLI. No external weight trees, no path coordination, no "wrong checkpoint" drift.
+- **Size and performance optimized.** The packaged format is designed for minimal footprint and fast loading. Parsing and tensor layout happen at package time, so runtime overhead is low.
+- **Cross-platform.** Runs on **macOS**, **Windows**, and **Linux** from the same toolchain.
+- **Apple Silicon acceleration.** Native support for Apple Silicon **M-series** chips via Metal acceleration.
+- **Multiple format support.** Compatible with **Safetensors**, **GGUF**, **ONNX**, and **PyTorch** checkpoints.
+- **Simple operations.** `modelc run`, `modelc inspect`, `modelc compile` — a minimal command set for packaging, inspection, and serving.
 
-**modelc** favors the opposite trade‑off:
-
-- **Single deployable artifact.** One executable embeds that snapshot’s weights at compile time (`embedded_weights.bin` in the generated crate). Fewer broken paths and “wrong checkpoint on prod” drift.
-- **Reproducible bundles.** Build once; the binary ties together weights, embedded listen address, and metadata (`/info`) for a frozen snapshot auditors and CI can pin.
-- **Simpler operations.** Serve a minimal HTTP binary without shipping a separate weight tree next to every replica (you still pay image/binary size instead of mounting files).
-- **Clear boundary.** Parsing and tensor layout happen at **compile** time; generated `model-serve` stays small (**stacked GEMV/ReLU when `architecture` is `mlp`**, echo stub otherwise).
-
-**When weight files remain the better fit:** rapid A/B swaps without rebuilds, very large checkpoints where embedding blows up images, multitenant “one server, many paths,” or ecosystems that assume on-disk formats (mmap, GGUF loaders, ONNX Runtime with external weights).
+**When weight files remain the better fit:** rapid A/B swaps without repackaging, very large checkpoints where embedding blows up artifacts, multitenant “one server, many paths,” or ecosystems that assume on-disk formats (mmap, GGUF loaders, ONNX Runtime with external weights).
 
 See [SPEC.md](./SPEC.md) for scope and limits.
 
