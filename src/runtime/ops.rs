@@ -1,10 +1,29 @@
 use crate::runtime::tensor::Tensor;
 
+#[cfg(target_os = "macos")]
+use crate::metal::MetalBackend;
+
 pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
+    // Try GPU acceleration on macOS
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(backend) = MetalBackend::new() {
+            if let Some(result) = backend.matmul_gpu(a, b) {
+                return result;
+            }
+        }
+    }
+
+    // Fallback to optimized CPU implementation
+    matmul_cpu(a, b)
+}
+
+fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
     let (m, k) = (a.shape[0], a.shape[1]);
-    let (_, n) = (b.shape[0], b.shape[1]);
+    let n = b.shape[1];
     assert_eq!(a.shape[1], b.shape[0]);
 
+    // Original implementation for correctness
     let mut out = vec![0.0f32; m * n];
     for i in 0..m {
         for j in 0..n {
@@ -52,22 +71,32 @@ pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
     let inner: usize = a.shape[axis + 1..].iter().product();
     let stride = dim * inner;
 
-    let mut data = a.data.clone();
+    let mut data = Vec::with_capacity(a.data.len());
+
     for o in 0..outer {
         for i in 0..inner {
             let base = o * stride + i;
-            let max = (0..dim)
-                .map(|d| data[base + d * inner])
-                .fold(f32::NEG_INFINITY, f32::max);
-            let sum: f32 = (0..dim)
-                .map(|d| {
-                    let val = (data[base + d * inner] - max).exp();
-                    data[base + d * inner] = val;
-                    val
-                })
-                .sum();
+
+            // Single pass: find max, compute exp, accumulate sum
+            let mut max = a.data[base + i];
             for d in 0..dim {
-                data[base + d * inner] /= sum;
+                let val = a.data[base + d * inner];
+                if val > max {
+                    max = val;
+                }
+            }
+
+            let mut sum = 0.0f32;
+            let temp_offset = data.len();
+            for d in 0..dim {
+                let val = (a.data[base + d * inner] - max).exp();
+                data.push(val);
+                sum += val;
+            }
+
+            // Normalize the values we just added
+            for d in 0..dim {
+                data[temp_offset + d] /= sum;
             }
         }
     }
@@ -85,18 +114,22 @@ pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tenso
     let n_elements = a.data.len();
     let n_vectors = n_elements / last_dim;
 
-    let mut data = a.data.clone();
+    let mut data = Vec::with_capacity(n_elements);
+
     for i in 0..n_vectors {
         let base = i * last_dim;
-        let mean: f32 = data[base..base + last_dim].iter().sum::<f32>() / last_dim as f32;
-        let var: f32 = data[base..base + last_dim]
-            .iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f32>()
-            / last_dim as f32;
+        let slice = &a.data[base..base + last_dim];
+
+        // Single-pass: compute mean
+        let mean: f32 = slice.iter().sum::<f32>() / last_dim as f32;
+
+        // Second pass: compute variance and apply normalization
+        let var: f32 = slice.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / last_dim as f32;
         let inv_std = 1.0 / (var + eps).sqrt();
-        for j in 0..last_dim {
-            data[base + j] = (data[base + j] - mean) * inv_std * weight.data[j] + bias.data[j];
+
+        // Apply normalization in single loop
+        for (j, &val) in slice.iter().enumerate() {
+            data.push((val - mean) * inv_std * weight.data[j] + bias.data[j]);
         }
     }
     Tensor::from_vec(data, a.shape.clone())

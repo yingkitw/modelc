@@ -1,6 +1,6 @@
 # modelc
 
-**modelc** is a Rust-based CLI that packages model files into a **single, self-contained artifact** optimized for size, footprint, and performance. It supports multiple model formats and provides an inference experience similar to **Ollama**, **vLLM**, and **SGLang** — run models locally with minimal setup.
+**modelc** is a Rust-based CLI that packages model files into **single, self-contained artifacts** optimized for size, footprint, and performance. It supports multiple model formats and provides an inference experience similar to **Ollama**, **vLLM**, and **SGLang** — run models locally with minimal setup.
 
 ## Why modelc
 
@@ -53,6 +53,36 @@ cargo run --example runtime_inference
 
 Examples use the **`modelc`** command. Put it on your `PATH` with `cargo install --path .`, or after `cargo build --release` call the binary by path (see **Build**).
 
+### Core workflow
+
+**Pack** models into `.modelc` single-file artifacts:
+
+```bash
+modelc pack path/to/model.safetensors -o my-model.modelc
+modelc pack path/to/model.gguf --compress -o my-model.modelc
+```
+
+**Run** inference from local artifacts:
+
+```bash
+modelc run my-model.modelc
+modelc run my-model.modelc --port 8080
+```
+
+**List** locally stored models:
+
+```bash
+modelc list
+```
+
+**Pull** models from remote sources (future):
+
+```bash
+modelc pull username/model-name
+```
+
+### Legacy compile workflow
+
 Inspect weights (tensor names, shapes, dtypes, sizes):
 
 ```bash
@@ -75,12 +105,23 @@ From the built artifact in this repository (no install):
 
 `modelc --help` and `modelc --version` show subcommands and semver plus a short git revision (from `build.rs` when `.git` is present).
 
-### `compile` networking
+### Pack flags
+
+- **`--compress`** — use zstd compression to reduce artifact size (produces version 2 format).
+- **`--arch`** — optional hint (`llama`, `gpt2`, `mlp`, …) stored in the model.
+- **`--format` / `-f`** — weight format when extensions or magic-byte sniffing are ambiguous.
+- **`-o`** — output path for the `.modelc` artifact.
+
+### Run flags
+
+- **`--port`** — HTTP server port (default `8080`).
+- **`--bind`** — HTTP server bind address (default `0.0.0.0`).
+
+### Compile flags (legacy)
 
 The generated `model-serve` binary binds to **`--bind`** (IP, default `0.0.0.0`) plus **`--port`** (default `8080`), unless **`--listen ADDR:PORT`** is set, which wins and is embedded verbatim (IPv6 literals such as `[::1]:8080` are supported).
 
-### `compile` other flags
-
+Other compile flags:
 - **`--arch`** — optional hint (`llama`, `gpt2`, …) stored in the model and surfaced in `/info`.
 - **`--format` / `-f`** — weight format when extensions or magic-byte sniffing are ambiguous.
 - **`--target`** — passed through to `cargo build --target`.
@@ -97,7 +138,7 @@ Supported input formats (`-f` when needed):
 
 Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GGUF / zip (PyTorch-ish) / small Safetensors blobs (see [SPEC.md](./SPEC.md)).
 
-## Generated server HTTP API (`model-serve`)
+## HTTP API (run + model-serve)
 
 | Method | Path     | Body / response |
 |--------|----------|-----------------|
@@ -133,3 +174,4 @@ See [SPEC.md](./SPEC.md), [ARCHITECTURE.md](./ARCHITECTURE.md), and [TODO.md](./
 ## License
 
 Licensed under the Apache License, Version 2.0 ([LICENSE](./LICENSE)).
+

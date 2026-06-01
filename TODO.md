@@ -8,9 +8,10 @@
 - [x] crates.io checklist --- README crates.io checklist subsection.
 - [x] Single-file artifact format --- .modelc binary format with JSON header + raw tensor blob (src/pack.rs).
 - [x] Cross-platform runtime --- dirs for platform-specific store paths; #[cfg] guards for Unix/Windows permissions.
-- [x] Apple Silicon Metal acceleration --- Skeleton in src/metal.rs with metal crate (macOS only). Full GPU kernels to be implemented.
-- [x] Ollama-like UX --- modelc run, modelc pull, modelc list with local model store (src/store.rs).
+- [x] Apple Silicon Metal acceleration --- Skeleton in src/metal.rs with metal crate (macOS only). Compute shaders in src/compute/shaders.metal.
+- [x] Ollama-like UX --- modelc pack, modelc run, modelc pull, modelc list with local model store (src/store.rs).
 - [x] Size optimization --- --compress flag on pack uses zstd compression (version 2 artifact format).
+- [x] Local model store management --- Cross-platform model directory with platform-specific paths (src/store.rs).
 
 ## Active (aligned with PRODUCT.md)
 

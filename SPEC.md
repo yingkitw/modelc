@@ -19,6 +19,42 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 ## User-facing commands
 
+### `pack`
+
+**Input:** path to weights file; optional `-f`, `-o`, `--arch`, `--compress`.
+
+**Output:** `.modelc` single-file artifact containing JSON header + tensor blob (optionally compressed).
+
+**Side effects:** writes artifact file to specified path.
+
+**Errors:** parse failure; invalid output path; compression failure.
+
+### `run`
+
+**Input:** path to `.modelc` artifact (or uses default store); optional `--port`, `--bind`.
+
+**Output:** HTTP server listening for inference requests.
+
+**Side effects:** loads artifact into memory, starts HTTP server.
+
+**Errors:** missing artifact; invalid artifact format; server bind failure.
+
+### `list`
+
+**Input:** none (uses default model store).
+
+**Output:** stdout list of locally stored `.modelc` artifacts with metadata.
+
+**Errors:** store access failure.
+
+### `pull` (future)
+
+**Input:** model identifier (e.g., `username/model-name`).
+
+**Output:** downloaded `.modelc` artifact stored locally.
+
+**Errors:** network failure; invalid model identifier.
+
 ### `inspect`
 
 **Input:** path to a weights file; optional `-f` / `--format`.
@@ -27,7 +63,7 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 **Errors:** missing or undetectable format; parse failure.
 
-### `compile`
+### `compile` (legacy)
 
 **Input:** path to weights; optional `-f`, `-o`, `--arch`, `--bind`, `--port`, **`--listen ADDR:PORT`** (overrides bind+port), `--target`, **`--debug`** (use debug profile on the emitted crate instead of `--release`).
 
@@ -61,13 +97,24 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 Serialization via `serde` for tests and tooling.
 
-## Generated artifact (`model-serve`)
+## Artifact formats
+
+### `.modelc` (primary)
+
+Single-file binary format with:
+- **JSON header** — model metadata (name, architecture, version, compression flag)
+- **Tensor blob** — concatenated tensor data in sorted order
+- **Compression** — optional zstd compression (version 2 format)
+
+Created by `pack`, consumed by `run`.
+
+### `model-serve` binary (legacy)
 
 - Rust edition **2021** in the emitted crate; **axum**, **tokio**, **serde**, **serde_json**.
 - Static bytes: `include_bytes!("../embedded_weights.bin")` built from the IR (sorted tensor names, streamed concatenation straight to disk) so `byte_offset` / `byte_len` match the blob **without retaining a second full in-memory blob copy** during codegen.
 - **Listen address** parsed at runtime from a string literal produced from `modelc compile` (`--listen` or `--bind` + `--port`).
 
-### HTTP API (stable enough to document)
+### HTTP API (both `run` and `model-serve`)
 
 - **`GET /info`** — JSON object: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (array of tensor name strings).
 - **`POST /infer`** — request JSON `{ "input": number[] }` (`f32`), response `{ "output": number[] }`. When the manifest `architecture` is **`mlp`**, codegen lowers a **GEMV stack with bias (+ ReLU between hidden layers)** for strict `layerN.weight`/`layerN.bias` pairs (contiguous IDs) or a single `weight`/`bias`; all other architectures still **echo** the input until expanded.
@@ -84,7 +131,7 @@ Serialization via `serde` for tests and tooling.
 
 ## Acceleration
 
-- **Apple Silicon (M-series):** Metal GPU acceleration for compatible operations.
+- **Apple Silicon (M-series):** Metal GPU acceleration skeleton implemented (`src/metal.rs`, `src/compute/shaders.metal`). Full GPU kernels for matmul and other ops are pending implementation.
 - **Future:** CPU-optimized paths (AVX, NEON) for non-Metal targets.
 
 ## Compatibility
@@ -95,6 +142,7 @@ Serialization via `serde` for tests and tooling.
 ## Success criteria
 
 - `cargo test` and CI (`fmt`, `clippy -D warnings`, `test`) pass.
-- `inspect` / `compile` succeed on supported fixtures and examples where parsers are implemented.
-- Packaged artifact is a **single file** containing all model data.
+- `inspect` / `pack` / `run` succeed on supported fixtures and examples where parsers are implemented.
+- `.modelc` artifact is a **single file** containing all model data.
+- `list` correctly enumerates locally stored artifacts.
 - Artifact size and load time are optimized relative to raw weight directories.
