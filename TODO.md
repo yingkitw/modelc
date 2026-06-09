@@ -1,29 +1,61 @@
-# TODO
+# TODO — Plan
 
-## Done
+## Implemented
 
-- [x] GGUF / ONNX / PyTorch parsers --- src/parsers/gguf.rs, onnx.rs, pytorch.rs (+ Cargo.toml: onnx-rs, zip).
-- [x] MLP codegen forward --- src/codegen/native.rs: FP32 GEMV chain when architecture == "mlp" and tensor naming matches; echo otherwise.
-- [x] Compile peak RAM --- Embedding writes stream via BufWriter (no auxiliary Vec blob doubling tensor RAM).
-- [x] crates.io checklist --- README crates.io checklist subsection.
-- [x] Single-file artifact format --- .modelc binary format with JSON header + raw tensor blob (src/pack.rs).
-- [x] Cross-platform runtime --- dirs for platform-specific store paths; #[cfg] guards for Unix/Windows permissions.
-- [x] Apple Silicon Metal acceleration --- Skeleton in src/metal.rs with metal crate (macOS only). Compute shaders in src/compute/shaders.metal.
-- [x] Ollama-like UX --- modelc pack, modelc run, modelc pull, modelc list with local model store (src/store.rs).
-- [x] Size optimization --- --compress flag on pack uses zstd compression (version 2 artifact format).
-- [x] Local model store management --- Cross-platform model directory with platform-specific paths (src/store.rs).
+- [x] **Parsers** — GGUF, ONNX, PyTorch, Safetensors (`src/parsers/`).
+- [x] **MLP codegen forward** — FP32 GEMV chain when `architecture == "mlp"` (`src/codegen/native.rs`).
+- [x] **Compile peak RAM** — Embedding writes stream via `BufWriter` (no auxiliary Vec blob).
+- [x] **crates.io checklist** — README subsection with publish steps.
+- [x] **Single-file artifact format** — `.modelc` binary with JSON header + raw tensor blob (`src/pack.rs`).
+- [x] **Cross-platform runtime** — Platform-specific store paths via `dirs` crate; `#[cfg]` Unix/Windows guards.
+- [x] **Apple Silicon Metal acceleration** — Skeleton with `metal` crate + compute shaders (`src/metal.rs`, `src/compute/shaders.metal`).
+- [x] **Ollama-like UX** — `pack`, `run`, `pull`, `list` with local model store (`src/store.rs`).
+- [x] **Size optimization** — `--compress` flag on `pack` uses zstd (version 2 format).
+- [x] **Complete Metal GPU kernel bindings** — `relu`, `add`, `mul_scalar`, `softmax`, `layer_norm` shaders bound and wired into `runtime/ops.rs`.
+- [x] **Quantization at pack time** — `--quantize fp16/int8` converts F32 tensors to reduce artifact size; INT8 auto-dequantized on `run`.
+- [x] **CPU SIMD matmul** — AVX (x86_64) and NEON (aarch64) paths with runtime feature detection.
+- [x] **Store metadata enrichment** — `modelc list` reads artifact headers to show architecture, params, and compression status.
+- [x] **Remote model pull** — `modelc pull <url>` supports HTTP/HTTPS downloads.
 
-## Active (aligned with PRODUCT.md)
+## Backlog (parser / format)
 
-- [x] **High** --- Complete Metal GPU kernel bindings --- Bind existing shaders (softmax, layer_norm, relu, add, mul_scalar) in src/metal.rs and wire into runtime/ops.rs.
-- [x] **High** --- Quantization at pack time --- Add --quantize flag (fp16, int8) to convert F32 tensors at pack time and reduce artifact size.
-- [x] **Medium** --- CPU SIMD matmul --- Add AVX (x86_64) and NEON (aarch64) optimized paths for matmul_cpu fallback.
-- [x] **Medium** --- Store metadata enrichment --- modelc list reads artifact headers to show architecture, parameter count, and compression status.
-- [x] **Medium** --- Remote model pull --- modelc pull supports HTTP/HTTPS URLs for downloading .modelc artifacts.
+- [ ] **GGUF**: dequantize additional block types (Q4_K, Q5_0, Q6_K) or richer error recovery.
+- [ ] **ONNX**: tensor-segment loaders; more dtypes without raw-only restriction.
+- [ ] **PyTorch**: optional Python bridge or minimal pickle reconstruction (high effort).
 
-## Optional next steps
+## Backlog (codegen / architecture)
 
-- GGUF: dequantize additional block types (e.g. Q4_K, Q5_0) or richer error recovery.
-- ONNX: tensor-segment loaders; more dtypes without raw-only restriction.
-- PyTorch: optional Python bridge or minimal pickle reconstruction (high effort).
-- Broader codegen: gpt2, llama, etc., beyond stacked linear + ReLU.
+- [ ] **Broader codegen**: gpt2, llama, etc. — beyond stacked linear + ReLU.
+- [ ] **ONNX graph execution**: parse ops and compile into runtime, not just weight extraction.
+- [x] **Auto architecture inference**: detect `--arch` from tensor naming patterns (`transformer.h.*`, `model.layers.*`).
+
+## Backlog (performance)
+
+- [ ] **INT4 quantization**: pack-time `--quantize int4` for extreme size reduction.
+- [ ] **Weight pruning**: `--prune <threshold>` to zero out small weights and store sparse tensors.
+- [ ] **Multi-threaded CPU ops**: `rayon` or thread pool for parallel CPU matmul on large matrices.
+- [ ] **GPU memory pressure handling**: large-model streaming or memory-mapped loading to avoid OOM on Metal.
+- [ ] **Q4_K / Q5_0 / Q6_K GGUF dequant**: expand parser to support more block types natively.
+
+## Backlog (CLI / UX)
+
+- [x] **Benchmark command**: `modelc bench <artifact>` measures warm/cold latency and throughput.
+- [x] **Artifact verification**: `modelc verify <artifact>` checks header integrity and tensor blob checksums.
+- [x] **Export to Safetensors**: `modelc export <artifact> -o out.safetensors` reverses packaging.
+- [ ] **Model search**: `modelc search <query>` filters store by architecture, size, or name pattern.
+- [ ] **Config file support**: `~/.modelc/config.toml` for default bind address, store path, compression level.
+- [ ] **Shell completions**: generate bash/zsh/fish completions for all subcommands.
+- [ ] **Per-op profiling**: `--profile` flag on `run` prints timing per inference step.
+- [ ] **Model versioning**: store multiple versions and `modelc switch <name> <version>`.
+- [ ] **Model card generation**: `modelc inspect --readme` generates Markdown model card from metadata.
+
+## Backlog (HTTP API / serving)
+
+- [ ] **Chat/completion endpoints**: `/chat` and `/complete` for LLM-style streaming inference.
+- [ ] **Streaming inference (SSE)**: token-by-token Server-Sent Events for long-generation models.
+- [x] **Batch inference API**: `/infer` accepts `{"inputs": [[...], [...]]}` and returns multiple outputs.
+
+## Backlog (advanced)
+
+- [ ] **LoRA adapter support**: load and apply LoRA adapters on top of a base model at runtime.
+- [ ] **Docker/OCI image generation**: `modelc containerize <artifact>` emits a minimal Docker image.

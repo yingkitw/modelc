@@ -104,4 +104,39 @@ impl Model {
             }
         }
     }
+
+    /// Infer architecture from tensor naming patterns when no explicit hint is available.
+    pub fn infer_architecture(&self) -> String {
+        let names: Vec<&str> = self.tensors.keys().map(|s| s.as_str()).collect();
+
+        // Llama-like: model.layers.*, layers.*, transformer.h.* with rotary/attention names
+        if names.iter().any(|n| n.starts_with("model.layers.") || n.starts_with("layers."))
+            && names.iter().any(|n| n.contains("rotary") || n.contains("attention") || n.contains("q_proj"))
+        {
+            return "llama".to_string();
+        }
+
+        // GPT2-like: transformer.h.*, transformer.wte, transformer.wpe
+        if names.iter().any(|n| n.starts_with("transformer.h."))
+            || (names.iter().any(|n| n.contains("wte")) && names.iter().any(|n| n.contains("wpe")))
+        {
+            return "gpt2".to_string();
+        }
+
+        // BERT-like: embeddings.*, encoder.layer.*
+        if names.iter().any(|n| n.starts_with("embeddings."))
+            && names.iter().any(|n| n.starts_with("encoder.layer."))
+        {
+            return "bert".to_string();
+        }
+
+        // MLP: layerN.weight / layerN.bias or single weight/bias pair
+        if names.iter().any(|n| n.starts_with("layer") && n.contains(".weight"))
+            || (names.contains(&"weight") && names.contains(&"bias"))
+        {
+            return "mlp".to_string();
+        }
+
+        "generic".to_string()
+    }
 }

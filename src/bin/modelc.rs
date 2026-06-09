@@ -131,7 +131,153 @@ fn main() -> Result<()> {
             };
             println!("Installed '{}' -> {:?}", model_name, dest);
         }
+        modelc::cli::Commands::Bench {
+            input,
+            warmup,
+            iterations,
+        } => {
+            let path = modelc::store::resolve_model_path(input)?;
+            let mut model = modelc::pack::unpack(&path)?;
+            model.dequantize_in_place();
+            eprintln!(
+                "Benchmarking {} (arch: {}, tensors: {}, params: {})",
+                model.name,
+                model.architecture,
+                model.tensors.len(),
+                model.total_params(),
+            );
+            run_benchmark(&model, *warmup, *iterations)?;
+        }
+        modelc::cli::Commands::Verify { input } => {
+            let path = modelc::store::resolve_model_path(input)?;
+            modelc::pack::verify(&path)?;
+        }
+        modelc::cli::Commands::Export { input, output } => {
+            let path = modelc::store::resolve_model_path(input)?;
+            let output_path = output.clone().unwrap_or_else(|| {
+                let mut p = path.clone();
+                p.set_extension("safetensors");
+                p
+            });
+            modelc::pack::export_to_safetensors(&path, &output_path)?;
+        }
     }
 
     Ok(())
+}
+
+fn run_benchmark(model: &modelc::model::Model, warmup: usize, iterations: usize) -> Result<()> {
+    use modelc::runtime::serve::Runtime;
+    use std::time::Instant;
+
+    let runtime = Runtime::from_raw(&model.tensors);
+
+    // Determine input size from first mlp layer or default to 4
+    let input_size = if model.architecture == "mlp" {
+        if let Some(w) = runtime.get("weight") {
+            w.shape.get(1).copied().unwrap_or(4)
+        } else {
+            // Find first layerN.weight
+            let mut sizes: Vec<usize> = model.tensors
+                .keys()
+                .filter(|k| k.starts_with("layer") && k.ends_with(".weight"))
+                .filter_map(|k| runtime.get(k).map(|t| t.shape.get(1).copied().unwrap_or(4)))
+                .collect();
+            sizes.sort();
+            sizes.first().copied().unwrap_or(4)
+        }
+    } else {
+        4
+    };
+
+    let input: Vec<f32> = (0..input_size).map(|i| i as f32 * 0.1).collect();
+
+    // Warmup
+    for _ in 0..warmup {
+        let _ = benchmark_inference(model, &runtime, &input);
+    }
+
+    // Benchmark
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let _ = benchmark_inference(model, &runtime, &input);
+    }
+    let elapsed = start.elapsed();
+
+    let total_ms = elapsed.as_secs_f64() * 1000.0;
+    let avg_ms = total_ms / iterations as f64;
+    let throughput = iterations as f64 / elapsed.as_secs_f64();
+
+    println!("Benchmark results ({} iterations):", iterations);
+    println!("  total time: {:.3} ms", total_ms);
+    println!("  avg latency: {:.3} ms", avg_ms);
+    println!("  throughput: {:.1} inferences/sec", throughput);
+
+    Ok(())
+}
+
+fn benchmark_inference(
+    model: &modelc::model::Model,
+    runtime: &modelc::runtime::serve::Runtime,
+    input: &[f32],
+) -> Vec<f32> {
+    use modelc::runtime::tensor::Tensor;
+    use modelc::runtime::ops;
+
+    if model.architecture == "mlp" {
+        // Try single weight/bias first
+        if let (Some(w), Some(b)) = (runtime.get("weight"), runtime.get("bias")) {
+            let x = Tensor::from_vec(input.to_vec(), vec![1, input.len()]);
+            let mut out = ops::matmul(&x, w);
+            out = ops::add(&out, b);
+            return out.data;
+        }
+        // Try layerN pairs
+        let mut ids: Vec<u32> = model
+            .tensors
+            .keys()
+            .filter_map(|key| {
+                let tail = key.strip_prefix("layer")?;
+                let (idx, suf) = tail.split_once('.')?;
+                if suf == "weight" {
+                    idx.parse::<u32>().ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if !ids.is_empty() {
+            let mut cur = input.to_vec();
+            let last = ids.len() - 1;
+            for (i, id) in ids.iter().enumerate() {
+                let w_name = format!("layer{id}.weight");
+                let b_name = format!("layer{id}.bias");
+                if let (Some(w), Some(b)) = (runtime.get(&w_name), runtime.get(&b_name)) {
+                    let x = Tensor::from_vec(cur, vec![1, w.shape[1]]);
+                    let mut out = ops::matmul(&x, w);
+                    out = ops::add(&out, b);
+                    cur = out.data;
+                    if i != last {
+                        cur = ops::relu(&Tensor::from_vec(cur.clone(), vec![cur.len()])).data;
+                    }
+                }
+            }
+            return cur;
+        }
+    }
+
+    // Fallback: simple matmul with first 2D tensor
+    if let Some(name) = runtime.tensor_names().first() {
+        if let Some(t) = runtime.get(name) {
+            if t.shape.len() == 2 {
+                let x = Tensor::from_vec(input.to_vec(), vec![1, input.len()]);
+                let out = ops::matmul(&x, t);
+                return out.data;
+            }
+        }
+    }
+
+    input.to_vec()
 }

@@ -263,3 +263,150 @@ fn str_to_data_type(s: &str) -> Result<DataType> {
         _ => anyhow::bail!("unknown dtype '{}' in artifact", s),
     }
 }
+
+/// Verify a `.modelc` artifact file integrity without fully unpacking tensors.
+pub fn verify(path: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open artifact at {:?}", path))?;
+
+    let mut magic = [0u8; 6];
+    file.read_exact(&mut magic)
+        .context("artifact file too short (magic)")?;
+    if magic != MAGIC {
+        anyhow::bail!("invalid artifact magic bytes");
+    }
+
+    let mut version_bytes = [0u8; 4];
+    file.read_exact(&mut version_bytes)
+        .context("artifact file too short (version)")?;
+    let version = u32::from_le_bytes(version_bytes);
+
+    let flags = if version >= 2 {
+        let mut flags_bytes = [0u8; 4];
+        file.read_exact(&mut flags_bytes)
+            .context("artifact file too short (flags)")?;
+        u32::from_le_bytes(flags_bytes)
+    } else {
+        0
+    };
+
+    if version != 1 && version != 2 {
+        anyhow::bail!("unsupported artifact version {}", version);
+    }
+
+    let mut header_len_bytes = [0u8; 8];
+    file.read_exact(&mut header_len_bytes)
+        .context("artifact file too short (header length)")?;
+    let header_len = u64::from_le_bytes(header_len_bytes);
+
+    let mut header_json = vec![0u8; header_len as usize];
+    file.read_exact(&mut header_json)
+        .context("artifact file too short (header)")?;
+    let header: ArtifactHeader = serde_json::from_slice(&header_json)
+        .context("failed to deserialize artifact header")?;
+
+    let mut data_blob = Vec::new();
+    file.read_to_end(&mut data_blob)
+        .context("failed to read artifact data blob")?;
+
+    let data_blob = if flags & FLAG_COMPRESSED != 0 {
+        zstd::decode_all(&data_blob[..]).context("failed to decompress artifact data")?
+    } else {
+        data_blob
+    };
+
+    let mut total_claimed: u64 = 0;
+    let mut max_end: u64 = 0;
+    for at in &header.tensors {
+        let end = at.offset + at.length;
+        if end > max_end {
+            max_end = end;
+        }
+        total_claimed += at.length;
+    }
+
+    if max_end > data_blob.len() as u64 {
+        anyhow::bail!(
+            "artifact corrupted: tensor data claims {} bytes but blob is {} bytes",
+            max_end,
+            data_blob.len()
+        );
+    }
+
+    println!("Verify OK: {}", path.display());
+    println!("  version: {}", version);
+    println!("  compressed: {}", flags & FLAG_COMPRESSED != 0);
+    println!("  name: {}", header.name);
+    println!("  architecture: {}", header.architecture);
+    println!("  tensors: {}", header.tensors.len());
+    println!("  total tensor bytes: {}", total_claimed);
+    println!("  blob size: {} bytes", data_blob.len());
+
+    Ok(())
+}
+
+/// Export a `.modelc` artifact to a Safetensors file.
+pub fn export_to_safetensors(path: &Path, output: &Path) -> Result<()> {
+    let model = unpack(path)?;
+
+    let mut metadata = std::collections::HashMap::new();
+    for (k, v) in &model.metadata {
+        metadata.insert(k.clone(), v.clone());
+    }
+    if !model.architecture.is_empty() {
+        metadata.insert("architecture".to_string(), model.architecture.clone());
+    }
+
+    let mut tensors: Vec<(String, SafetensorsView)> = Vec::new();
+    for (name, td) in &model.tensors {
+        tensors.push((name.clone(), SafetensorsView {
+            data: td.data.clone(),
+            dtype: data_type_to_safetensors_dtype(td.dtype),
+            shape: td.shape.clone(),
+        }));
+    }
+
+    safetensors::serialize_to_file(tensors, &Some(metadata), output)
+        .with_context(|| format!("failed to write safetensors to {:?}", output))?;
+
+    eprintln!("Exported {} tensors -> {:?}", model.tensors.len(), output);
+    Ok(())
+}
+
+fn data_type_to_safetensors_dtype(dt: DataType) -> safetensors::Dtype {
+    match dt {
+        DataType::F32 => safetensors::Dtype::F32,
+        DataType::F16 => safetensors::Dtype::F16,
+        DataType::BF16 => safetensors::Dtype::BF16,
+        DataType::I64 => safetensors::Dtype::I64,
+        DataType::I32 => safetensors::Dtype::I32,
+        DataType::I16 => safetensors::Dtype::I16,
+        DataType::I8 => safetensors::Dtype::I8,
+        DataType::U8 => safetensors::Dtype::U8,
+        DataType::Bool => safetensors::Dtype::BOOL,
+    }
+}
+
+struct SafetensorsView {
+    data: Vec<u8>,
+    dtype: safetensors::Dtype,
+    shape: Vec<usize>,
+}
+
+impl safetensors::View for SafetensorsView {
+    fn dtype(&self) -> safetensors::Dtype {
+        self.dtype
+    }
+
+    fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        std::borrow::Cow::Borrowed(&self.data)
+    }
+
+    fn data_len(&self) -> usize {
+        self.data.len()
+    }
+}

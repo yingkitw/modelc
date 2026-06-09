@@ -56,12 +56,18 @@ struct AppState {
 
 #[derive(Deserialize)]
 struct InferRequest {
+    #[serde(default)]
     input: Vec<f32>,
+    #[serde(default)]
+    inputs: Vec<Vec<f32>>,
 }
 
 #[derive(Serialize)]
 struct InferResponse {
-    output: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outputs: Option<Vec<Vec<f32>>>,
 }
 
 #[derive(Serialize)]
@@ -77,13 +83,33 @@ async fn infer(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InferRequest>,
 ) -> Json<InferResponse> {
+    if !req.inputs.is_empty() {
+        let outs: Vec<Vec<f32>> = req
+            .inputs
+            .iter()
+            .map(|inp| {
+                if let Some(plan) = &state.mlp_plan {
+                    run_mlp_forward(&state.runtime, plan, inp)
+                } else {
+                    inp.clone()
+                }
+            })
+            .collect();
+        return Json(InferResponse {
+            output: None,
+            outputs: Some(outs),
+        });
+    }
+
     let output = if let Some(plan) = &state.mlp_plan {
         run_mlp_forward(&state.runtime, plan, &req.input)
     } else {
-        // Echo input for unsupported architectures.
         req.input.clone()
     };
-    Json(InferResponse { output })
+    Json(InferResponse {
+        output: Some(output),
+        outputs: None,
+    })
 }
 
 async fn model_info(State(state): State<Arc<AppState>>) -> Json<ModelInfo> {

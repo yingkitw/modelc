@@ -142,6 +142,33 @@ pub enum Commands {
         #[arg(short, long, help = "Local name for the model")]
         name: Option<String>,
     },
+
+    #[command(about = "Benchmark inference latency on a .modelc artifact")]
+    Bench {
+        #[arg(help = "Path to .modelc artifact or model name")]
+        input: String,
+
+        #[arg(short, long, default_value_t = 100, help = "Number of warmup iterations")]
+        warmup: usize,
+
+        #[arg(short, long, default_value_t = 1000, help = "Number of benchmark iterations")]
+        iterations: usize,
+    },
+
+    #[command(about = "Verify a .modelc artifact integrity")]
+    Verify {
+        #[arg(help = "Path to .modelc artifact or model name")]
+        input: String,
+    },
+
+    #[command(about = "Export a .modelc artifact to Safetensors")]
+    Export {
+        #[arg(help = "Path to .modelc artifact or model name")]
+        input: String,
+
+        #[arg(short, long, help = "Output path", value_hint = ValueHint::FilePath)]
+        output: Option<PathBuf>,
+    },
 }
 
 /// Resolve `--listen` vs `--bind` + `--port` before calling [`crate::compiler::compile`].
@@ -166,9 +193,21 @@ pub fn compile_listen(
 }
 
 /// Apply `--arch` CLI hint after parsing weights.
+/// If no hint is provided and the current architecture is empty or "generic",
+/// attempts to infer from tensor naming patterns.
 pub fn apply_arch_hint(model: &mut Model, arch: Option<&ModelArch>) {
     if let Some(a) = arch {
         model.architecture = a.as_str().to_string();
+        return;
+    }
+    if model.architecture.is_empty()
+        || model.architecture == "generic"
+        || model.architecture == "unknown"
+    {
+        let inferred = model.infer_architecture();
+        if inferred != "generic" {
+            model.architecture = inferred;
+        }
     }
 }
 
