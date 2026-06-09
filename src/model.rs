@@ -83,7 +83,7 @@ impl Model {
         self.tensors.values().map(|t| t.byte_len()).sum()
     }
 
-    /// Dequantize any I8 tensors that have `quant_scale.<name>` metadata back to F32 in place.
+    /// Dequantize any I8 (or INT4-packed-as-I8) tensors that have `quant_scale.<name>` metadata back to F32 in place.
     pub fn dequantize_in_place(&mut self) {
         for (name, td) in self.tensors.iter_mut() {
             if td.dtype != DataType::I8 {
@@ -92,11 +92,30 @@ impl Model {
             let scale_key = format!("quant_scale.{}", name);
             if let Some(scale_str) = self.metadata.get(&scale_key) {
                 if let Ok(scale) = scale_str.parse::<f32>() {
+                    let mode_key = format!("quant_mode.{}", name);
+                    let is_int4 = self.metadata.get(&mode_key).map(|m| m == "int4").unwrap_or(false);
                     let count = td.element_count();
                     let mut new_data = Vec::with_capacity(count * 4);
-                    for &b in &td.data {
-                        let val = b as i8 as f32 * scale;
-                        new_data.extend_from_slice(&val.to_le_bytes());
+                    if is_int4 {
+                        // Unpack two signed nibbles per byte.
+                        let mut remaining = count;
+                        for &byte in &td.data {
+                            let nibble0 = ((byte >> 4) & 0x0F) as i8 - 8;
+                            let val0 = nibble0 as f32 * scale;
+                            new_data.extend_from_slice(&val0.to_le_bytes());
+                            remaining -= 1;
+                            if remaining > 0 {
+                                let nibble1 = (byte & 0x0F) as i8 - 8;
+                                let val1 = nibble1 as f32 * scale;
+                                new_data.extend_from_slice(&val1.to_le_bytes());
+                                remaining -= 1;
+                            }
+                        }
+                    } else {
+                        for &b in &td.data {
+                            let val = b as i8 as f32 * scale;
+                            new_data.extend_from_slice(&val.to_le_bytes());
+                        }
                     }
                     td.dtype = DataType::F32;
                     td.data = new_data;

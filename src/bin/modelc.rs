@@ -75,6 +75,7 @@ fn main() -> Result<()> {
             arch,
             compress,
             quantize,
+            prune,
         } => {
             eprintln!("modelc {}", modelc::CLI_VERSION);
             let output_path = output.clone().unwrap_or_else(|| {
@@ -89,6 +90,7 @@ fn main() -> Result<()> {
                 arch.as_ref(),
                 *compress,
                 quantize.as_ref(),
+                *prune,
             )?;
         }
         modelc::cli::Commands::Run { input, port, bind, profile } => {

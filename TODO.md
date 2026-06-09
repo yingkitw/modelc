@@ -31,8 +31,8 @@
 
 ## Backlog (performance)
 
-- [ ] **INT4 quantization**: pack-time `--quantize int4` for extreme size reduction.
-- [ ] **Weight pruning**: `--prune <threshold>` to zero out small weights and store sparse tensors.
+- [x] **INT4 quantization**: pack-time `--quantize int4` for extreme size reduction.
+- [x] **Weight pruning**: `--prune <threshold>` to zero out small weights and store sparse tensors.
 - [x] **Multi-threaded CPU ops**: `rayon` or thread pool for parallel CPU matmul on large matrices.
 - [ ] **GPU memory pressure handling**: large-model streaming or memory-mapped loading to avoid OOM on Metal.
 - [ ] **Q4_K / Q5_0 / Q6_K GGUF dequant**: expand parser to support more block types natively.
@@ -51,8 +51,8 @@
 
 ## Backlog (HTTP API / serving)
 
-- [ ] **Chat/completion endpoints**: `/chat` and `/complete` for LLM-style streaming inference.
-- [ ] **Streaming inference (SSE)**: token-by-token Server-Sent Events for long-generation models.
+- [x] **Chat/completion endpoints**: `/chat` and `/complete` for LLM-style streaming inference.
+- [x] **Streaming inference (SSE)**: token-by-token Server-Sent Events for long-generation models.
 - [x] **Batch inference API**: `/infer` accepts `{"inputs": [[...], [...]]}` and returns multiple outputs.
 
 ## Backlog (advanced)

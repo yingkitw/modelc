@@ -141,6 +141,7 @@ pub fn pack(
     arch: Option<&ModelArch>,
     compress: bool,
     quantize: Option<&QuantizeMode>,
+    prune: Option<f32>,
 ) -> Result<PathBuf> {
     let weight_format = format
         .cloned()
@@ -153,6 +154,29 @@ pub fn pack(
         .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
 
     apply_arch_hint(&mut model, arch);
+
+    if let Some(threshold) = prune {
+        eprintln!("modelc: pruning weights with |value| < {}...", threshold);
+        let mut pruned = 0;
+        for (_name, td) in model.tensors.iter_mut() {
+            if td.dtype != DataType::F32 {
+                continue;
+            }
+            let mut changed = false;
+            for chunk in td.data.chunks_exact_mut(4) {
+                let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if val.abs() < threshold {
+                    chunk.copy_from_slice(&0.0f32.to_le_bytes());
+                    changed = true;
+                }
+            }
+            if changed {
+                pruned += 1;
+            }
+        }
+        model.metadata.insert("pruned".to_string(), threshold.to_string());
+        eprintln!("  pruned {} tensors", pruned);
+    }
 
     if let Some(mode) = quantize {
         eprintln!("modelc: quantizing tensors to {:?}...", mode);
@@ -192,6 +216,37 @@ pub fn pack(
                         td.dtype = DataType::I8;
                         td.data = new_data;
                         model.metadata.insert(format!("quant_scale.{}", name), scale.to_string());
+                        quantized += 1;
+                    }
+                }
+                QuantizeMode::Int4 => {
+                    let count = td.element_count();
+                    let mut floats = Vec::with_capacity(count);
+                    for chunk in td.data.chunks_exact(4) {
+                        let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        floats.push(val);
+                    }
+                    let max_abs = floats.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                    if max_abs > 0.0 {
+                        let scale = max_abs / 7.0;
+                        let mut new_data = Vec::with_capacity((count + 1) / 2);
+                        let mut idx = 0;
+                        while idx < count {
+                            let q0 = (floats[idx] / scale).clamp(-7.0, 7.0).round() as i8;
+                            let nibble0 = (q0 + 8) as u8 & 0x0F;
+                            let nibble1 = if idx + 1 < count {
+                                let q1 = (floats[idx + 1] / scale).clamp(-7.0, 7.0).round() as i8;
+                                (q1 + 8) as u8 & 0x0F
+                            } else {
+                                0
+                            };
+                            new_data.push((nibble0 << 4) | nibble1);
+                            idx += 2;
+                        }
+                        td.dtype = DataType::I8;
+                        td.data = new_data;
+                        model.metadata.insert(format!("quant_scale.{}", name), scale.to_string());
+                        model.metadata.insert(format!("quant_mode.{}", name), "int4".to_string());
                         quantized += 1;
                     }
                 }

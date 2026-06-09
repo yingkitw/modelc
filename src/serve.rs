@@ -1,14 +1,17 @@
-//! HTTP server for `modelc run` — loads a `.modelc` artifact and serves /info + /infer.
+//! HTTP server for `modelc run` — loads a `.modelc` artifact and serves /info + /infer + /chat + /complete.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
     extract::State,
+    response::sse::{Event, Sse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::model::Model;
 use crate::runtime::serve::Runtime;
@@ -42,6 +45,9 @@ fn build_router(model: Model, profile: bool) -> Router {
     Router::new()
         .route("/infer", post(infer))
         .route("/info", get(model_info))
+        .route("/chat", post(chat))
+        .route("/chat/stream", post(chat_stream))
+        .route("/complete", post(complete))
         .with_state(state)
 }
 
@@ -79,6 +85,40 @@ struct ModelInfo {
     total_params: usize,
     total_bytes: usize,
     tensors: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    messages: Vec<Message>,
+    #[serde(default)]
+    stream: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct Message {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ChatResponse {
+    message: Message,
+}
+
+#[derive(Deserialize)]
+struct CompleteRequest {
+    prompt: String,
+}
+
+#[derive(Serialize)]
+struct CompleteResponse {
+    completion: String,
+}
+
+#[derive(Serialize)]
+struct StreamChunk {
+    delta: String,
+    done: bool,
 }
 
 async fn infer(
@@ -130,6 +170,84 @@ async fn model_info(State(state): State<Arc<AppState>>) -> Json<ModelInfo> {
         total_bytes: state.total_bytes,
         tensors: state.tensor_names.clone(),
     })
+}
+
+async fn chat(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChatRequest>,
+) -> Json<ChatResponse> {
+    let prompt = req
+        .messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let output = run_text_inference(&state, &prompt);
+    Json(ChatResponse {
+        message: Message {
+            role: "assistant".to_string(),
+            content: output,
+        },
+    })
+}
+
+async fn complete(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CompleteRequest>,
+) -> Json<CompleteResponse> {
+    let output = run_text_inference(&state, &req.prompt);
+    Json(CompleteResponse { completion: output })
+}
+
+async fn chat_stream(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChatRequest>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let prompt = req
+        .messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let output = run_text_inference(&state, &prompt);
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
+
+    tokio::spawn(async move {
+        let _ = tx
+            .send(Ok(Event::default().data(
+                serde_json::to_string(&StreamChunk {
+                    delta: output,
+                    done: true,
+                })
+                .unwrap(),
+            )))
+            .await;
+    });
+
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// Convert a prompt string into a float input vector, run inference, and format the result.
+fn run_text_inference(state: &AppState, prompt: &str) -> String {
+    let input: Vec<f32> = prompt.bytes().map(|b| b as f32 / 255.0).collect();
+    let plan = state.mlp_plan.as_ref();
+    let output = if let Some(plan) = plan {
+        if let Some(w) = state.runtime.get(&plan[0].0) {
+            let input_size = w.shape.get(1).copied().unwrap_or(input.len());
+            let vec = if input.len() >= input_size {
+                input[..input_size].to_vec()
+            } else {
+                let mut v = input;
+                v.resize(input_size, 0.0);
+                v
+            };
+            run_mlp_forward(&state.runtime, plan, &vec, state.profile)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    serde_json::to_string(&output).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn run_mlp_forward(runtime: &Runtime, plan: &[(String, String)], input: &[f32], profile: bool) -> Vec<f32> {
