@@ -17,7 +17,10 @@ pub struct GgufParser;
 const GGML_TYPE_F32: u32 = 0;
 const GGML_TYPE_F16: u32 = 1;
 const GGML_TYPE_Q4_0: u32 = 2;
+const GGML_TYPE_Q5_0: u32 = 6;
 const GGML_TYPE_Q8_0: u32 = 8;
+const GGML_TYPE_Q4_K: u32 = 12;
+const GGML_TYPE_Q6_K: u32 = 14;
 const GGML_TYPE_I8: u32 = 24;
 const GGML_TYPE_I16: u32 = 25;
 const GGML_TYPE_I32: u32 = 26;
@@ -205,9 +208,21 @@ fn descriptor_for_ggml(ggml_ty: u32, nelem: usize) -> Result<(DataType, usize)> 
         GGML_TYPE_I32 => (DataType::I32, dense_byte_len(4, nelem)?),
         GGML_TYPE_I64 => (DataType::I64, dense_byte_len(8, nelem)?),
         GGML_TYPE_F64 => (DataType::F32, dense_byte_len(8, nelem)?),
-        GGML_TYPE_Q4_0 | GGML_TYPE_Q8_0 => {
+        GGML_TYPE_Q4_0 | GGML_TYPE_Q5_0 | GGML_TYPE_Q8_0 => {
             ensure_multiple_of(nelem, GGML_BLOCK_ELEMENTS, ggml_ty)?;
             let bytes = quant_block_byte_len(ggml_ty, nelem)?;
+            (DataType::F32, bytes)
+        }
+        GGML_TYPE_Q4_K => {
+            const QK_K: usize = 256;
+            ensure_multiple_of(nelem, QK_K, ggml_ty)?;
+            let bytes = nelem / QK_K * 144;
+            (DataType::F32, bytes)
+        }
+        GGML_TYPE_Q6_K => {
+            const QK_K: usize = 256;
+            ensure_multiple_of(nelem, QK_K, ggml_ty)?;
+            let bytes = nelem / QK_K * 210;
             (DataType::F32, bytes)
         }
         _ => anyhow::bail!(
@@ -252,6 +267,7 @@ fn quant_block_byte_len(ty: u32, nelem: usize) -> Result<usize> {
     let blocks = nelem / GGML_BLOCK_ELEMENTS;
     let per_block = match ty {
         GGML_TYPE_Q4_0 => 18,
+        GGML_TYPE_Q5_0 => 22,
         GGML_TYPE_Q8_0 => 34,
         _ => anyhow::bail!("not a handled block-quant layout"),
     };
@@ -264,7 +280,10 @@ fn unpack_ggml_payload(ty: u32, blob: &[u8], nelem: usize) -> Result<Vec<u8>> {
     Ok(match ty {
         GGML_TYPE_F64 => f64_blob_to_f32(blob)?,
         GGML_TYPE_Q4_0 => f32_blob_bytes(&dequantize_q4_0(blob, nelem)?),
+        GGML_TYPE_Q5_0 => f32_blob_bytes(&dequantize_q5_0(blob, nelem)?),
         GGML_TYPE_Q8_0 => f32_blob_bytes(&dequantize_q8_0(blob, nelem)?),
+        GGML_TYPE_Q4_K => f32_blob_bytes(&dequantize_q4_k(blob, nelem)?),
+        GGML_TYPE_Q6_K => f32_blob_bytes(&dequantize_q6_k(blob, nelem)?),
         _ => blob.to_vec(),
     })
 }
@@ -327,13 +346,116 @@ fn dequantize_q8_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
     Ok(y)
 }
 
+fn dequantize_q5_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
+    anyhow::ensure!(nelem.is_multiple_of(GGML_BLOCK_ELEMENTS), "q5_0 uneven row");
+    const BLK_BYTES: usize = 22;
+    let nb = nelem / GGML_BLOCK_ELEMENTS;
+    anyhow::ensure!(src.len() == nb * BLK_BYTES);
+    let mut y = vec![0f32; nelem];
+
+    for i in 0..nb {
+        let bo = i * BLK_BYTES;
+        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let qs = &src[bo + 2..bo + 18];
+        let qh = &src[bo + 18..bo + 22];
+
+        for j in 0..GGML_BLOCK_ELEMENTS {
+            let qs_idx = j / 2;
+            let low_nibble = if j % 2 == 0 {
+                qs[qs_idx] & 0x0F
+            } else {
+                qs[qs_idx] >> 4
+            };
+            let qh_byte_idx = j / 8;
+            let qh_bit_idx = j % 8;
+            let high_bit = (qh[qh_byte_idx] >> qh_bit_idx) & 1;
+            let value = (((high_bit << 4) | low_nibble) as i32 - 16) as f32 * d;
+            y[i * GGML_BLOCK_ELEMENTS + j] = value;
+        }
+    }
+    Ok(y)
+}
+
+fn dequantize_q4_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
+    const QK_K: usize = 256;
+    const BLK_BYTES: usize = 144;
+    anyhow::ensure!(nelem.is_multiple_of(QK_K), "q4_k uneven superblock");
+    let nb = nelem / QK_K;
+    anyhow::ensure!(src.len() == nb * BLK_BYTES);
+    let mut y = vec![0f32; nelem];
+
+    for i in 0..nb {
+        let bo = i * BLK_BYTES;
+        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let dmin = f16::from_bits(LittleEndian::read_u16(&src[bo + 2..bo + 4])).to_f32();
+        let scales = &src[bo + 4..bo + 16];
+        let qs = &src[bo + 16..bo + 16 + 128];
+
+        for sb in 0..8 {
+            let scale = scales[sb] as f32 * d;
+            let min = scales[sb] as f32 * dmin;
+            for j in 0..32 {
+                let qs_idx = sb * 16 + j / 2;
+                let nibble = if j % 2 == 0 {
+                    qs[qs_idx] & 0x0F
+                } else {
+                    qs[qs_idx] >> 4
+                };
+                let value = (nibble as f32 - 8.0) * scale + min;
+                y[i * QK_K + sb * 32 + j] = value;
+            }
+        }
+    }
+    Ok(y)
+}
+
+fn dequantize_q6_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
+    const QK_K: usize = 256;
+    const BLK_BYTES: usize = 210;
+    anyhow::ensure!(nelem.is_multiple_of(QK_K), "q6_k uneven superblock");
+    let nb = nelem / QK_K;
+    anyhow::ensure!(src.len() == nb * BLK_BYTES);
+    let mut y = vec![0f32; nelem];
+
+    for i in 0..nb {
+        let bo = i * BLK_BYTES;
+        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let scales = &src[bo + 2..bo + 18];
+        let ql = &src[bo + 18..bo + 146];
+        let qh = &src[bo + 146..bo + 210];
+
+        for sb in 0..16 {
+            let scale = scales[sb] as f32 * d;
+            for j in 0..16 {
+                let idx = sb * 16 + j;
+                let ql_idx = idx / 2;
+                let low_nibble = if idx % 2 == 0 {
+                    ql[ql_idx] & 0x0F
+                } else {
+                    ql[ql_idx] >> 4
+                };
+                let qh_byte_idx = idx / 4;
+                let qh_shift = (idx % 4) * 2;
+                let high_2bit = (qh[qh_byte_idx] >> qh_shift) & 0x03;
+                let combined = ((high_2bit << 4) | low_nibble) as i32 - 32;
+                y[i * QK_K + idx] = combined as f32 * scale;
+            }
+        }
+    }
+    Ok(y)
+}
+
 fn ggml_type_hint(ty: u32) -> &'static str {
     match ty {
         0 => "F32",
         1 => "F16",
         2 => "Q4_0",
         3 => "Q4_1",
+        6 => "Q5_0",
+        7 => "Q5_1",
         8 => "Q8_0",
+        12 => "Q4_K",
+        14 => "Q6_K",
         28 => "F64",
         24 => "I8",
         30 => "BF16",
@@ -593,8 +715,8 @@ mod tests {
 
     #[test]
     fn quantized_tensor_rejected() {
-        /// GGML_TYPE_Q4_K — still unsupported here (Q4_0 / Q8_0 are expanded to F32).
-        const GGML_TYPE_Q4_K: u32 = 12;
+        /// GGML_TYPE_Q8_1 — not yet supported (Q4_0 / Q8_0 are expanded to F32).
+        const GGML_TYPE_Q8_1: u32 = 9;
 
         let kv_block = encode_minimal_kv_generic();
         let w_name_block = gguf_string_bytes("w");
@@ -602,14 +724,14 @@ mod tests {
         ti.extend_from_slice(&w_name_block);
         ti.extend_from_slice(&1u32.to_le_bytes());
         ti.extend_from_slice(&128u64.to_le_bytes());
-        ti.extend_from_slice(&GGML_TYPE_Q4_K.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q8_1.to_le_bytes());
         ti.extend_from_slice(&0u64.to_le_bytes());
 
         let r = build_minimal_roundtrip(kv_block, ti, &[0u8; 512]);
-        let err = r.expect_err("Q4_K tensors should fail");
+        let err = r.expect_err("Q8_1 tensors should fail");
         let s = format!("{err:#}");
         assert!(
-            s.contains("unsupported GGML type 12"),
+            s.contains("unsupported GGML type 9"),
             "unexpected diagnostic: {s}"
         );
     }

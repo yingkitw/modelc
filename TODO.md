@@ -34,8 +34,8 @@
 - [x] **INT4 quantization**: pack-time `--quantize int4` for extreme size reduction.
 - [x] **Weight pruning**: `--prune <threshold>` to zero out small weights and store sparse tensors.
 - [x] **Multi-threaded CPU ops**: `rayon` or thread pool for parallel CPU matmul on large matrices.
-- [ ] **GPU memory pressure handling**: large-model streaming or memory-mapped loading to avoid OOM on Metal.
-- [ ] **Q4_K / Q5_0 / Q6_K GGUF dequant**: expand parser to support more block types natively.
+- [x] **GPU memory pressure handling**: large-model streaming or memory-mapped loading to avoid OOM on Metal.
+- [x] **Q4_K / Q5_0 / Q6_K GGUF dequant**: expand parser to support more block types natively.
 
 ## Backlog (CLI / UX)
 
@@ -48,6 +48,8 @@
 - [x] **Per-op profiling**: `--profile` flag on `run` prints timing per inference step.
 - [x] **Model versioning**: store multiple versions and `modelc switch <name> <version>`.
 - [x] **Model card generation**: `modelc inspect --readme` generates Markdown model card from metadata.
+- [x] **Docker/OCI image generation**: `modelc containerize <artifact>` emits a minimal Docker image.
+- [x] **LoRA adapter support**: load and apply LoRA adapters on top of a base model at runtime.
 
 ## Backlog (HTTP API / serving)
 
@@ -55,7 +57,8 @@
 - [x] **Streaming inference (SSE)**: token-by-token Server-Sent Events for long-generation models.
 - [x] **Batch inference API**: `/infer` accepts `{"inputs": [[...], [...]]}` and returns multiple outputs.
 
-## Backlog (advanced)
+## Backlog (codegen / architecture)
 
-- [ ] **LoRA adapter support**: load and apply LoRA adapters on top of a base model at runtime.
-- [ ] **Docker/OCI image generation**: `modelc containerize <artifact>` emits a minimal Docker image.
+- [x] **Auto architecture inference**: detect `--arch` from tensor naming patterns (`transformer.h.*`, `model.layers.*`).
+- [x] **Broader codegen**: gpt2, llama, etc. — beyond stacked linear + ReLU.
+- [ ] **ONNX graph execution**: parse ops and compile into runtime, not just weight extraction.

@@ -208,6 +208,33 @@ pub enum Commands {
         #[arg(help = "Version number (e.g. 1, 2)")]
         version: u32,
     },
+
+    #[command(about = "Generate a minimal Docker image for a .modelc artifact")]
+    Containerize {
+        #[arg(help = "Path to .modelc artifact or model name")]
+        input: String,
+
+        #[arg(short, long, help = "Output directory", value_hint = ValueHint::DirPath)]
+        output: Option<PathBuf>,
+
+        #[arg(long, help = "Base image", default_value = "debian:bookworm-slim")]
+        base_image: String,
+    },
+
+    #[command(about = "Apply a LoRA adapter to a model artifact")]
+    Lora {
+        #[arg(help = "Path to .modelc artifact or model name")]
+        model: String,
+
+        #[arg(help = "Path to LoRA adapter (.safetensors)")]
+        adapter: PathBuf,
+
+        #[arg(short, long, default_value_t = 1.0, help = "LoRA alpha scaling factor")]
+        alpha: f32,
+
+        #[arg(short, long, help = "Output artifact path")]
+        output: Option<PathBuf>,
+    },
 }
 
 /// Resolve `--listen` vs `--bind` + `--port` before calling [`crate::compiler::compile`].

@@ -29,13 +29,6 @@ fn parse_onnx_bytes(bytes: &[u8], path: &Path) -> Result<Model> {
 
     let mut tensors = HashMap::new();
     for init in &graph.initializer {
-        if init.segment().is_some() {
-            anyhow::bail!(
-                "initializer {:?} is segmented; flatten before import",
-                init.name()
-            );
-        }
-
         let name = init.name().to_string();
         let onnx_ty = init.data_type();
         let elem = onnx_elem_to_model(onnx_ty)
@@ -53,8 +46,22 @@ fn parse_onnx_bytes(bytes: &[u8], path: &Path) -> Result<Model> {
         let blob = if let Some(raw) = init.as_raw()
             && !raw.is_empty()
         {
-            onnx_initializer_bytes(init, elem)
-                .with_context(|| format!("initializer {name} payload"))?
+            if let Some(seg) = init.segment() {
+                let begin = usize::try_from(seg.begin)
+                    .with_context(|| format!("{name}: segment begin overflow"))?;
+                let end = usize::try_from(seg.end)
+                    .with_context(|| format!("{name}: segment end overflow"))?;
+                ensure!(
+                    end <= raw.len(),
+                    "{name}: segment [{begin}, {end}) exceeds raw_data length {}",
+                    raw.len()
+                );
+                let slice = &raw[begin..end];
+                onnx_slice_bytes_to_ir(slice, elem, nelem_expected, &name)?
+            } else {
+                onnx_initializer_bytes(init, elem)
+                    .with_context(|| format!("initializer {name} payload"))?
+            }
         } else if !init.external_data().is_empty() {
             let disk = load_onnx_external_bytes(path, init)
                 .with_context(|| format!("initializer {name} external_data"))?;
@@ -343,6 +350,22 @@ fn onnx_external_bytes_to_ir(
         "{tensor_name}: decoded payload length mismatches IR dtype {elem:?}",
     );
     Ok(out)
+}
+
+fn onnx_slice_bytes_to_ir(
+    slice: &[u8],
+    elem: DataType,
+    nelem: usize,
+    tensor_name: &str,
+) -> Result<Vec<u8>> {
+    let expected = elem.byte_size().saturating_mul(nelem);
+    ensure!(
+        slice.len() == expected,
+        "{tensor_name}: segmented slice length {} but expected {expected} ({nelem} elems × {:?})",
+        slice.len(),
+        elem,
+    );
+    Ok(slice.to_vec())
 }
 
 #[cfg(test)]

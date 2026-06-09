@@ -219,6 +219,30 @@ fn main() -> Result<()> {
         modelc::cli::Commands::Completions { shell } => {
             modelc::cli::generate_completions(shell)?;
         }
+        modelc::cli::Commands::Containerize { input, output, base_image } => {
+            let path = modelc::store::resolve_model_path(input)?;
+            let out_dir = output.clone().unwrap_or_else(|| {
+                let mut p = std::env::current_dir().unwrap_or_default();
+                p.push("modelc-docker");
+                p
+            });
+            modelc::containerize::containerize(&path, &out_dir, base_image)?;
+        }
+        modelc::cli::Commands::Lora { model, adapter, alpha, output } => {
+            let path = modelc::store::resolve_model_path(model)?;
+            eprintln!("Loading model from {:?}...", path);
+            let mut m = modelc::pack::unpack(&path)?;
+            m.dequantize_in_place();
+            eprintln!("Applying LoRA adapter {:?} (alpha={})...", adapter, alpha);
+            modelc::lora::apply_lora(&mut m, adapter, *alpha)?;
+            let out_path = output.clone().unwrap_or_else(|| {
+                let mut p = path.clone();
+                p.set_file_name(format!("{}.lora.modelc", p.file_stem().unwrap().to_string_lossy()));
+                p
+            });
+            modelc::pack::pack(&m, &out_path, false)?;
+            eprintln!("Saved adapted model -> {:?}", out_path);
+        }
     }
 
     Ok(())

@@ -18,6 +18,9 @@ mod backend {
     }
 
     impl MetalBackend {
+        /// Threshold (bytes) above which we prefer CPU to avoid GPU OOM on large matrices.
+        const GPU_MEM_THRESHOLD: u64 = 1024 * 1024 * 1024; // 1 GB
+
         pub fn new() -> Option<Self> {
             let device = Device::system_default()?;
             let command_queue = device.new_command_queue();
@@ -47,6 +50,20 @@ mod backend {
             })
         }
 
+        /// Check whether the requested total buffer size exceeds the safe GPU memory threshold.
+        fn would_exceed_gpu_memory(&self, total_bytes: u64) -> bool {
+            if total_bytes > Self::GPU_MEM_THRESHOLD {
+                eprintln!(
+                    "  Metal: skipping GPU ({} MB > {} MB threshold)",
+                    total_bytes / (1024 * 1024),
+                    Self::GPU_MEM_THRESHOLD / (1024 * 1024)
+                );
+                true
+            } else {
+                false
+            }
+        }
+
         pub fn matmul_gpu(&self, a: &Tensor, b: &Tensor) -> Option<Tensor> {
             let library = self.library.as_ref()?;
 
@@ -54,6 +71,11 @@ mod backend {
             let n = b.shape[1];
 
             if a.shape[1] != b.shape[0] {
+                return None;
+            }
+
+            let total_bytes = ((a.data.len() + b.data.len() + m * n) * std::mem::size_of::<f32>()) as u64;
+            if self.would_exceed_gpu_memory(total_bytes) {
                 return None;
             }
 
@@ -150,6 +172,11 @@ mod backend {
                 return Some(Tensor::from_vec(vec![], a.shape.clone()));
             }
 
+            let total_bytes = (len * 2 * std::mem::size_of::<f32>()) as u64;
+            if self.would_exceed_gpu_memory(total_bytes) {
+                return None;
+            }
+
             let a_buffer = self.device.new_buffer_with_data(
                 a.data.as_ptr() as *const _,
                 (len * std::mem::size_of::<f32>()) as u64,
@@ -205,6 +232,11 @@ mod backend {
             let len = a.data.len();
             if len == 0 {
                 return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let total_bytes = (len * 3 * std::mem::size_of::<f32>()) as u64;
+            if self.would_exceed_gpu_memory(total_bytes) {
+                return None;
             }
 
             let a_buffer = self.device.new_buffer_with_data(
@@ -265,6 +297,11 @@ mod backend {
             let len = a.data.len();
             if len == 0 {
                 return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let total_bytes = (len * 2 * std::mem::size_of::<f32>()) as u64;
+            if self.would_exceed_gpu_memory(total_bytes) {
+                return None;
             }
 
             let a_buffer = self.device.new_buffer_with_data(
@@ -332,6 +369,11 @@ mod backend {
             let len = a.data.len();
             if len == 0 {
                 return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let total_bytes = (len * 2 * std::mem::size_of::<f32>()) as u64;
+            if self.would_exceed_gpu_memory(total_bytes) {
+                return None;
             }
 
             let a_buffer = self.device.new_buffer_with_data(
@@ -407,6 +449,11 @@ mod backend {
             let n_vectors = n_elements / last_dim;
             if n_elements == 0 {
                 return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let total_bytes = ((n_elements * 2 + weight.data.len() + bias.data.len()) * std::mem::size_of::<f32>()) as u64;
+            if self.would_exceed_gpu_memory(total_bytes) {
+                return None;
             }
 
             let a_buffer = self.device.new_buffer_with_data(
