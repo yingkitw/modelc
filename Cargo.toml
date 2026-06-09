@@ -27,6 +27,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 dirs = "6"
+toml = "0.8"
 ureq = "3"
 zstd = "0.13"
 

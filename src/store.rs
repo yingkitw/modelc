@@ -16,6 +16,23 @@ pub fn store_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Search installed models by name or architecture substring.
+pub fn search_models(query: &str) -> Result<Vec<InstalledModel>> {
+    let q = query.to_lowercase();
+    let all = list_models()?;
+    let filtered: Vec<InstalledModel> = all
+        .into_iter()
+        .filter(|m| {
+            m.name.to_lowercase().contains(&q)
+                || m.architecture
+                    .as_ref()
+                    .map(|a| a.to_lowercase().contains(&q))
+                    .unwrap_or(false)
+        })
+        .collect();
+    Ok(filtered)
+}
+
 /// List installed models (files ending with `.modelc` in the store).
 pub fn list_models() -> Result<Vec<InstalledModel>> {
     let dir = store_dir()?;

@@ -82,6 +82,9 @@ pub enum Commands {
 
         #[arg(short = 'f', long = "format", help = "Input weight format", value_enum)]
         format: Option<WeightFormat>,
+
+        #[arg(long, help = "Generate a Markdown model card from metadata")]
+        readme: bool,
     },
 
     #[command(about = "Pack model weights into a single .modelc artifact")]
@@ -129,10 +132,19 @@ pub enum Commands {
             help = "IP address to bind"
         )]
         bind: String,
+
+        #[arg(long, help = "Print per-operation timing for each inference request")]
+        profile: bool,
     },
 
     #[command(about = "List installed model packages")]
     List,
+
+    #[command(about = "Search installed models by name or architecture")]
+    Search {
+        #[arg(help = "Query string (matches name or architecture)")]
+        query: String,
+    },
 
     #[command(about = "Pull a model package from a URL or path into the local store")]
     Pull {

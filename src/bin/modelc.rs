@@ -36,8 +36,37 @@ fn main() -> Result<()> {
                 embedded_release,
             )?;
         }
-        modelc::cli::Commands::Inspect { input, format } => {
-            modelc::compiler::inspect(input, format.as_ref())?;
+        modelc::cli::Commands::Inspect { input, format, readme } => {
+            if *readme {
+                let mut model = modelc::compiler::inspect_model(input, format.as_ref())?;
+                model.dequantize_in_place();
+                println!("# {} Model Card\n", model.name);
+                println!("## Overview\n");
+                println!("- **Architecture**: {}", model.architecture);
+                println!("- **Tensors**: {}", model.tensors.len());
+                println!("- **Parameters**: {}", model.total_params());
+                println!("- **Total bytes**: {}", model.total_bytes());
+                println!("\n## Metadata\n");
+                if model.metadata.is_empty() {
+                    println!("_No metadata._");
+                } else {
+                    for (k, v) in &model.metadata {
+                        println!("- **{}**: {}", k, v);
+                    }
+                }
+                println!("\n## Tensors\n");
+                let mut names: Vec<&str> = model.tensors.keys().map(|s| s.as_str()).collect();
+                names.sort_unstable();
+                for name in names {
+                    let td = &model.tensors[name];
+                    println!(
+                        "- `{}`: shape={:?}, dtype={:?}, bytes={}",
+                        name, td.shape, td.dtype, td.byte_len()
+                    );
+                }
+            } else {
+                modelc::compiler::inspect(input, format.as_ref())?;
+            }
         }
         modelc::cli::Commands::Pack {
             input,
@@ -62,7 +91,7 @@ fn main() -> Result<()> {
                 quantize.as_ref(),
             )?;
         }
-        modelc::cli::Commands::Run { input, port, bind } => {
+        modelc::cli::Commands::Run { input, port, bind, profile } => {
             let path = modelc::store::resolve_model_path(input)?;
             eprintln!("modelc run: loading {:?}...", path);
             let mut model = modelc::pack::unpack(&path)?;
@@ -74,30 +103,28 @@ fn main() -> Result<()> {
                 model.tensors.len(),
                 model.total_params(),
             );
+            if *profile {
+                eprintln!("  profiling enabled");
+            }
 
             let addr: SocketAddr = format!("{}:{}", bind.trim(), port)
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid bind address: {}", e))?;
 
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(modelc::serve::run_server(model, addr))?;
+            rt.block_on(modelc::serve::run_server(model, addr, *profile))?;
         }
         modelc::cli::Commands::List => {
             let models = modelc::store::list_models()?;
+            print_model_list(&models);
+        }
+        modelc::cli::Commands::Search { query } => {
+            let models = modelc::store::search_models(query)?;
             if models.is_empty() {
-                println!("No models installed. Use `modelc pull <source>` to add one.");
+                println!("No models matching '{}'.", query);
             } else {
-                println!("Installed models:");
-                for m in models {
-                    let size_mb = m.size_bytes as f64 / (1024.0 * 1024.0);
-                    let arch = m.architecture.as_deref().unwrap_or("unknown");
-                    let params = m.params.map(|p| format!("{} params", p)).unwrap_or_default();
-                    let comp = if m.compressed { " [zstd]" } else { "" };
-                    println!(
-                        "  {:20} {:>8.2} MB  {:12} {:>14}{}",
-                        m.name, size_mb, arch, params, comp
-                    );
-                }
+                println!("Models matching '{}':", query);
+                print_model_list(&models);
             }
         }
         modelc::cli::Commands::Pull { source, name } => {
@@ -280,4 +307,22 @@ fn benchmark_inference(
     }
 
     input.to_vec()
+}
+
+fn print_model_list(models: &[modelc::store::InstalledModel]) {
+    if models.is_empty() {
+        println!("No models installed. Use `modelc pull <source>` to add one.");
+        return;
+    }
+    println!("Installed models:");
+    for m in models {
+        let size_mb = m.size_bytes as f64 / (1024.0 * 1024.0);
+        let arch = m.architecture.as_deref().unwrap_or("unknown");
+        let params = m.params.map(|p| format!("{} params", p)).unwrap_or_default();
+        let comp = if m.compressed { " [zstd]" } else { "" };
+        println!(
+            "  {:20} {:>8.2} MB  {:12} {:>14}{}",
+            m.name, size_mb, arch, params, comp
+        );
+    }
 }

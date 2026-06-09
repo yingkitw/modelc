@@ -14,8 +14,8 @@ use crate::model::Model;
 use crate::runtime::serve::Runtime;
 use crate::runtime::tensor::Tensor;
 
-pub async fn run_server(model: Model, addr: SocketAddr) -> anyhow::Result<()> {
-    let app = build_router(model);
+pub async fn run_server(model: Model, addr: SocketAddr, profile: bool) -> anyhow::Result<()> {
+    let app = build_router(model, profile);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("modelc run: listening on http://{}", addr);
@@ -23,7 +23,7 @@ pub async fn run_server(model: Model, addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_router(model: Model) -> Router {
+fn build_router(model: Model, profile: bool) -> Router {
     let state = Arc::new(AppState {
         name: model.name.clone(),
         architecture: model.architecture.clone(),
@@ -36,6 +36,7 @@ fn build_router(model: Model) -> Router {
         },
         runtime: Runtime::from_raw(&model.tensors),
         mlp_plan: infer_mlp_plan(&model),
+        profile,
     });
 
     Router::new()
@@ -52,6 +53,7 @@ struct AppState {
     tensor_names: Vec<String>,
     runtime: Runtime,
     mlp_plan: Option<Vec<(String, String)>>,
+    profile: bool,
 }
 
 #[derive(Deserialize)]
@@ -84,28 +86,36 @@ async fn infer(
     Json(req): Json<InferRequest>,
 ) -> Json<InferResponse> {
     if !req.inputs.is_empty() {
+        let start = std::time::Instant::now();
         let outs: Vec<Vec<f32>> = req
             .inputs
             .iter()
             .map(|inp| {
                 if let Some(plan) = &state.mlp_plan {
-                    run_mlp_forward(&state.runtime, plan, inp)
+                    run_mlp_forward(&state.runtime, plan, inp, state.profile)
                 } else {
                     inp.clone()
                 }
             })
             .collect();
+        if state.profile {
+            eprintln!("  batch infer: {} items in {:.3} ms", outs.len(), start.elapsed().as_secs_f64() * 1000.0);
+        }
         return Json(InferResponse {
             output: None,
             outputs: Some(outs),
         });
     }
 
+    let start = std::time::Instant::now();
     let output = if let Some(plan) = &state.mlp_plan {
-        run_mlp_forward(&state.runtime, plan, &req.input)
+        run_mlp_forward(&state.runtime, plan, &req.input, state.profile)
     } else {
         req.input.clone()
     };
+    if state.profile {
+        eprintln!("  infer: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+    }
     Json(InferResponse {
         output: Some(output),
         outputs: None,
@@ -122,7 +132,7 @@ async fn model_info(State(state): State<Arc<AppState>>) -> Json<ModelInfo> {
     })
 }
 
-fn run_mlp_forward(runtime: &Runtime, plan: &[(String, String)], input: &[f32]) -> Vec<f32> {
+fn run_mlp_forward(runtime: &Runtime, plan: &[(String, String)], input: &[f32], profile: bool) -> Vec<f32> {
     if plan.is_empty() {
         return input.to_vec();
     }
@@ -133,9 +143,17 @@ fn run_mlp_forward(runtime: &Runtime, plan: &[(String, String)], input: &[f32]) 
     for (idx, (w_name, b_name)) in plan.iter().enumerate() {
         let w = runtime.get(w_name).expect("mlp weight missing");
         let b = runtime.get(b_name).expect("mlp bias missing");
+        let start = std::time::Instant::now();
         cur = gemv_bias(w, b, &cur);
+        if profile {
+            eprintln!("    matmul+bias ({}): {:.3} ms", w_name, start.elapsed().as_secs_f64() * 1000.0);
+        }
         if idx != last {
+            let r_start = std::time::Instant::now();
             relu_inplace(&mut cur);
+            if profile {
+                eprintln!("    relu: {:.3} ms", r_start.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
 

@@ -42,12 +42,12 @@
 - [x] **Benchmark command**: `modelc bench <artifact>` measures warm/cold latency and throughput.
 - [x] **Artifact verification**: `modelc verify <artifact>` checks header integrity and tensor blob checksums.
 - [x] **Export to Safetensors**: `modelc export <artifact> -o out.safetensors` reverses packaging.
-- [ ] **Model search**: `modelc search <query>` filters store by architecture, size, or name pattern.
-- [ ] **Config file support**: `~/.modelc/config.toml` for default bind address, store path, compression level.
+- [x] **Model search**: `modelc search <query>` filters store by architecture, size, or name pattern.
+- [x] **Config file support**: `~/.modelc/config.toml` for default bind address, store path, compression level.
 - [ ] **Shell completions**: generate bash/zsh/fish completions for all subcommands.
-- [ ] **Per-op profiling**: `--profile` flag on `run` prints timing per inference step.
+- [x] **Per-op profiling**: `--profile` flag on `run` prints timing per inference step.
 - [ ] **Model versioning**: store multiple versions and `modelc switch <name> <version>`.
-- [ ] **Model card generation**: `modelc inspect --readme` generates Markdown model card from metadata.
+- [x] **Model card generation**: `modelc inspect --readme` generates Markdown model card from metadata.
 
 ## Backlog (HTTP API / serving)
 

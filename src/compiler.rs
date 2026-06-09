@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use crate::cli::{ModelArch, QuantizeMode, WeightFormat, apply_arch_hint};
 use crate::codegen::CodeGenerator;
 use crate::codegen::native::NativeCodegen;
-use crate::model::DataType;
+use crate::model::{DataType, Model};
 use crate::parsers::WeightParser;
 use crate::parsers::gguf::GgufParser;
 use crate::parsers::onnx::OnnxParser;
@@ -218,7 +218,8 @@ pub fn pack(
     Ok(output_path)
 }
 
-pub fn inspect(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
+/// Parse a model file and return the [`Model`] for programmatic inspection.
+pub fn inspect_model(input: &Path, format: Option<&WeightFormat>) -> Result<Model> {
     let weight_format = format
         .cloned()
         .or_else(|| WeightFormat::detect(input))
@@ -228,6 +229,17 @@ pub fn inspect(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
     let model = parser
         .parse(input)
         .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
+
+    Ok(model)
+}
+
+pub fn inspect(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
+    let model = inspect_model(input, format)?;
+    let weight_format = format
+        .cloned()
+        .or_else(|| WeightFormat::detect(input))
+        .context("could not detect weight format; specify with -f/--format")?;
+    let parser = get_parser(&weight_format);
 
     println!("Model: {}", model.name);
     println!("Architecture: {}", model.architecture);

@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
+pub mod config;
 pub mod metal;
 pub mod model;
 pub mod pack;
