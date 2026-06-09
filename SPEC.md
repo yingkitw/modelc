@@ -13,17 +13,17 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 ## Non-goals (current scope)
 
-- Full graph capture and arbitrary framework-accurate inference for every ONNX or PyTorch export (parsers focus on **weights** into the IR; generated servers emit a real **FP32 MLP** forward when `--arch mlp` matches `layerN.(weight,bias)` or `weight`/`bias`, otherwise `/infer` still echoes input).
+- Full graph capture and arbitrary framework-accurate inference for every ONNX or PyTorch export (parsers focus on **weights** into the IR; ONNX execution covers a core subset of ops; generated servers emit a real **FP32 MLP** forward when `--arch mlp` matches `layerN.(weight,bias)` or `weight`/`bias`, otherwise inference falls back to ONNX plan or echoes input).
 - Training or fine-tuning.
-- Replacing general-purpose inference servers (e.g. full ONNX Runtime) unless explicitly extended later.
+- Replacing general-purpose inference servers (e.g. full ONNX Runtime) for models outside the supported op set.
 
 ## User-facing commands
 
 ### `pack`
 
-**Input:** path to weights file; optional `-f`, `-o`, `--arch`, `--compress`.
+**Input:** path to weights file; optional `-f`, `-o`, `--arch`, `--compress`, `--quantize fp16|int8|int4`, `--prune <threshold>`.
 
-**Output:** `.modelc` single-file artifact containing JSON header + tensor blob (optionally compressed).
+**Output:** `.modelc` single-file artifact containing JSON header + tensor blob (optionally compressed / quantized / pruned).
 
 **Side effects:** writes artifact file to specified path.
 
@@ -31,7 +31,7 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 ### `run`
 
-**Input:** path to `.modelc` artifact (or uses default store); optional `--port`, `--bind`.
+**Input:** path to `.modelc` artifact (or uses default store); optional `--port`, `--bind`, `--profile`.
 
 **Output:** HTTP server listening for inference requests.
 
@@ -47,13 +47,37 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 **Errors:** store access failure.
 
-### `pull` (future)
+### `pull`
 
-**Input:** model identifier (e.g., `username/model-name`).
+**Input:** model identifier (e.g., `username/model-name`); optional `--version`.
 
 **Output:** downloaded `.modelc` artifact stored locally.
 
 **Errors:** network failure; invalid model identifier.
+
+### `search`
+
+**Input:** query string.
+
+**Output:** filtered list of models matching name or architecture.
+
+### `bench`
+
+**Input:** path to `.modelc` artifact.
+
+**Output:** warm/cold latency and throughput measurements.
+
+### `containerize`
+
+**Input:** path to `.modelc` artifact; optional `--base-image`.
+
+**Output:** Dockerfile + entrypoint.sh in target directory.
+
+### `switch`
+
+**Input:** model name, version number.
+
+**Output:** activates specified version in store.
 
 ### `inspect`
 
@@ -80,8 +104,8 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 | Format       | Parser status |
 |-------------|---------------|
 | Safetensors | Implemented (`safetensors` crate). |
-| GGUF        | Implemented for **F32/F16/BF16** and contiguous integer blobs; **Q4_0** and **Q8_0** blocks are **dequantized to F32** in IR. Other GGML quant types still error with a named type hint. |
-| ONNX        | Implemented for **initializer** tensors: inlined `raw_data` / typed fields, or **external** payloads (`external_data` `location` relative to the `.onnx` parent directory, optional `offset` / `length`) for the same supported dtypes as inline import. **Segmented** initializers are still rejected. |
+| GGUF        | Implemented for **F32/F16/BF16/F64/I8/I16/I32/I64** and contiguous integer blobs; **Q4_0, Q5_0, Q8_0, Q4_K, Q6_K** blocks are **dequantized to F32** in IR. Unsupported quant types still error with a named type hint. |
+| ONNX        | Implemented for **initializer** tensors: inlined `raw_data` / typed fields, **external** payloads (`external_data` with `location`/`offset`/`length`), and **segmented** initializers. Also parses the graph into an `ExecutionPlan` stored as `onnx.execution_plan` metadata. |
 | PyTorch     | Implemented for **Safetensors-in-ZIP** (and standalone Safetensors mislabeled `.pt`/`.pth`); pickle-only checkpoints need export outside `modelc`. |
 
 ## Format detection
@@ -117,7 +141,15 @@ Created by `pack`, consumed by `run`.
 ### HTTP API (both `run` and `model-serve`)
 
 - **`GET /info`** — JSON object: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (array of tensor name strings).
-- **`POST /infer`** — request JSON `{ "input": number[] }` (`f32`), response `{ "output": number[] }`. When the manifest `architecture` is **`mlp`**, codegen lowers a **GEMV stack with bias (+ ReLU between hidden layers)** for strict `layerN.weight`/`layerN.bias` pairs (contiguous IDs) or a single `weight`/`bias`; all other architectures still **echo** the input until expanded.
+- **`POST /infer`** — request JSON `{ "input": number[] }` (`f32`) or `{ "inputs": [[...], [...]] }` for batch. Response `{ "output": number[] }` or `{ "outputs": [[...], [...]] }`.
+- **`POST /chat`** — request JSON `{ "messages": [{"role": "...", "content": "..."}] }`, response `{ "message": {"role": "assistant", "content": "..."} }`.
+- **`POST /chat/stream`** — SSE stream of `{ "delta": "...", "done": bool }` chunks.
+- **`POST /complete`** — request JSON `{ "prompt": "..." }`, response `{ "completion": "..." }`.
+
+**Inference pipeline** (in order of preference):
+1. **ONNX execution plan** — if `onnx.execution_plan` metadata exists, ops are executed via the tensor runtime.
+2. **MLP GEMV** — when `architecture == "mlp"`, runs stacked GEMV + bias (+ ReLU between hidden layers) using `layerN.weight`/`layerN.bias` or a single `weight`/`bias`.
+3. **Echo fallback** — returns input unchanged.
 
 ## Library runtime
 
@@ -131,8 +163,8 @@ Created by `pack`, consumed by `run`.
 
 ## Acceleration
 
-- **Apple Silicon (M-series):** Metal GPU acceleration skeleton implemented (`src/metal.rs`, `src/compute/shaders.metal`). Full GPU kernels for matmul and other ops are pending implementation.
-- **Future:** CPU-optimized paths (AVX, NEON) for non-Metal targets.
+- **Apple Silicon (M-series):** Full Metal GPU kernels for relu, add, mul_scalar, softmax, layer_norm, matmul (`src/metal.rs`, `src/compute/shaders.metal`). GPU memory pressure handling via pre-allocation checks.
+- **CPU:** AVX (x86_64) and NEON (aarch64) SIMD paths with runtime feature detection; `rayon` parallelization for large matmuls.
 
 ## Compatibility
 

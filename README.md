@@ -60,13 +60,14 @@ Examples use the **`modelc`** command. Put it on your `PATH` with `cargo install
 ```bash
 modelc pack path/to/model.safetensors -o my-model.modelc
 modelc pack path/to/model.gguf --compress -o my-model.modelc
+modelc pack path/to/model.safetensors --quantize int8 --prune 0.001 -o my-model.modelc
 ```
 
 **Run** inference from local artifacts:
 
 ```bash
 modelc run my-model.modelc
-modelc run my-model.modelc --port 8080
+modelc run my-model.modelc --port 8080 --profile
 ```
 
 **List** locally stored models:
@@ -75,10 +76,19 @@ modelc run my-model.modelc --port 8080
 modelc list
 ```
 
-**Pull** models from remote sources (future):
+**Pull** models from remote sources:
 
 ```bash
 modelc pull username/model-name
+modelc pull username/model-name --version 2
+```
+
+**Chat / completion inference:**
+
+```bash
+# HTTP API: POST /chat with messages
+# HTTP API: POST /complete with prompt
+# HTTP API: POST /chat/stream for SSE streaming
 ```
 
 ### Legacy compile workflow
@@ -140,12 +150,20 @@ Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GG
 
 ## HTTP API (run + model-serve)
 
-| Method | Path     | Body / response |
-|--------|----------|-----------------|
-| `GET`  | `/info`  | JSON: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (names). |
-| `POST` | `/infer` | Request JSON: `{ "input": [f32, ...] }`. Response: `{ "output": [f32, ...] }`. If the embedded **`architecture`** is **`mlp`**, codegen emits a **stacked GEMV + bias (+ ReLU between hidden layers)** using `layerN.weight`/`layerN.bias` (strictly contiguous indices) or a single `weight`/`bias`; other architectures keep the lightweight input echo stub. |
+| Method | Path           | Body / response |
+|--------|----------------|-----------------|
+| `GET`  | `/info`        | JSON: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (names). |
+| `POST` | `/infer`       | Request JSON: `{ "input": [f32, ...] }` or `{ "inputs": [[f32, ...], ...] }` for batch. Response: `{ "output": [f32, ...] }` or `{ "outputs": [[f32, ...], ...] }`. |
+| `POST` | `/chat`        | Request JSON: `{ "messages": [{"role": "user", "content": "..."}] }`. Response: `{ "message": {"role": "assistant", "content": "..."} }`. |
+| `POST` | `/chat/stream` | SSE stream of `{ "delta": "...", "done": bool }` chunks. |
+| `POST` | `/complete`    | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
 
-Both responses are `application/json`.
+**Inference backends** (priority order):
+1. **ONNX execution plan** — if the model metadata contains `onnx.execution_plan`, ops are executed via the runtime tensor engine (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast).
+2. **MLP GEMV** — when `architecture == "mlp"`, emits a stacked GEMV + bias (+ ReLU between hidden layers) using `layerN.weight`/`layerN.bias` or a single `weight`/`bias`.
+3. **Echo fallback** — returns input unchanged when no execution plan matches.
+
+All JSON responses are `application/json`; SSE uses `text/event-stream`.
 
 ## crates.io checklist
 
@@ -163,9 +181,23 @@ Before the first (`modelc`) publish:
 - ONNX — [onnx.ai](https://onnx.ai/onnx/intro/)
 - PyTorch checkpoints — accepts mislabeled standalone Safetensors bytes and Torch **ZIP** containers that nest `*.safetensors` payloads; pickled-only checkpoints should be exported to Safetensors, ONNX, or GGUF externally.
 
+## Features
+
+- **ONNX graph execution** — parses ONNX graph nodes into an execution plan (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast) and runs inference via the tensor runtime.
+- **LoRA adapter support** — load and apply LoRA adapters on top of a base model at runtime (`src/lora.rs`).
+- **INT4 quantization + weight pruning** — pack-time `--quantize int4` and `--prune <threshold>` for extreme size reduction.
+- **Docker/OCI image generation** — `modelc containerize <artifact>` emits a minimal Dockerfile + entrypoint.
+- **Model versioning** — store multiple versions and `modelc switch <name> <version>`.
+- **Shell completions** — generate bash/zsh/fish completions for all subcommands.
+- **Per-op profiling** — `--profile` flag on `run` prints timing per inference step.
+
 ## Repository layout
 
-- `src/` — CLI, parsers, `Model` IR, codegen, runtime helpers.
+- `src/` — CLI, parsers, `Model` IR, codegen, runtime helpers, ONNX execution engine.
+  - `src/parsers/` — format-specific parsers, modularized by format (`gguf/`, `onnx/` subdirectories).
+  - `src/onnx_exec/` — ONNX graph execution plan builder and executor (`mod.rs`, `helpers.rs`).
+  - `src/codegen/native/` — native code generator, modularized (`mod.rs`, `forward.rs`, `helpers.rs`).
+  - `src/serve/` — HTTP inference server, modularized (`mod.rs`, `handlers.rs`, `infer.rs`).
 - `examples/` — runnable `cargo --example` programs ([`examples/README.md`](./examples/README.md)).
 - `tests/` — integration tests.
 

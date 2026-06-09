@@ -14,16 +14,25 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | Module / path | Responsibility |
 |---------------|----------------|
 | `src/main.rs` | Binary entry; resolves `--listen` / `--bind`+`--port`, prints `CLI_VERSION`, calls compiler/packer/runner. |
-| `src/cli.rs` | `Cli`, `Commands`, `WeightFormat`, `ModelArch`, format detection + magic sniffing, `compile_listen`. |
+| `src/cli.rs` | `Cli`, `Commands`, `WeightFormat`, `ModelArch`, format detection + magic sniffing, `compile_listen`, shell completions. |
 | `src/lib.rs` | Re-exports modules; `CLI_VERSION` (`CARGO_PKG_VERSION` + `MODELC_GIT_SHA` from `build.rs`). |
-| `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers. |
-| `src/compiler.rs` | Parser selection, `apply_arch_hint`, `compile`, `inspect`; tempfile + `cargo` subprocess. |
-| `src/pack.rs` | `.modelc` artifact writer: JSON header + raw tensor blob, optional zstd compression. |
-| `src/store.rs` | Local model store management; platform-specific paths via `dirs` crate. |
-| `src/parsers/` | Format parsers (`WeightParser` trait). Safetensors, **GGUF** (dense + **Q4_0 / Q8_0 → F32** expansion), **ONNX initializers** (inline or **external_data** next to the model), and **Safetensors-in-ZIP / raw Safetensors** PyTorch paths are implemented (`onnx-rs`, `zip`; ONNX segment slices and many quant dtypes are still out of scope). |
-| `src/codegen/` | `CodeGenerator`; `native.rs` **streams** `embedded_weights.bin` (sorted tensors), `Cargo.toml`, `main.rs` with `/info` + `/infer`, optional **MLP GEMV/ReLU forward** when `architecture == "mlp"` naming matches; embeds listen `SocketAddr`. |
+| `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers; auto architecture inference from tensor names. |
+| `src/compiler.rs` | Parser selection, `apply_arch_hint`, `compile`, `inspect`, `pack`; tempfile + `cargo` subprocess. |
+| `src/pack.rs` | `.modelc` artifact writer: JSON header + raw tensor blob, optional zstd compression, quantization, pruning. |
+| `src/store.rs` | Local model store management; platform-specific paths via `dirs` crate; search, versioning, pull. |
+| `src/lora.rs` | LoRA adapter loading and application on top of base model weights at runtime. |
+| `src/config.rs` | `~/.modelc/config.toml` loading and saving (bind, port, store path, compression). |
+| `src/parsers/` | Format parsers (`WeightParser` trait). Modularized by format. |
+| `src/parsers/gguf/` | `mod.rs` (parser), `cursor.rs` (byte-level I/O), `dequant.rs` (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K → F32). |
+| `src/parsers/onnx/` | `mod.rs` (parser, execution plan building), `initializers.rs` (inline, external, segmented tensor loading). |
+| `src/parsers/safetensors.rs` | Safetensors parser (`safetensors` crate). |
+| `src/parsers/pytorch.rs` | PyTorch ZIP/Safetensors-in-ZIP parser. |
+| `src/onnx_exec/` | ONNX graph execution engine. `mod.rs` (plan builder, executor), `helpers.rs` (attribute getters, transpose, element-wise ops). |
+| `src/codegen/` | `CodeGenerator` trait; `native/` module emits standalone Rust server. |
+| `src/codegen/native/` | `mod.rs` (codegen entry, `generate_cargo_toml`, `generate_main_rs`, MLP plan detection), `forward.rs` (MLP/GPT2/LLaMA forward generation), `helpers.rs` (decode_f32, matmul_bias, relu_inplace). |
 | `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`). |
-| `src/metal.rs` | Apple Silicon Metal acceleration skeleton (macOS only). |
+| `src/serve/` | HTTP inference server (`run_server`, `build_router`). `mod.rs` (state, routing), `handlers.rs` (Axum endpoints), `infer.rs` (ONNX/MLP inference pipeline, runtime conversion). |
+| `src/metal.rs` | Apple Silicon Metal acceleration: matmul, relu, add, mul_scalar, softmax, layer_norm kernels (macOS only). |
 | `src/compute/` | Metal compute shaders (`shaders.metal`). |
 
 ## Key abstractions
@@ -75,13 +84,14 @@ Safetensors: optional header `__metadata__` is merged into `Model.metadata`; `ar
 
 - New formats: implement `WeightParser`, extend `WeightFormat` + detector.
 - Alternative emitters: new `CodeGenerator` impl(s).
-- Broader codegen: architectures beyond **`mlp`** stacked linear (+ library `runtime::ops` helpers).
-- Platform backends: Metal for Apple Silicon (skeleton implemented, full kernels pending), CPU SIMD paths (AVX/NEON) for other targets.
-- Remote model registry: implement `pull` command to fetch from model hubs.
+- Broader codegen: architectures beyond **`mlp`**, `gpt2`, `llama` skeletons (expand forward.rs stubs).
+- New ONNX ops: add handlers in `onnx_exec/mod.rs` and test in `tests/onnx_exec_test.rs`.
+- Platform backends: Metal for Apple Silicon (full kernels implemented), CPU SIMD paths (AVX/NEON + rayon parallelization) active.
+- Remote model registry: extend `pull` command to fetch from model hubs.
 
 ## Dependencies (compiler crate)
 
-clap, serde/serde_json, anyhow, safetensors, byteorder, tempfile, **half**, **onnx-rs**, **zip**, **dirs** (platform paths), **zstd** (compression), plus generated HTTP stack (axum/tokio) in emitted projects. **`half`** underpins FP16/BF16 → FP32 casts in `runtime::serve`. **`metal`** crate (macOS only) for Apple Silicon acceleration.
+clap, serde/serde_json, anyhow, safetensors, byteorder, tempfile, **half**, **onnx-rs**, **zip**, **dirs** (platform paths), **zstd** (compression), **rayon** (parallel CPU ops), plus generated HTTP stack (axum/tokio) in emitted projects. **`half`** underpins FP16/BF16 → FP32 casts in `runtime::serve`. **`metal`** crate (macOS only) for Apple Silicon acceleration.
 
 ## Design principles
 
@@ -90,3 +100,4 @@ clap, serde/serde_json, anyhow, safetensors, byteorder, tempfile, **half**, **on
 - The packaged artifact is a **single file** optimized for size and fast loading.
 - **Explicit** `-f/--format` when sniffing hits the 64 MiB Safetensors cap or ambiguous huge files.
 - Cross-platform by default; acceleration is opt-in per platform backend.
+- **Modularize large files**: files over ~400 lines are split into focused submodules (e.g., `gguf/` → `mod.rs` + `cursor.rs` + `dequant.rs`).
