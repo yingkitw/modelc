@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use crate::cli::{ModelArch, WeightFormat, apply_arch_hint};
+use crate::cli::{ModelArch, QuantizeMode, WeightFormat, apply_arch_hint};
 use crate::codegen::CodeGenerator;
 use crate::codegen::native::NativeCodegen;
+use crate::model::DataType;
 use crate::parsers::WeightParser;
 use crate::parsers::gguf::GgufParser;
 use crate::parsers::onnx::OnnxParser;
@@ -139,6 +140,7 @@ pub fn pack(
     format: Option<&WeightFormat>,
     arch: Option<&ModelArch>,
     compress: bool,
+    quantize: Option<&QuantizeMode>,
 ) -> Result<PathBuf> {
     let weight_format = format
         .cloned()
@@ -151,6 +153,52 @@ pub fn pack(
         .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
 
     apply_arch_hint(&mut model, arch);
+
+    if let Some(mode) = quantize {
+        eprintln!("modelc: quantizing tensors to {:?}...", mode);
+        let mut quantized = 0;
+        for (name, td) in model.tensors.iter_mut() {
+            if td.dtype != DataType::F32 {
+                continue;
+            }
+            match mode {
+                QuantizeMode::Fp16 => {
+                    let count = td.element_count();
+                    let mut new_data = Vec::with_capacity(count * 2);
+                    for chunk in td.data.chunks_exact(4) {
+                        let bits = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        let f16_val = half::f16::from_f32(bits);
+                        new_data.extend_from_slice(&f16_val.to_le_bytes());
+                    }
+                    td.dtype = DataType::F16;
+                    td.data = new_data;
+                    quantized += 1;
+                }
+                QuantizeMode::Int8 => {
+                    let count = td.element_count();
+                    let mut floats = Vec::with_capacity(count);
+                    for chunk in td.data.chunks_exact(4) {
+                        let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        floats.push(val);
+                    }
+                    let max_abs = floats.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                    if max_abs > 0.0 {
+                        let scale = max_abs / 127.0;
+                        let mut new_data = Vec::with_capacity(count);
+                        for val in floats {
+                            let q = (val / scale).clamp(-127.0, 127.0).round() as i8;
+                            new_data.push(q as u8);
+                        }
+                        td.dtype = DataType::I8;
+                        td.data = new_data;
+                        model.metadata.insert(format!("quant_scale.{}", name), scale.to_string());
+                        quantized += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("  quantized {} tensors", quantized);
+    }
 
     let output_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let mut p = input.to_path_buf();

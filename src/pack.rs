@@ -100,6 +100,50 @@ pub fn pack(model: &Model, path: &Path, compress: bool) -> Result<()> {
     Ok(())
 }
 
+/// Read only the JSON header from a `.modelc` artifact without loading tensor data.
+pub fn read_header(path: &Path) -> Result<ArtifactHeader> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open artifact at {:?}", path))?;
+
+    let mut magic = [0u8; 6];
+    file.read_exact(&mut magic)
+        .context("artifact file too short (magic)")?;
+    if magic != MAGIC {
+        anyhow::bail!("invalid artifact magic bytes (not a .modelc file)");
+    }
+
+    let mut version_bytes = [0u8; 4];
+    file.read_exact(&mut version_bytes)
+        .context("artifact file too short (version)")?;
+    let version = u32::from_le_bytes(version_bytes);
+
+    let _flags = if version >= 2 {
+        let mut flags_bytes = [0u8; 4];
+        file.read_exact(&mut flags_bytes)
+            .context("artifact file too short (flags)")?;
+        u32::from_le_bytes(flags_bytes)
+    } else {
+        0
+    };
+
+    if version != 1 && version != 2 {
+        anyhow::bail!("unsupported artifact version {} (expected 1 or 2)", version);
+    }
+
+    let mut header_len_bytes = [0u8; 8];
+    file.read_exact(&mut header_len_bytes)
+        .context("artifact file too short (header length)")?;
+    let header_len = u64::from_le_bytes(header_len_bytes);
+
+    let mut header_json = vec![0u8; header_len as usize];
+    file.read_exact(&mut header_json)
+        .context("artifact file too short (header)")?;
+    let header: ArtifactHeader = serde_json::from_slice(&header_json)
+        .context("failed to deserialize artifact header")?;
+
+    Ok(header)
+}
+
 /// Unpack a `.modelc` artifact file into a [`Model`].
 pub fn unpack(path: &Path) -> Result<Model> {
     let mut file = std::fs::File::open(path)

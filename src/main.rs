@@ -43,6 +43,7 @@ fn main() -> Result<()> {
             format,
             arch,
             compress,
+            quantize,
         } => {
             eprintln!("modelc {}", modelc::CLI_VERSION);
             let output_path = output.clone().unwrap_or_else(|| {
@@ -56,12 +57,14 @@ fn main() -> Result<()> {
                 format.as_ref(),
                 arch.as_ref(),
                 compress,
+                quantize.as_ref(),
             )?;
         }
         modelc::cli::Commands::Run { input, port, bind } => {
             let path = modelc::store::resolve_model_path(input)?;
             eprintln!("modelc run: loading {:?}...", path);
-            let model = modelc::pack::unpack(&path)?;
+            let mut model = modelc::pack::unpack(&path)?;
+            model.dequantize_in_place();
             eprintln!(
                 "  model: {} | architecture: {} | tensors: {} | params: {}",
                 model.name,
@@ -85,25 +88,45 @@ fn main() -> Result<()> {
                 println!("Installed models:");
                 for m in models {
                     let size_mb = m.size_bytes as f64 / (1024.0 * 1024.0);
-                    println!("  {:20} {:.2} MB  {:?}", m.name, size_mb, m.path);
+                    let arch = m.architecture.as_deref().unwrap_or("unknown");
+                    let params = m.params.map(|p| format!("{} params", p)).unwrap_or_default();
+                    let comp = if m.compressed { " [zstd]" } else { "" };
+                    println!(
+                        "  {:20} {:>8.2} MB  {:12} {:>14}{}",
+                        m.name, size_mb, arch, params, comp
+                    );
                 }
             }
         }
         modelc::cli::Commands::Pull { source, name } => {
-            let source_path = PathBuf::from(source);
-            if !source_path.is_file() {
-                anyhow::bail!("source not found: {:?}", source);
-            }
+            let is_url = source.starts_with("http://") || source.starts_with("https://");
 
             let model_name = name.clone().unwrap_or_else(|| {
-                source_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("model")
-                    .to_string()
+                if is_url {
+                    source
+                        .trim_end_matches(".modelc")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("model")
+                        .to_string()
+                } else {
+                    PathBuf::from(source)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("model")
+                        .to_string()
+                }
             });
 
-            let dest = modelc::store::install(&source_path, &model_name)?;
+            let dest = if is_url {
+                modelc::store::download(source, &model_name)?
+            } else {
+                let source_path = PathBuf::from(source);
+                if !source_path.is_file() {
+                    anyhow::bail!("source not found: {:?}", source);
+                }
+                modelc::store::install(&source_path, &model_name)?
+            };
             println!("Installed '{}' -> {:?}", model_name, dest);
         }
     }

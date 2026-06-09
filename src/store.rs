@@ -33,10 +33,41 @@ pub fn list_models() -> Result<Vec<InstalledModel>> {
             let size = std::fs::metadata(&path)
                 .map(|m| m.len())
                 .unwrap_or(0);
+
+            let mut architecture = None;
+            let mut params = None;
+            let mut compressed = false;
+
+            if let Ok(header) = crate::pack::read_header(&path) {
+                architecture = Some(header.architecture);
+                let p: usize = header.tensors.iter().map(|t| {
+                    t.shape.iter().product::<usize>()
+                }).sum();
+                params = Some(p);
+            }
+
+            // Determine compression by reading flags (version 2+ has flags at offset 10).
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() > 14 {
+                    if let Ok(mut file) = std::fs::File::open(&path) {
+                        use std::io::{Read, Seek};
+                        let _ = file.seek(std::io::SeekFrom::Start(10));
+                        let mut flags_bytes = [0u8; 4];
+                        if file.read_exact(&mut flags_bytes).is_ok() {
+                            let flags = u32::from_le_bytes(flags_bytes);
+                            compressed = flags & 1 != 0;
+                        }
+                    }
+                }
+            }
+
             models.push(InstalledModel {
                 name,
                 path,
                 size_bytes: size,
+                architecture,
+                params,
+                compressed,
             });
         }
     }
@@ -73,9 +104,31 @@ pub fn install(source: &Path, name: &str) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// Download a `.modelc` file from a URL into the store with the given name.
+pub fn download(url: &str, name: &str) -> Result<PathBuf> {
+    let dir = store_dir()?;
+    let dest = dir.join(format!("{}.modelc", name));
+
+    let mut body = ureq::get(url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("download failed: {}", e))?
+        .into_body();
+    let mut reader = body.as_reader();
+
+    let mut file = std::fs::File::create(&dest)
+        .with_context(|| format!("failed to create {:?}", dest))?;
+    std::io::copy(&mut reader, &mut file)
+        .with_context(|| format!("failed to write downloaded data to {:?}", dest))?;
+
+    Ok(dest)
+}
+
 #[derive(Debug)]
 pub struct InstalledModel {
     pub name: String,
     pub path: PathBuf,
     pub size_bytes: u64,
+    pub architecture: Option<String>,
+    pub params: Option<usize>,
+    pub compressed: bool,
 }

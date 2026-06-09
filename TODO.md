@@ -15,8 +15,11 @@
 
 ## Active (aligned with PRODUCT.md)
 
-- [ ] **High** --- Full Metal GPU kernels --- Implement compute shaders for matmul on Apple Silicon.
-- [ ] **Medium** --- Quantization at pack time --- FP32 to FP16 / INT8 / Q4_0 to reduce artifact size.
+- [x] **High** --- Complete Metal GPU kernel bindings --- Bind existing shaders (softmax, layer_norm, relu, add, mul_scalar) in src/metal.rs and wire into runtime/ops.rs.
+- [x] **High** --- Quantization at pack time --- Add --quantize flag (fp16, int8) to convert F32 tensors at pack time and reduce artifact size.
+- [x] **Medium** --- CPU SIMD matmul --- Add AVX (x86_64) and NEON (aarch64) optimized paths for matmul_cpu fallback.
+- [x] **Medium** --- Store metadata enrichment --- modelc list reads artifact headers to show architecture, parameter count, and compression status.
+- [x] **Medium** --- Remote model pull --- modelc pull supports HTTP/HTTPS URLs for downloading .modelc artifacts.
 
 ## Optional next steps
 
@@ -24,4 +27,3 @@
 - ONNX: tensor-segment loaders; more dtypes without raw-only restriction.
 - PyTorch: optional Python bridge or minimal pickle reconstruction (high effort).
 - Broader codegen: gpt2, llama, etc., beyond stacked linear + ReLU.
-- CPU SIMD paths (AVX, NEON) for non-Metal targets.

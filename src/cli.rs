@@ -104,6 +104,9 @@ pub enum Commands {
 
         #[arg(long, help = "Compress tensor data with zstd")]
         compress: bool,
+
+        #[arg(long, help = "Quantize FP32 tensors (fp16, int8)", value_enum)]
+        quantize: Option<QuantizeMode>,
     },
 
     #[command(about = "Run a .modelc artifact (starts local HTTP server)")]
@@ -233,6 +236,12 @@ fn sniff_path(path: &std::path::Path) -> std::io::Result<Option<WeightFormat>> {
     }
 
     Ok(None)
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuantizeMode {
+    Fp16,
+    Int8,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

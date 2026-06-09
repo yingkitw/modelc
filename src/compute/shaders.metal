@@ -125,12 +125,13 @@ kernel void layer_norm_kernel(
     device float* output [[buffer(3)]],
     constant uint& last_dim [[buffer(4)]],
     constant float& eps [[buffer(5)]],
+    constant uint& n_vectors [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint i = gid.x;
     uint j = gid.y;
 
-    if (i >= input || j >= last_dim) return;
+    if (i >= n_vectors || j >= last_dim) return;
 
     uint base = i * last_dim;
 
@@ -157,8 +158,10 @@ kernel void layer_norm_kernel(
 kernel void relu_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
+    constant uint& len [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= len) return;
     output[gid] = fmax(0.0f, input[gid]);
 }
 
@@ -167,8 +170,10 @@ kernel void add_kernel(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     device float* output [[buffer(2)]],
+    constant uint& len [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= len) return;
     output[gid] = a[gid] + b[gid];
 }
 
@@ -177,7 +182,9 @@ kernel void mul_scalar_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant float& scalar [[buffer(2)]],
+    constant uint& len [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= len) return;
     output[gid] = input[gid] * scalar;
 }

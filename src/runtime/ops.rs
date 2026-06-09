@@ -23,8 +23,25 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
     let n = b.shape[1];
     assert_eq!(a.shape[1], b.shape[0]);
 
-    // Original implementation for correctness
     let mut out = vec![0.0f32; m * n];
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx") {
+            unsafe { matmul_avx(a, b, &mut out); }
+            return Tensor::from_vec(out, vec![m, n]);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            unsafe { matmul_neon(a, b, &mut out); }
+            return Tensor::from_vec(out, vec![m, n]);
+        }
+    }
+
+    // Fallback scalar implementation
     for i in 0..m {
         for j in 0..n {
             let mut sum = 0.0f32;
@@ -37,7 +54,74 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
     Tensor::from_vec(out, vec![m, n])
 }
 
+#[cfg(target_arch = "x86_64")]
+unsafe fn matmul_avx(a: &Tensor, b: &Tensor, out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let (m, k) = (a.shape[0], a.shape[1]);
+    let n = b.shape[1];
+
+    for i in 0..m {
+        let mut j = 0;
+        while j + 8 <= n {
+            let mut sum = _mm256_setzero_ps();
+            for p in 0..k {
+                let a_val = _mm256_set1_ps(a.data[i * k + p]);
+                let b_vec = _mm256_loadu_ps(b.data.as_ptr().add(p * n + j));
+                sum = _mm256_add_ps(sum, _mm256_mul_ps(a_val, b_vec));
+            }
+            _mm256_storeu_ps(out.as_mut_ptr().add(i * n + j), sum);
+            j += 8;
+        }
+        while j < n {
+            let mut sum = 0.0f32;
+            for p in 0..k {
+                sum += a.data[i * k + p] * b.data[p * n + j];
+            }
+            out[i * n + j] = sum;
+            j += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn matmul_neon(a: &Tensor, b: &Tensor, out: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let (m, k) = (a.shape[0], a.shape[1]);
+    let n = b.shape[1];
+
+    for i in 0..m {
+        let mut j = 0;
+        while j + 4 <= n {
+            let mut sum = unsafe { vdupq_n_f32(0.0) };
+            for p in 0..k {
+                let a_val = unsafe { vdupq_n_f32(a.data[i * k + p]) };
+                let b_vec = unsafe { vld1q_f32(b.data.as_ptr().add(p * n + j)) };
+                sum = unsafe { vfmaq_f32(sum, a_val, b_vec) };
+            }
+            unsafe { vst1q_f32(out.as_mut_ptr().add(i * n + j), sum) };
+            j += 4;
+        }
+        while j < n {
+            let mut sum = 0.0f32;
+            for p in 0..k {
+                sum += a.data[i * k + p] * b.data[p * n + j];
+            }
+            out[i * n + j] = sum;
+            j += 1;
+        }
+    }
+}
+
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(backend) = MetalBackend::new() {
+            if let Some(result) = backend.add_gpu(a, b) {
+                return result;
+            }
+        }
+    }
+
     if a.shape == b.shape {
         let data: Vec<f32> = a.data.iter().zip(&b.data).map(|(x, y)| x + y).collect();
         Tensor::from_vec(data, a.shape.clone())
@@ -58,11 +142,29 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
 }
 
 pub fn mul_scalar(a: &Tensor, s: f32) -> Tensor {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(backend) = MetalBackend::new() {
+            if let Some(result) = backend.mul_scalar_gpu(a, s) {
+                return result;
+            }
+        }
+    }
+
     let data: Vec<f32> = a.data.iter().map(|x| x * s).collect();
     Tensor::from_vec(data, a.shape.clone())
 }
 
 pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(backend) = MetalBackend::new() {
+            if let Some(result) = backend.softmax_gpu(a, axis) {
+                return result;
+            }
+        }
+    }
+
     let rank = a.shape.len();
     assert!(axis < rank);
 
@@ -104,11 +206,29 @@ pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
 }
 
 pub fn relu(a: &Tensor) -> Tensor {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(backend) = MetalBackend::new() {
+            if let Some(result) = backend.relu_gpu(a) {
+                return result;
+            }
+        }
+    }
+
     let data: Vec<f32> = a.data.iter().map(|x| x.max(0.0)).collect();
     Tensor::from_vec(data, a.shape.clone())
 }
 
 pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(backend) = MetalBackend::new() {
+            if let Some(result) = backend.layer_norm_gpu(a, weight, bias, eps) {
+                return result;
+            }
+        }
+    }
+
     assert!(!a.shape.is_empty());
     let last_dim = *a.shape.last().unwrap();
     let n_elements = a.data.len();

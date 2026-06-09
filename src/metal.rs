@@ -143,6 +143,349 @@ mod backend {
             Some(Tensor::from_vec(result_data, vec![m, n]))
         }
 
+        pub fn relu_gpu(&self, a: &Tensor) -> Option<Tensor> {
+            let library = self.library.as_ref()?;
+            let len = a.data.len();
+            if len == 0 {
+                return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let a_buffer = self.device.new_buffer_with_data(
+                a.data.as_ptr() as *const _,
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let out_buffer = self.device.new_buffer(
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let len_val = len as u32;
+            let len_buffer = self.device.new_buffer_with_data(
+                &len_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let function = library.get_function("relu_kernel", None).ok()?;
+            let pipeline_descriptor = ComputePipelineDescriptor::new();
+            pipeline_descriptor.set_compute_function(Some(&function));
+            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+
+            autoreleasepool(|| {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(&a_buffer), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&len_buffer), 0);
+                let groups = MTLSize::new(((len + 255) / 256) as u64, 1, 1);
+                let group_size = MTLSize::new(256, 1, 1);
+                encoder.dispatch_thread_groups(groups, group_size);
+                encoder.end_encoding();
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            });
+
+            let mut result = vec![0.0f32; len];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    out_buffer.contents() as *const f32,
+                    result.as_mut_ptr(),
+                    len,
+                );
+            }
+            Some(Tensor::from_vec(result, a.shape.clone()))
+        }
+
+        pub fn add_gpu(&self, a: &Tensor, b: &Tensor) -> Option<Tensor> {
+            let library = self.library.as_ref()?;
+            if a.shape != b.shape {
+                return None;
+            }
+            let len = a.data.len();
+            if len == 0 {
+                return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let a_buffer = self.device.new_buffer_with_data(
+                a.data.as_ptr() as *const _,
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let b_buffer = self.device.new_buffer_with_data(
+                b.data.as_ptr() as *const _,
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let out_buffer = self.device.new_buffer(
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let len_val = len as u32;
+            let len_buffer = self.device.new_buffer_with_data(
+                &len_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let function = library.get_function("add_kernel", None).ok()?;
+            let pipeline_descriptor = ComputePipelineDescriptor::new();
+            pipeline_descriptor.set_compute_function(Some(&function));
+            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+
+            autoreleasepool(|| {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(&a_buffer), 0);
+                encoder.set_buffer(1, Some(&b_buffer), 0);
+                encoder.set_buffer(2, Some(&out_buffer), 0);
+                encoder.set_buffer(3, Some(&len_buffer), 0);
+                let groups = MTLSize::new(((len + 255) / 256) as u64, 1, 1);
+                let group_size = MTLSize::new(256, 1, 1);
+                encoder.dispatch_thread_groups(groups, group_size);
+                encoder.end_encoding();
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            });
+
+            let mut result = vec![0.0f32; len];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    out_buffer.contents() as *const f32,
+                    result.as_mut_ptr(),
+                    len,
+                );
+            }
+            Some(Tensor::from_vec(result, a.shape.clone()))
+        }
+
+        pub fn mul_scalar_gpu(&self, a: &Tensor, s: f32) -> Option<Tensor> {
+            let library = self.library.as_ref()?;
+            let len = a.data.len();
+            if len == 0 {
+                return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let a_buffer = self.device.new_buffer_with_data(
+                a.data.as_ptr() as *const _,
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let out_buffer = self.device.new_buffer(
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let s_buffer = self.device.new_buffer_with_data(
+                &s as *const f32 as *const _,
+                std::mem::size_of::<f32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let len_val = len as u32;
+            let len_buffer = self.device.new_buffer_with_data(
+                &len_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let function = library.get_function("mul_scalar_kernel", None).ok()?;
+            let pipeline_descriptor = ComputePipelineDescriptor::new();
+            pipeline_descriptor.set_compute_function(Some(&function));
+            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+
+            autoreleasepool(|| {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(&a_buffer), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&s_buffer), 0);
+                encoder.set_buffer(3, Some(&len_buffer), 0);
+                let groups = MTLSize::new(((len + 255) / 256) as u64, 1, 1);
+                let group_size = MTLSize::new(256, 1, 1);
+                encoder.dispatch_thread_groups(groups, group_size);
+                encoder.end_encoding();
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            });
+
+            let mut result = vec![0.0f32; len];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    out_buffer.contents() as *const f32,
+                    result.as_mut_ptr(),
+                    len,
+                );
+            }
+            Some(Tensor::from_vec(result, a.shape.clone()))
+        }
+
+        pub fn softmax_gpu(&self, a: &Tensor, axis: usize) -> Option<Tensor> {
+            let library = self.library.as_ref()?;
+            let rank = a.shape.len();
+            if axis >= rank {
+                return None;
+            }
+            let dim = a.shape[axis];
+            let outer: usize = a.shape[..axis].iter().product();
+            let inner: usize = a.shape[axis + 1..].iter().product();
+            let len = a.data.len();
+            if len == 0 {
+                return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let a_buffer = self.device.new_buffer_with_data(
+                a.data.as_ptr() as *const _,
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let out_buffer = self.device.new_buffer(
+                (len * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let dim_val = dim as u32;
+            let outer_val = outer as u32;
+            let inner_val = inner as u32;
+            let dim_const = self.device.new_buffer_with_data(
+                &dim_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let outer_const = self.device.new_buffer_with_data(
+                &outer_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let inner_const = self.device.new_buffer_with_data(
+                &inner_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let function = library.get_function("softmax_kernel", None).ok()?;
+            let pipeline_descriptor = ComputePipelineDescriptor::new();
+            pipeline_descriptor.set_compute_function(Some(&function));
+            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+
+            autoreleasepool(|| {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(&a_buffer), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&dim_const), 0);
+                encoder.set_buffer(3, Some(&outer_const), 0);
+                encoder.set_buffer(4, Some(&inner_const), 0);
+                let groups = MTLSize::new(
+                    ((outer + 15) / 16) as u64,
+                    ((inner + 15) / 16) as u64,
+                    1,
+                );
+                let group_size = MTLSize::new(16, 16, 1);
+                encoder.dispatch_thread_groups(groups, group_size);
+                encoder.end_encoding();
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            });
+
+            let mut result = vec![0.0f32; len];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    out_buffer.contents() as *const f32,
+                    result.as_mut_ptr(),
+                    len,
+                );
+            }
+            Some(Tensor::from_vec(result, a.shape.clone()))
+        }
+
+        pub fn layer_norm_gpu(&self, a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Option<Tensor> {
+            let library = self.library.as_ref()?;
+            let last_dim = *a.shape.last()?;
+            let n_elements = a.data.len();
+            let n_vectors = n_elements / last_dim;
+            if n_elements == 0 {
+                return Some(Tensor::from_vec(vec![], a.shape.clone()));
+            }
+
+            let a_buffer = self.device.new_buffer_with_data(
+                a.data.as_ptr() as *const _,
+                (n_elements * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let w_buffer = self.device.new_buffer_with_data(
+                weight.data.as_ptr() as *const _,
+                (weight.data.len() * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let b_buffer = self.device.new_buffer_with_data(
+                bias.data.as_ptr() as *const _,
+                (bias.data.len() * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let out_buffer = self.device.new_buffer(
+                (n_elements * std::mem::size_of::<f32>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let last_dim_val = last_dim as u32;
+            let n_vectors_val = n_vectors as u32;
+            let last_dim_const = self.device.new_buffer_with_data(
+                &last_dim_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let eps_const = self.device.new_buffer_with_data(
+                &eps as *const f32 as *const _,
+                std::mem::size_of::<f32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let n_vectors_const = self.device.new_buffer_with_data(
+                &n_vectors_val as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let function = library.get_function("layer_norm_kernel", None).ok()?;
+            let pipeline_descriptor = ComputePipelineDescriptor::new();
+            pipeline_descriptor.set_compute_function(Some(&function));
+            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+
+            autoreleasepool(|| {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(&a_buffer), 0);
+                encoder.set_buffer(1, Some(&w_buffer), 0);
+                encoder.set_buffer(2, Some(&b_buffer), 0);
+                encoder.set_buffer(3, Some(&out_buffer), 0);
+                encoder.set_buffer(4, Some(&last_dim_const), 0);
+                encoder.set_buffer(5, Some(&eps_const), 0);
+                encoder.set_buffer(6, Some(&n_vectors_const), 0);
+                let groups = MTLSize::new(
+                    ((n_vectors + 15) / 16) as u64,
+                    ((last_dim + 15) / 16) as u64,
+                    1,
+                );
+                let group_size = MTLSize::new(16, 16, 1);
+                encoder.dispatch_thread_groups(groups, group_size);
+                encoder.end_encoding();
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            });
+
+            let mut result = vec![0.0f32; n_elements];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    out_buffer.contents() as *const f32,
+                    result.as_mut_ptr(),
+                    n_elements,
+                );
+            }
+            Some(Tensor::from_vec(result, a.shape.clone()))
+        }
+
         pub fn has_gpu(&self) -> bool {
             self.library.is_some()
         }
@@ -180,6 +523,26 @@ impl MetalBackend {
     }
 
     pub fn matmul_gpu(&self, _a: &Tensor, _b: &Tensor) -> Option<Tensor> {
+        None
+    }
+
+    pub fn relu_gpu(&self, _a: &Tensor) -> Option<Tensor> {
+        None
+    }
+
+    pub fn add_gpu(&self, _a: &Tensor, _b: &Tensor) -> Option<Tensor> {
+        None
+    }
+
+    pub fn mul_scalar_gpu(&self, _a: &Tensor, _s: f32) -> Option<Tensor> {
+        None
+    }
+
+    pub fn softmax_gpu(&self, _a: &Tensor, _axis: usize) -> Option<Tensor> {
+        None
+    }
+
+    pub fn layer_norm_gpu(&self, _a: &Tensor, _weight: &Tensor, _bias: &Tensor, _eps: f32) -> Option<Tensor> {
         None
     }
 
