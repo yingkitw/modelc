@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, ensure};
 
-use onnx_rs::ast::{DataLocation, DataType as OnnxDt, TensorProto};
+use onnx_rs::ast::{DataLocation, DataType as OnnxDt};
 
 use crate::model::{DataType, Model, TensorData};
 use crate::parsers::WeightParser;

@@ -93,6 +93,7 @@ struct ModelInfo {
 struct ChatRequest {
     messages: Vec<Message>,
     #[serde(default)]
+    #[allow(dead_code)]
     stream: bool,
 }
 
