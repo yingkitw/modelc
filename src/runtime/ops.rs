@@ -41,14 +41,30 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
         }
     }
 
-    // Fallback scalar implementation
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for p in 0..k {
-                sum += a.data[i * k + p] * b.data[p * n + j];
+    // Parallel fallback for reasonably large matrices
+    if m >= 8 {
+        use rayon::prelude::*;
+        out.par_chunks_exact_mut(n)
+            .enumerate()
+            .for_each(|(i, row_out)| {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for p in 0..k {
+                        sum += a.data[i * k + p] * b.data[p * n + j];
+                    }
+                    row_out[j] = sum;
+                }
+            });
+    } else {
+        // Fallback scalar implementation
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    sum += a.data[i * k + p] * b.data[p * n + j];
+                }
+                out[i * n + j] = sum;
             }
-            out[i * n + j] = sum;
         }
     }
     Tensor::from_vec(out, vec![m, n])

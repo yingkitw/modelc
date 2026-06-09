@@ -140,6 +140,42 @@ pub fn download(url: &str, name: &str) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// List versioned copies of a model (files matching `<name>.v<N>.modelc`).
+pub fn list_versions(name: &str) -> Result<Vec<(u32, PathBuf)>> {
+    let dir = store_dir()?;
+    let mut versions = Vec::new();
+    let prefix = format!("{}.v", name);
+
+    for entry in std::fs::read_dir(&dir).context("failed to read store directory")? {
+        let entry = entry.context("failed to read directory entry")?;
+        let path = entry.path();
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if let Some(tail) = stem.strip_prefix(&prefix) {
+                if let Some(ver_str) = tail.split('.').next() {
+                    if let Ok(ver) = ver_str.parse::<u32>() {
+                        versions.push((ver, path));
+                    }
+                }
+            }
+        }
+    }
+    versions.sort_by_key(|(v, _)| *v);
+    Ok(versions)
+}
+
+/// Switch the active model to a specific version.
+pub fn switch_version(name: &str, version: u32) -> Result<PathBuf> {
+    let dir = store_dir()?;
+    let source = dir.join(format!("{}.v{}.modelc", name, version));
+    if !source.is_file() {
+        anyhow::bail!("version {} of '{}' not found at {:?}", version, name, source);
+    }
+    let dest = dir.join(format!("{}.modelc", name));
+    std::fs::copy(&source, &dest)
+        .with_context(|| format!("failed to copy {:?} to {:?}", source, dest))?;
+    Ok(dest)
+}
+
 #[derive(Debug)]
 pub struct InstalledModel {
     pub name: String,

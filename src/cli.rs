@@ -153,6 +153,9 @@ pub enum Commands {
 
         #[arg(short, long, help = "Local name for the model")]
         name: Option<String>,
+
+        #[arg(short, long, help = "Version tag (saves as <name>.v<version>.modelc)")]
+        version: Option<u32>,
     },
 
     #[command(about = "Benchmark inference latency on a .modelc artifact")]
@@ -180,6 +183,27 @@ pub enum Commands {
 
         #[arg(short, long, help = "Output path", value_hint = ValueHint::FilePath)]
         output: Option<PathBuf>,
+    },
+
+    #[command(about = "Generate shell completions")]
+    Completions {
+        #[arg(help = "Shell: bash, zsh, fish, elvish, powershell")]
+        shell: String,
+    },
+
+    #[command(about = "List versions of an installed model")]
+    Versions {
+        #[arg(help = "Model name")]
+        name: String,
+    },
+
+    #[command(about = "Switch active version of a model")]
+    Switch {
+        #[arg(help = "Model name")]
+        name: String,
+
+        #[arg(help = "Version number (e.g. 1, 2)")]
+        version: u32,
     },
 }
 
@@ -221,6 +245,21 @@ pub fn apply_arch_hint(model: &mut Model, arch: Option<&ModelArch>) {
             model.architecture = inferred;
         }
     }
+}
+
+/// Generate shell completions for the given shell name.
+pub fn generate_completions(shell_name: &str) -> anyhow::Result<()> {
+    let shell = match shell_name.to_lowercase().as_str() {
+        "bash" => clap_complete::Shell::Bash,
+        "zsh" => clap_complete::Shell::Zsh,
+        "fish" => clap_complete::Shell::Fish,
+        "elvish" => clap_complete::Shell::Elvish,
+        "powershell" | "pwsh" | "ps" => clap_complete::Shell::PowerShell,
+        _ => anyhow::bail!("unsupported shell '{}'. Supported: bash, zsh, fish, elvish, powershell", shell_name),
+    };
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    clap_complete::generate(shell, &mut cmd, "modelc", &mut std::io::stdout());
+    Ok(())
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

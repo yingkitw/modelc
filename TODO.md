@@ -33,7 +33,7 @@
 
 - [ ] **INT4 quantization**: pack-time `--quantize int4` for extreme size reduction.
 - [ ] **Weight pruning**: `--prune <threshold>` to zero out small weights and store sparse tensors.
-- [ ] **Multi-threaded CPU ops**: `rayon` or thread pool for parallel CPU matmul on large matrices.
+- [x] **Multi-threaded CPU ops**: `rayon` or thread pool for parallel CPU matmul on large matrices.
 - [ ] **GPU memory pressure handling**: large-model streaming or memory-mapped loading to avoid OOM on Metal.
 - [ ] **Q4_K / Q5_0 / Q6_K GGUF dequant**: expand parser to support more block types natively.
 
@@ -44,9 +44,9 @@
 - [x] **Export to Safetensors**: `modelc export <artifact> -o out.safetensors` reverses packaging.
 - [x] **Model search**: `modelc search <query>` filters store by architecture, size, or name pattern.
 - [x] **Config file support**: `~/.modelc/config.toml` for default bind address, store path, compression level.
-- [ ] **Shell completions**: generate bash/zsh/fish completions for all subcommands.
+- [x] **Shell completions**: generate bash/zsh/fish completions for all subcommands.
 - [x] **Per-op profiling**: `--profile` flag on `run` prints timing per inference step.
-- [ ] **Model versioning**: store multiple versions and `modelc switch <name> <version>`.
+- [x] **Model versioning**: store multiple versions and `modelc switch <name> <version>`.
 - [x] **Model card generation**: `modelc inspect --readme` generates Markdown model card from metadata.
 
 ## Backlog (HTTP API / serving)

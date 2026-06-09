@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 fn main() -> Result<()> {
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
                 print_model_list(&models);
             }
         }
-        modelc::cli::Commands::Pull { source, name } => {
+        modelc::cli::Commands::Pull { source, name, version } => {
             let is_url = source.starts_with("http://") || source.starts_with("https://");
 
             let model_name = name.clone().unwrap_or_else(|| {
@@ -156,7 +156,33 @@ fn main() -> Result<()> {
                 }
                 modelc::store::install(&source_path, &model_name)?
             };
+
+            if let Some(ver) = version {
+                let versioned = modelc::store::store_dir()?
+                    .join(format!("{}.v{}.modelc", model_name, ver));
+                std::fs::copy(&dest, &versioned)
+                    .with_context(|| format!("failed to create versioned copy {:?}", versioned))?;
+                println!("Installed '{}' v{} -> {:?}", model_name, ver, versioned);
+            }
+
             println!("Installed '{}' -> {:?}", model_name, dest);
+        }
+        modelc::cli::Commands::Versions { name } => {
+            let versions = modelc::store::list_versions(name)?;
+            if versions.is_empty() {
+                println!("No versions found for '{}'.", name);
+            } else {
+                println!("Versions for '{}':", name);
+                for (ver, path) in versions {
+                    let size_mb = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64
+                        / (1024.0 * 1024.0);
+                    println!("  v{}  {:>8.2} MB  {:?}", ver, size_mb, path);
+                }
+            }
+        }
+        modelc::cli::Commands::Switch { name, version } => {
+            let dest = modelc::store::switch_version(name, *version)?;
+            println!("Switched '{}' to v{} -> {:?}", name, version, dest);
         }
         modelc::cli::Commands::Bench {
             input,
@@ -187,6 +213,9 @@ fn main() -> Result<()> {
                 p
             });
             modelc::pack::export_to_safetensors(&path, &output_path)?;
+        }
+        modelc::cli::Commands::Completions { shell } => {
+            modelc::cli::generate_completions(shell)?;
         }
     }
 
