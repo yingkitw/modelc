@@ -61,4 +61,4 @@
 
 - [x] **Auto architecture inference**: detect `--arch` from tensor naming patterns (`transformer.h.*`, `model.layers.*`).
 - [x] **Broader codegen**: gpt2, llama, etc. — beyond stacked linear + ReLU.
-- [ ] **ONNX graph execution**: parse ops and compile into runtime, not just weight extraction.
+- [x] **ONNX graph execution**: parse ops and compile into runtime, not just weight extraction.

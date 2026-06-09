@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -9,6 +7,8 @@ use onnx_rs::ast::{DataLocation, DataType as OnnxDt, TensorProto};
 
 use crate::model::{DataType, Model, TensorData};
 use crate::parsers::WeightParser;
+
+mod initializers;
 
 pub struct OnnxParser;
 
@@ -57,21 +57,21 @@ fn parse_onnx_bytes(bytes: &[u8], path: &Path) -> Result<Model> {
                     raw.len()
                 );
                 let slice = &raw[begin..end];
-                onnx_slice_bytes_to_ir(slice, elem, nelem_expected, &name)?
+                initializers::onnx_slice_bytes_to_ir(slice, elem, nelem_expected, &name)?
             } else {
-                onnx_initializer_bytes(init, elem)
+                initializers::onnx_initializer_bytes(init, elem)
                     .with_context(|| format!("initializer {name} payload"))?
             }
         } else if !init.external_data().is_empty() {
-            let disk = load_onnx_external_bytes(path, init)
+            let disk = initializers::load_onnx_external_bytes(path, init)
                 .with_context(|| format!("initializer {name} external_data"))?;
-            onnx_external_bytes_to_ir(&disk, onnx_ty, nelem_expected, init.name())?
+            initializers::onnx_external_bytes_to_ir(&disk, onnx_ty, nelem_expected, init.name())?
         } else if init.data_location() == DataLocation::External {
             anyhow::bail!(
                 "initializer {name:?}: data_location is EXTERNAL but raw_data is empty and external_data has no `location` entry",
             );
         } else {
-            onnx_initializer_bytes(init, elem)
+            initializers::onnx_initializer_bytes(init, elem)
                 .with_context(|| format!("initializer {name} payload"))?
         };
 
@@ -110,15 +110,29 @@ fn parse_onnx_bytes(bytes: &[u8], path: &Path) -> Result<Model> {
         m.producer_version.to_string(),
     );
 
+    // Build execution plan from graph nodes if any exist.
+    if !graph.node.is_empty() {
+        match crate::onnx_exec::build_plan(graph) {
+            Ok(plan) => {
+                if let Ok(json) = plan.to_json() {
+                    metadata.insert("onnx.execution_plan".to_string(), json);
+                }
+            }
+            Err(e) => {
+                eprintln!("  warning: failed to build ONNX execution plan: {}", e);
+            }
+        }
+    }
+
     Ok(Model {
         name: path.file_stem().unwrap().to_string_lossy().to_string(),
-        architecture: "onnx_initializer_dump".to_string(),
+        architecture: "onnx".to_string(),
         tensors,
         metadata,
     })
 }
 
-fn onnx_elem_to_model(dt: OnnxDt) -> Result<DataType> {
+pub(super) fn onnx_elem_to_model(dt: OnnxDt) -> Result<DataType> {
     Ok(match dt {
         OnnxDt::Float => DataType::F32,
         OnnxDt::Float16 => DataType::F16,
@@ -147,225 +161,6 @@ fn onnx_elem_to_model(dt: OnnxDt) -> Result<DataType> {
             anyhow::bail!("ONNX dtype {dt:?} not supported for initializer import");
         }
     })
-}
-
-fn onnx_initializer_bytes(t: &TensorProto<'_>, elem: DataType) -> Result<Vec<u8>> {
-    if let Some(raw) = t.as_raw()
-        && !raw.is_empty()
-    {
-        return Ok(raw.to_vec());
-    }
-
-    Ok(match elem {
-        DataType::F32 => {
-            if let Some(fs) = t.as_f32() {
-                fs.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()
-            } else if let Some(ds) = t.as_f64() {
-                ds.iter()
-                    .flat_map(|x| (*x as f32).to_le_bytes())
-                    .collect::<Vec<u8>>()
-            } else {
-                anyhow::bail!("{:?} missing float payload", t.name());
-            }
-        }
-        DataType::I32 => {
-            let Some(ix) = t.as_i32() else {
-                anyhow::bail!("{:?} missing int32 payload", t.name());
-            };
-            ix.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()
-        }
-        DataType::I64 => {
-            let Some(ix) = t.as_i64() else {
-                anyhow::bail!("{:?} missing int64 payload", t.name());
-            };
-            ix.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()
-        }
-        DataType::F16
-        | DataType::BF16
-        | DataType::U8
-        | DataType::I8
-        | DataType::I16
-        | DataType::Bool => {
-            anyhow::bail!(
-                "{:?} missing raw_data for packed dtype {:?}",
-                t.name(),
-                elem,
-            );
-        }
-    })
-}
-
-fn onnx_tensor_storage_width(dt: OnnxDt) -> Result<usize> {
-    Ok(match dt {
-        OnnxDt::Float => 4,
-        OnnxDt::Double => 8,
-        OnnxDt::Float16 | OnnxDt::Bfloat16 => 2,
-        OnnxDt::Int32 => 4,
-        OnnxDt::Int64 => 8,
-        OnnxDt::Uint8 => 1,
-        OnnxDt::Int8 => 1,
-        OnnxDt::Uint16 | OnnxDt::Int16 => 2,
-        OnnxDt::Bool => 1,
-        dt => anyhow::bail!("ONNX dtype {dt:?} cannot be loaded from external initializer bytes",),
-    })
-}
-
-fn load_onnx_external_bytes(model_path: &Path, init: &TensorProto<'_>) -> Result<Vec<u8>> {
-    let mut location: Option<&str> = None;
-    let mut offset: u64 = 0;
-    let mut length: Option<u64> = None;
-
-    for e in init.external_data() {
-        match e.key {
-            "location" => location = Some(e.value),
-            "offset" => {
-                let v: i64 = e.value.parse().with_context(|| {
-                    format!(
-                        "initializer {:?}: external_data `offset` invalid integer",
-                        init.name(),
-                    )
-                })?;
-                ensure!(
-                    v >= 0,
-                    "initializer {:?}: negative external offset",
-                    init.name(),
-                );
-                offset = u64::try_from(v).context(format!(
-                    "initializer {:?}: external offset overflow",
-                    init.name(),
-                ))?;
-            }
-            "length" => {
-                let v: i64 = e.value.parse().with_context(|| {
-                    format!(
-                        "initializer {:?}: external_data `length` invalid integer",
-                        init.name(),
-                    )
-                })?;
-                ensure!(
-                    v >= 0,
-                    "initializer {:?}: negative external length",
-                    init.name(),
-                );
-                length = Some(u64::try_from(v).context(format!(
-                    "initializer {:?}: external length overflow",
-                    init.name(),
-                ))?);
-            }
-            _ => {}
-        }
-    }
-
-    let loc = location.filter(|s| !s.is_empty()).ok_or_else(|| {
-        anyhow!(
-            "initializer {:?}: external_data missing non-empty `location`",
-            init.name(),
-        )
-    })?;
-
-    let base = model_path.parent().unwrap_or_else(|| Path::new("."));
-    let ext_path = base.join(loc);
-
-    let mut file = File::open(&ext_path).with_context(|| format!("opening {ext_path:?}"))?;
-    let file_len = file
-        .metadata()
-        .with_context(|| format!("stat {ext_path:?}"))?
-        .len();
-
-    let nbytes = if let Some(len) = length {
-        len
-    } else {
-        file_len.checked_sub(offset).ok_or_else(|| {
-            anyhow!(
-                "initializer {:?}: external offset {} at or beyond file length {}",
-                init.name(),
-                offset,
-                file_len,
-            )
-        })?
-    };
-
-    let span_end = offset
-        .checked_add(nbytes)
-        .ok_or_else(|| anyhow!("initializer {:?}: external byte span overflow", init.name(),))?;
-    ensure!(
-        span_end <= file_len,
-        "initializer {:?}: external slice [{}..{}) exceeds file length {}",
-        init.name(),
-        offset,
-        span_end,
-        file_len,
-    );
-
-    let n_usize = usize::try_from(nbytes)
-        .map_err(|_| anyhow!("initializer {:?}: span too large", init.name()))?;
-
-    file.seek(SeekFrom::Start(offset))?;
-    let mut buf = vec![0u8; n_usize];
-    file.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-fn onnx_external_bytes_to_ir(
-    disk: &[u8],
-    onnx_ty: OnnxDt,
-    nelem: usize,
-    tensor_name: &str,
-) -> Result<Vec<u8>> {
-    let elem = onnx_elem_to_model(onnx_ty)?;
-    let w = onnx_tensor_storage_width(onnx_ty)?;
-    let expected = nelem
-        .checked_mul(w)
-        .with_context(|| format!("{tensor_name}: external tensor payload size overflow"))?;
-
-    ensure!(
-        disk.len() == expected,
-        "{tensor_name}: external ONNX raw length {} but expected {expected} ({nelem} elems × {w} bytes — {onnx_ty:?})",
-        disk.len(),
-    );
-
-    let out = match onnx_ty {
-        OnnxDt::Float => disk.to_vec(),
-        OnnxDt::Double => disk
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()) as f32)
-            .flat_map(f32::to_le_bytes)
-            .collect::<Vec<u8>>(),
-        OnnxDt::Float16
-        | OnnxDt::Bfloat16
-        | OnnxDt::Int32
-        | OnnxDt::Int64
-        | OnnxDt::Uint8
-        | OnnxDt::Int8
-        | OnnxDt::Uint16
-        | OnnxDt::Int16
-        | OnnxDt::Bool => disk.to_vec(),
-        _ => anyhow::bail!(
-            "{tensor_name}: ONNX dtype {onnx_ty:?} unsupported for external raw tensor decoding",
-        ),
-    };
-
-    ensure!(
-        out.len() == elem.byte_size().saturating_mul(nelem),
-        "{tensor_name}: decoded payload length mismatches IR dtype {elem:?}",
-    );
-    Ok(out)
-}
-
-fn onnx_slice_bytes_to_ir(
-    slice: &[u8],
-    elem: DataType,
-    nelem: usize,
-    tensor_name: &str,
-) -> Result<Vec<u8>> {
-    let expected = elem.byte_size().saturating_mul(nelem);
-    ensure!(
-        slice.len() == expected,
-        "{tensor_name}: segmented slice length {} but expected {expected} ({nelem} elems × {:?})",
-        slice.len(),
-        elem,
-    );
-    Ok(slice.to_vec())
 }
 
 #[cfg(test)]
@@ -467,6 +262,46 @@ mod tests {
         let m = OnnxParser.parse(&onnx_path)?;
         let t = m.tensors["b"].data.clone();
         assert_eq!(t, 5.0f32.to_le_bytes().to_vec());
+        Ok(())
+    }
+
+    #[test]
+    fn segmented_initializer_roundtrip() -> Result<()> {
+        let dir = tempdir()?;
+        let onnx_path = dir.path().join("m.onnx");
+
+        // Full raw_data: 6 floats = 24 bytes. Take segment [8, 16) = 2 floats.
+        let full_raw: Vec<u8> = vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]
+            .into_iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+
+        let tensor = TensorProto::from_raw("w", vec![2], Odt::Float, &full_raw)
+            .with_segment(onnx_rs::ast::TensorSegment { begin: 8, end: 16 });
+
+        let model = Model {
+            ir_version: 9,
+            opset_import: vec![OperatorSetId {
+                domain: "",
+                version: 19,
+            }],
+            producer_name: "test",
+            producer_version: "0",
+            graph: Some(Graph {
+                name: "g",
+                initializer: vec![tensor],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        std::fs::write(&onnx_path, encode(&model))?;
+
+        let m = OnnxParser.parse(&onnx_path)?;
+        let t = &m.tensors["w"];
+        assert_eq!(t.shape, vec![2usize]);
+        let vals: Vec<f32> = t.data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(vals, vec![3.0, 4.0]);
         Ok(())
     }
 

@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use byteorder::{ByteOrder, LittleEndian};
-use half::f16;
 
 use crate::model::{DataType, Model, TensorData};
 use crate::parsers::WeightParser;
+
+mod cursor;
+mod dequant;
 
 pub struct GgufParser;
 
@@ -57,7 +58,7 @@ impl WeightParser for GgufParser {
 }
 
 fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
-    let mut cursor = Cursor::new(data);
+    let mut cursor = cursor::Cursor::new(data);
     cursor.expect_bytes(b"GGUF").context("missing GGUF magic")?;
 
     let _version = cursor.read_u32()?;
@@ -104,7 +105,7 @@ fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
         });
     }
 
-    let mut tensor_base = cursor.pos;
+    let mut tensor_base = cursor.pos();
     tensor_base = align_offset(tensor_base, alignment_usize);
     if tensor_base > data.len() {
         anyhow::bail!("GGUF tensor data offset past end of file");
@@ -278,171 +279,14 @@ fn quant_block_byte_len(ty: u32, nelem: usize) -> Result<usize> {
 
 fn unpack_ggml_payload(ty: u32, blob: &[u8], nelem: usize) -> Result<Vec<u8>> {
     Ok(match ty {
-        GGML_TYPE_F64 => f64_blob_to_f32(blob)?,
-        GGML_TYPE_Q4_0 => f32_blob_bytes(&dequantize_q4_0(blob, nelem)?),
-        GGML_TYPE_Q5_0 => f32_blob_bytes(&dequantize_q5_0(blob, nelem)?),
-        GGML_TYPE_Q8_0 => f32_blob_bytes(&dequantize_q8_0(blob, nelem)?),
-        GGML_TYPE_Q4_K => f32_blob_bytes(&dequantize_q4_k(blob, nelem)?),
-        GGML_TYPE_Q6_K => f32_blob_bytes(&dequantize_q6_k(blob, nelem)?),
+        GGML_TYPE_F64 => dequant::f64_blob_to_f32(blob)?,
+        GGML_TYPE_Q4_0 => dequant::f32_blob_bytes(&dequant::dequantize_q4_0(blob, nelem)?),
+        GGML_TYPE_Q5_0 => dequant::f32_blob_bytes(&dequant::dequantize_q5_0(blob, nelem)?),
+        GGML_TYPE_Q8_0 => dequant::f32_blob_bytes(&dequant::dequantize_q8_0(blob, nelem)?),
+        GGML_TYPE_Q4_K => dequant::f32_blob_bytes(&dequant::dequantize_q4_k(blob, nelem)?),
+        GGML_TYPE_Q6_K => dequant::f32_blob_bytes(&dequant::dequantize_q6_k(blob, nelem)?),
         _ => blob.to_vec(),
     })
-}
-
-fn f64_blob_to_f32(blob: &[u8]) -> Result<Vec<u8>> {
-    anyhow::ensure!(
-        blob.len().is_multiple_of(8),
-        "unexpected f64 payload length {}",
-        blob.len()
-    );
-    let mut out = Vec::with_capacity(blob.len() / 2);
-    for chunk in blob.chunks_exact(8) {
-        let f = f64::from_le_bytes(chunk.try_into().unwrap()) as f32;
-        out.extend_from_slice(&f.to_le_bytes());
-    }
-    Ok(out)
-}
-
-fn f32_blob_bytes(vals: &[f32]) -> Vec<u8> {
-    vals.iter().flat_map(|f| f.to_le_bytes()).collect()
-}
-
-fn dequantize_q4_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    anyhow::ensure!(nelem.is_multiple_of(GGML_BLOCK_ELEMENTS), "q4_0 uneven row");
-    const BLK_BYTES: usize = 18;
-    let nb = nelem / GGML_BLOCK_ELEMENTS;
-    anyhow::ensure!(src.len() == nb * BLK_BYTES);
-    let mut y = vec![0f32; nelem];
-
-    // Matches `dequantize_row_q4_0` in llama.cpp / ggml.
-    for i in 0..nb {
-        let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
-        let qs = &src[bo + 2..bo + BLK_BYTES];
-        for j in 0..16 {
-            let x0 = (qs[j] & 0x0F) as i32 - 8;
-            let x1 = (qs[j] >> 4) as i32 - 8;
-            y[i * GGML_BLOCK_ELEMENTS + j] = x0 as f32 * d;
-            y[i * GGML_BLOCK_ELEMENTS + j + GGML_BLOCK_ELEMENTS / 2] = x1 as f32 * d;
-        }
-    }
-    Ok(y)
-}
-
-fn dequantize_q8_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    anyhow::ensure!(nelem.is_multiple_of(GGML_BLOCK_ELEMENTS), "q8_0 uneven row");
-    const BLK_BYTES: usize = 34;
-    let nb = nelem / GGML_BLOCK_ELEMENTS;
-    anyhow::ensure!(src.len() == nb * BLK_BYTES);
-    let mut y = vec![0f32; nelem];
-    // Matches `dequantize_row_q8_0`: `half` delta × int8 quants (ggml-common.h layout).
-    for i in 0..nb {
-        let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
-        for j in 0..GGML_BLOCK_ELEMENTS {
-            let q = src[bo + 2 + j] as i8;
-            y[i * GGML_BLOCK_ELEMENTS + j] = q as f32 * d;
-        }
-    }
-    Ok(y)
-}
-
-fn dequantize_q5_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    anyhow::ensure!(nelem.is_multiple_of(GGML_BLOCK_ELEMENTS), "q5_0 uneven row");
-    const BLK_BYTES: usize = 22;
-    let nb = nelem / GGML_BLOCK_ELEMENTS;
-    anyhow::ensure!(src.len() == nb * BLK_BYTES);
-    let mut y = vec![0f32; nelem];
-
-    for i in 0..nb {
-        let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
-        let qs = &src[bo + 2..bo + 18];
-        let qh = &src[bo + 18..bo + 22];
-
-        for j in 0..GGML_BLOCK_ELEMENTS {
-            let qs_idx = j / 2;
-            let low_nibble = if j % 2 == 0 {
-                qs[qs_idx] & 0x0F
-            } else {
-                qs[qs_idx] >> 4
-            };
-            let qh_byte_idx = j / 8;
-            let qh_bit_idx = j % 8;
-            let high_bit = (qh[qh_byte_idx] >> qh_bit_idx) & 1;
-            let value = (((high_bit << 4) | low_nibble) as i32 - 16) as f32 * d;
-            y[i * GGML_BLOCK_ELEMENTS + j] = value;
-        }
-    }
-    Ok(y)
-}
-
-fn dequantize_q4_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    const QK_K: usize = 256;
-    const BLK_BYTES: usize = 144;
-    anyhow::ensure!(nelem.is_multiple_of(QK_K), "q4_k uneven superblock");
-    let nb = nelem / QK_K;
-    anyhow::ensure!(src.len() == nb * BLK_BYTES);
-    let mut y = vec![0f32; nelem];
-
-    for i in 0..nb {
-        let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
-        let dmin = f16::from_bits(LittleEndian::read_u16(&src[bo + 2..bo + 4])).to_f32();
-        let scales = &src[bo + 4..bo + 16];
-        let qs = &src[bo + 16..bo + 16 + 128];
-
-        for sb in 0..8 {
-            let scale = scales[sb] as f32 * d;
-            let min = scales[sb] as f32 * dmin;
-            for j in 0..32 {
-                let qs_idx = sb * 16 + j / 2;
-                let nibble = if j % 2 == 0 {
-                    qs[qs_idx] & 0x0F
-                } else {
-                    qs[qs_idx] >> 4
-                };
-                let value = (nibble as f32 - 8.0) * scale + min;
-                y[i * QK_K + sb * 32 + j] = value;
-            }
-        }
-    }
-    Ok(y)
-}
-
-fn dequantize_q6_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    const QK_K: usize = 256;
-    const BLK_BYTES: usize = 210;
-    anyhow::ensure!(nelem.is_multiple_of(QK_K), "q6_k uneven superblock");
-    let nb = nelem / QK_K;
-    anyhow::ensure!(src.len() == nb * BLK_BYTES);
-    let mut y = vec![0f32; nelem];
-
-    for i in 0..nb {
-        let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
-        let scales = &src[bo + 2..bo + 18];
-        let ql = &src[bo + 18..bo + 146];
-        let qh = &src[bo + 146..bo + 210];
-
-        for sb in 0..16 {
-            let scale = scales[sb] as f32 * d;
-            for j in 0..16 {
-                let idx = sb * 16 + j;
-                let ql_idx = idx / 2;
-                let low_nibble = if idx % 2 == 0 {
-                    ql[ql_idx] & 0x0F
-                } else {
-                    ql[ql_idx] >> 4
-                };
-                let qh_byte_idx = idx / 4;
-                let qh_shift = (idx % 4) * 2;
-                let high_2bit = (qh[qh_byte_idx] >> qh_shift) & 0x03;
-                let combined = ((high_2bit << 4) | low_nibble) as i32 - 32;
-                y[i * QK_K + idx] = combined as f32 * scale;
-            }
-        }
-    }
-    Ok(y)
 }
 
 fn ggml_type_hint(ty: u32) -> &'static str {
@@ -460,195 +304,6 @@ fn ggml_type_hint(ty: u32) -> &'static str {
         24 => "I8",
         30 => "BF16",
         _ => "see ggml.ggml_type docs",
-    }
-}
-
-struct Cursor<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn expect_bytes(&mut self, pat: &[u8]) -> Result<()> {
-        let end = self.pos.checked_add(pat.len()).context("oob")?;
-        if end > self.data.len() || &self.data[self.pos..end] != pat {
-            anyhow::bail!("expected {:?}", pat);
-        }
-        self.pos = end;
-        Ok(())
-    }
-
-    fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.pos)
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        let end = self.pos.checked_add(4).context("read past end")?;
-        if end > self.data.len() {
-            anyhow::bail!("unexpected EOF reading u32");
-        }
-        let v = LittleEndian::read_u32(&self.data[self.pos..end]);
-        self.pos = end;
-        Ok(v)
-    }
-
-    fn read_u64(&mut self) -> Result<u64> {
-        let end = self.pos.checked_add(8).context("read past end")?;
-        if end > self.data.len() {
-            anyhow::bail!("unexpected EOF reading u64");
-        }
-        let v = LittleEndian::read_u64(&self.data[self.pos..end]);
-        self.pos = end;
-        Ok(v)
-    }
-
-    fn read_string(&mut self) -> Result<String> {
-        let len_u = self.read_u64()?;
-        let len = usize::try_from(len_u).map_err(|_| anyhow!("string length overflow"))?;
-        if len > MAX_STRING_BYTES {
-            anyhow::bail!("GGUF string too large ({len} bytes)");
-        }
-        let end = self.pos.checked_add(len).context("string bounds")?;
-        if end > self.data.len() {
-            anyhow::bail!("unexpected EOF in GGUF string");
-        }
-        let s = std::str::from_utf8(&self.data[self.pos..end])
-            .context("invalid UTF-8 in GGUF string")?;
-        self.pos = end;
-        Ok(s.to_string())
-    }
-
-    fn read_kv_value_formatted(&mut self, vt: u32) -> Result<String> {
-        Ok(match vt {
-            VAL_UINT8 => format!("{}", self.read_u8()?),
-            VAL_INT8 => format!("{}", self.read_i8()?),
-            VAL_UINT16 => format!("{}", self.read_u16()?),
-            VAL_INT16 => format!("{}", self.read_i16()?),
-            VAL_UINT32 => format!("{}", self.read_u32()?),
-            VAL_INT32 => format!("{}", self.read_i32()?),
-            VAL_FLOAT32 => format!("{}", f32::from_bits(self.read_u32()?)),
-            VAL_BOOL => format!("{}", self.read_u8()? != 0),
-            VAL_STRING => self.read_string()?,
-            VAL_ARRAY => self.read_kv_array_summary()?,
-            VAL_UINT64 => format!("{}", self.read_u64()?),
-            VAL_INT64 => format!("{}", self.read_i64()?),
-            VAL_FLOAT64 => format!("{}", f64::from_bits(self.read_u64()?)),
-            _ => anyhow::bail!("unknown GGUF metadata value type {vt}"),
-        })
-    }
-
-    fn read_kv_array_summary(&mut self) -> Result<String> {
-        if self.remaining() < 12 {
-            anyhow::bail!("EOF reading array header");
-        }
-        let inner_type = self.read_u32()?;
-        let len_u = self.read_u64()?;
-        let n = usize::try_from(len_u).map_err(|_| anyhow!("array length overflow"))?;
-        let preview = n.min(32);
-        let mut parts = Vec::new();
-        for i in 0..n {
-            if i < preview {
-                parts.push(self.read_kv_value_formatted(inner_type)?);
-                continue;
-            }
-            self.consume_kv_value(inner_type)?;
-        }
-        if n > preview {
-            parts.push(format!("…(+{} omitted)", len_u - preview as u64));
-        }
-        Ok(format!("[{}]", parts.join(",")))
-    }
-
-    fn consume_kv_value(&mut self, vt: u32) -> Result<()> {
-        match vt {
-            VAL_UINT8 => {
-                let _ = self.read_u8()?;
-            }
-            VAL_INT8 => {
-                let _ = self.read_i8()?;
-            }
-            VAL_UINT16 => {
-                let _ = self.read_u16()?;
-            }
-            VAL_INT16 => {
-                let _ = self.read_i16()?;
-            }
-            VAL_UINT32 => {
-                let _ = self.read_u32()?;
-            }
-            VAL_INT32 => {
-                let _ = self.read_i32()?;
-            }
-            VAL_FLOAT32 => {
-                let _ = self.read_u32()?;
-            }
-            VAL_BOOL => {
-                let _ = self.read_u8()?;
-            }
-            VAL_STRING => {
-                let _ = self.read_string()?;
-            }
-            VAL_UINT64 => {
-                let _ = self.read_u64()?;
-            }
-            VAL_INT64 => {
-                let _ = self.read_i64()?;
-            }
-            VAL_FLOAT64 => {
-                let _ = self.read_u64()?;
-            }
-            VAL_ARRAY => {
-                let inner = self.read_u32()?;
-                let len_u = self.read_u64()?;
-                let n = usize::try_from(len_u).map_err(|_| anyhow!("array length overflow"))?;
-                for _ in 0..n {
-                    self.consume_kv_value(inner)?;
-                }
-            }
-            _ => anyhow::bail!("unknown GGUF metadata value type for skip {vt}"),
-        }
-        Ok(())
-    }
-
-    fn read_u8(&mut self) -> Result<u8> {
-        if self.pos >= self.data.len() {
-            anyhow::bail!("EOF u8");
-        }
-        let b = self.data[self.pos];
-        self.pos += 1;
-        Ok(b)
-    }
-
-    fn read_i8(&mut self) -> Result<i8> {
-        Ok(self.read_u8()? as i8)
-    }
-
-    fn read_u16(&mut self) -> Result<u16> {
-        let end = self.pos.checked_add(2).context("read_u16 bounds")?;
-        if end > self.data.len() {
-            anyhow::bail!("unexpected EOF reading u16");
-        }
-        let v = LittleEndian::read_u16(&self.data[self.pos..end]);
-        self.pos = end;
-        Ok(v)
-    }
-
-    fn read_i16(&mut self) -> Result<i16> {
-        Ok(self.read_u16()? as i16)
-    }
-
-    fn read_i32(&mut self) -> Result<i32> {
-        let v = self.read_u32()?;
-        Ok(v as i32)
-    }
-
-    fn read_i64(&mut self) -> Result<i64> {
-        let v = self.read_u64()?;
-        Ok(v as i64)
     }
 }
 
@@ -821,6 +476,149 @@ mod tests {
             );
             assert!((v - 0.0).abs() < 1e-6, "idx {i} got {v}");
         }
+        Ok(())
+    }
+
+    /// Q5_0: one 32-wide block, delta 1.0, all quant nibbles = 0x88 (high=1, low=0).
+    /// For Q5_0: low nibble = 0x0 or 0x8 => (8 or 0) - 16 = -8 or -8.
+    /// Actually qs byte 0x88: low nibble = 8, high nibble = 8.
+    /// qh byte: bit=1 for first element.
+    /// First value: (1<<4 | 8) = 24 - 16 = 8.
+    /// Remaining: high=0, low=8 => 8 - 16 = -8.
+    #[test]
+    fn roundtrip_q5_0_scaled() -> Result<()> {
+        let kv_block = encode_minimal_kv_generic();
+        let w_name_block = gguf_string_bytes("w");
+        let mut ti = Vec::new();
+        ti.extend_from_slice(&w_name_block);
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&32u64.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q5_0.to_le_bytes());
+        ti.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut block = Vec::with_capacity(22);
+        block.extend_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        // qs: 16 bytes, each 0x88 means low=8, high=8 for pairs
+        block.extend(vec![0x88u8; 16]);
+        // qh: 4 bytes, all 0 so only first 8 elements have high_bit=1
+        block.extend(vec![0xFFu8; 4]);
+
+        let tensor_count: u64 = 1;
+        let kv_count: u64 = 1;
+        let alignment = 32usize;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+        buf.extend_from_slice(&kv_block);
+        buf.extend_from_slice(&ti);
+        buf.extend(std::iter::repeat_n(
+            0u8,
+            align_offset(buf.len(), alignment) - buf.len(),
+        ));
+        buf.extend_from_slice(&block);
+
+        let m = parse_gguf_bytes(&buf, Path::new("q5.gguf"))?;
+        let t = &m.tensors["w"];
+        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.shape, vec![32usize]);
+        // First few elements should be non-zero because high bit=1
+        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
+        assert!(first.abs() > 0.01, "expected non-zero Q5_0 value, got {}", first);
+        Ok(())
+    }
+
+    /// Q4_K: 256-element superblock, 144 bytes.
+    #[test]
+    fn roundtrip_q4_k_scaled() -> Result<()> {
+        let kv_block = encode_minimal_kv_generic();
+        let w_name_block = gguf_string_bytes("w");
+        let mut ti = Vec::new();
+        ti.extend_from_slice(&w_name_block);
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&256u64.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q4_K.to_le_bytes());
+        ti.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut block = Vec::with_capacity(144);
+        // d = 1.0, dmin = 0.0
+        block.extend_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        block.extend_from_slice(&f16::from_f32(0.0).to_bits().to_le_bytes());
+        // scales: 12 bytes
+        block.extend(vec![1u8; 12]);
+        // qs: 128 bytes of nibbles
+        block.extend(vec![0x88u8; 128]);
+
+        let tensor_count: u64 = 1;
+        let kv_count: u64 = 1;
+        let alignment = 32usize;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+        buf.extend_from_slice(&kv_block);
+        buf.extend_from_slice(&ti);
+        buf.extend(std::iter::repeat_n(
+            0u8,
+            align_offset(buf.len(), alignment) - buf.len(),
+        ));
+        buf.extend_from_slice(&block);
+
+        let m = parse_gguf_bytes(&buf, Path::new("q4k.gguf"))?;
+        let t = &m.tensors["w"];
+        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.shape, vec![256usize]);
+        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
+        assert!((first - 0.0).abs() > 1e-6 || first.abs() < 100.0, "Q4_K sanity check");
+        Ok(())
+    }
+
+    /// Q6_K: 256-element superblock, 210 bytes.
+    #[test]
+    fn roundtrip_q6_k_scaled() -> Result<()> {
+        let kv_block = encode_minimal_kv_generic();
+        let w_name_block = gguf_string_bytes("w");
+        let mut ti = Vec::new();
+        ti.extend_from_slice(&w_name_block);
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&256u64.to_le_bytes());
+        ti.extend_from_slice(&GGML_TYPE_Q6_K.to_le_bytes());
+        ti.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut block = Vec::with_capacity(210);
+        // d = 1.0
+        block.extend_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        // scales: 16 bytes
+        block.extend(vec![1u8; 16]);
+        // ql: 128 bytes of nibbles
+        block.extend(vec![0x88u8; 128]);
+        // qh: 64 bytes, all 0xFF for high 2 bits
+        block.extend(vec![0xFFu8; 64]);
+
+        let tensor_count: u64 = 1;
+        let kv_count: u64 = 1;
+        let alignment = 32usize;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+        buf.extend_from_slice(&kv_block);
+        buf.extend_from_slice(&ti);
+        buf.extend(std::iter::repeat_n(
+            0u8,
+            align_offset(buf.len(), alignment) - buf.len(),
+        ));
+        buf.extend_from_slice(&block);
+
+        let m = parse_gguf_bytes(&buf, Path::new("q6k.gguf"))?;
+        let t = &m.tensors["w"];
+        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.shape, vec![256usize]);
+        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
+        assert!((first - 0.0).abs() > 1e-6 || first.abs() < 100.0, "Q6_K sanity check");
         Ok(())
     }
 

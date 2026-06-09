@@ -6,6 +6,7 @@ pub mod containerize;
 pub mod lora;
 pub mod metal;
 pub mod model;
+pub mod onnx_exec;
 pub mod pack;
 pub mod parsers;
 pub mod runtime;
