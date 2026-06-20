@@ -36,7 +36,9 @@ impl Config {
     /// Save config to `~/.modelc/config.toml`.
     pub fn save(&self) -> Result<()> {
         let path = config_path()?;
-        let dir = path.parent().context("config path has no parent directory")?;
+        let dir = path
+            .parent()
+            .context("config path has no parent directory")?;
         std::fs::create_dir_all(dir).context("failed to create config directory")?;
         let contents = toml::to_string_pretty(self).context("failed to serialize config")?;
         std::fs::write(&path, contents)

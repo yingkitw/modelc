@@ -1,6 +1,7 @@
-//! GGUF reader (little-endian). Loads dense tensors and **Q4_0 / Q8_0** GGML blocks expanded to
-//! **`f32`** payloads in IR. Other quant types still error with a descriptive message. See
-//! [GGUF spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md).
+//! GGUF reader (little-endian). Loads dense tensors as-is and preserves **Q4_0 / Q5_0 / Q8_0 /
+//! Q4_K / Q6_K** GGML block-quantized layouts in IR (dequantized at runtime by `Runtime::from_raw`
+//! or on demand via `dequantize_gguf_tensor`). Other quant types still error with a descriptive
+//! message. See [GGUF spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,6 +30,10 @@ const GGML_TYPE_I64: u32 = 27;
 const GGML_TYPE_F64: u32 = 28;
 const GGML_TYPE_BF16: u32 = 30;
 
+fn is_gguf_quant_type(ty: u32) -> bool {
+    matches!(ty, GGML_TYPE_Q4_0 | GGML_TYPE_Q5_0 | GGML_TYPE_Q8_0 | GGML_TYPE_Q4_K | GGML_TYPE_Q6_K)
+}
+
 // gguf_metadata_value_type
 const VAL_UINT8: u32 = 0;
 const VAL_INT8: u32 = 1;
@@ -55,6 +60,17 @@ impl WeightParser for GgufParser {
     fn format_name(&self) -> &'static str {
         "gguf"
     }
+}
+
+/// Tokenizer metadata extracted from a GGUF file.
+#[derive(Debug, Default)]
+pub struct GgufTokenizerMetadata {
+    pub model: String,
+    pub vocab: Vec<String>,
+    pub merges: Vec<String>,
+    pub bos_token_id: Option<u32>,
+    pub eos_token_id: Option<u32>,
+    pub chat_template: Option<String>,
 }
 
 fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
@@ -153,9 +169,13 @@ fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
             .map(|d| usize::try_from(*d).map_err(|_| anyhow!("tensor dim does not fit in usize")))
             .collect::<Result<Vec<_>>>()?;
 
-        raw_slice = unpack_ggml_payload(ti.ggml_ty, &raw_slice, nelem).with_context(|| {
-            format!("tensor {:?} (type {}): payload decode", ti.name, ti.ggml_ty)
-        })?;
+        // Only unpack/dequantize non-quantized payloads. GGUF block-quantized types are kept
+        // as raw bytes and dequantized at runtime by `Runtime::from_raw`.
+        if !is_gguf_quant_type(ti.ggml_ty) {
+            raw_slice = unpack_ggml_payload(ti.ggml_ty, &raw_slice, nelem).with_context(|| {
+                format!("tensor {:?} (type {}): payload decode", ti.name, ti.ggml_ty)
+            })?;
+        }
 
         tensors.insert(
             ti.name.clone(),
@@ -184,6 +204,77 @@ fn parse_gguf_bytes(data: &[u8], path: &Path) -> Result<Model> {
     })
 }
 
+/// Read tokenizer metadata from a GGUF file without loading tensors.
+pub fn extract_tokenizer_metadata(path: &Path) -> Result<GgufTokenizerMetadata> {
+    let data = std::fs::read(path).with_context(|| format!("failed to read {:?}", path))?;
+    let mut cursor = cursor::Cursor::new(&data);
+    cursor.expect_bytes(b"GGUF").context("missing GGUF magic")?;
+
+    let _version = cursor.read_u32()?;
+    let tensor_count_u64 = cursor.read_u64()?;
+    let kv_count_u64 = cursor.read_u64()?;
+    let kv_count = usize::try_from(kv_count_u64).map_err(|_| anyhow!("kv_count overflow"))?;
+    let _tensor_count =
+        usize::try_from(tensor_count_u64).map_err(|_| anyhow!("tensor_count overflow"))?;
+
+    let mut meta = GgufTokenizerMetadata::default();
+
+    for _ in 0..kv_count {
+        let key = cursor.read_string()?;
+        let value_type = cursor.read_u32()?;
+
+        match key.as_str() {
+            "tokenizer.ggml.model" => {
+                if value_type == VAL_STRING {
+                    meta.model = cursor.read_string()?;
+                } else {
+                    let _ = cursor.read_kv_value_formatted(value_type);
+                }
+            }
+            "tokenizer.ggml.tokens" | "tokenizer.ggml.vocab" => {
+                if value_type == VAL_ARRAY {
+                    meta.vocab = cursor.read_string_array()?;
+                } else {
+                    let _ = cursor.read_kv_value_formatted(value_type);
+                }
+            }
+            "tokenizer.ggml.merges" => {
+                if value_type == VAL_ARRAY {
+                    meta.merges = cursor.read_string_array()?;
+                } else {
+                    let _ = cursor.read_kv_value_formatted(value_type);
+                }
+            }
+            "tokenizer.ggml.bos_token_id" => {
+                if value_type == VAL_UINT32 {
+                    meta.bos_token_id = Some(cursor.read_u32()?);
+                } else {
+                    let _ = cursor.read_kv_value_formatted(value_type);
+                }
+            }
+            "tokenizer.ggml.eos_token_id" => {
+                if value_type == VAL_UINT32 {
+                    meta.eos_token_id = Some(cursor.read_u32()?);
+                } else {
+                    let _ = cursor.read_kv_value_formatted(value_type);
+                }
+            }
+            "tokenizer.chat_template" => {
+                if value_type == VAL_STRING {
+                    meta.chat_template = Some(cursor.read_string()?);
+                } else {
+                    let _ = cursor.read_kv_value_formatted(value_type);
+                }
+            }
+            _ => {
+                let _ = cursor.read_kv_value_formatted(value_type);
+            }
+        }
+    }
+
+    Ok(meta)
+}
+
 struct TensorInfoRaw {
     name: String,
     dims: Vec<u64>,
@@ -209,22 +300,32 @@ fn descriptor_for_ggml(ggml_ty: u32, nelem: usize) -> Result<(DataType, usize)> 
         GGML_TYPE_I32 => (DataType::I32, dense_byte_len(4, nelem)?),
         GGML_TYPE_I64 => (DataType::I64, dense_byte_len(8, nelem)?),
         GGML_TYPE_F64 => (DataType::F32, dense_byte_len(8, nelem)?),
-        GGML_TYPE_Q4_0 | GGML_TYPE_Q5_0 | GGML_TYPE_Q8_0 => {
+        GGML_TYPE_Q4_0 => {
             ensure_multiple_of(nelem, GGML_BLOCK_ELEMENTS, ggml_ty)?;
             let bytes = quant_block_byte_len(ggml_ty, nelem)?;
-            (DataType::F32, bytes)
+            (DataType::Q4_0, bytes)
+        }
+        GGML_TYPE_Q5_0 => {
+            ensure_multiple_of(nelem, GGML_BLOCK_ELEMENTS, ggml_ty)?;
+            let bytes = quant_block_byte_len(ggml_ty, nelem)?;
+            (DataType::Q5_0, bytes)
+        }
+        GGML_TYPE_Q8_0 => {
+            ensure_multiple_of(nelem, GGML_BLOCK_ELEMENTS, ggml_ty)?;
+            let bytes = quant_block_byte_len(ggml_ty, nelem)?;
+            (DataType::Q8_0, bytes)
         }
         GGML_TYPE_Q4_K => {
             const QK_K: usize = 256;
             ensure_multiple_of(nelem, QK_K, ggml_ty)?;
             let bytes = nelem / QK_K * 144;
-            (DataType::F32, bytes)
+            (DataType::Q4_K, bytes)
         }
         GGML_TYPE_Q6_K => {
             const QK_K: usize = 256;
             ensure_multiple_of(nelem, QK_K, ggml_ty)?;
             let bytes = nelem / QK_K * 210;
-            (DataType::F32, bytes)
+            (DataType::Q6_K, bytes)
         }
         _ => anyhow::bail!(
             "unsupported GGML type {ty} ({hint}) — convert to F32/F16/Q4_0/Q8_0 GGUF or strip weights",
@@ -287,6 +388,20 @@ fn unpack_ggml_payload(ty: u32, blob: &[u8], nelem: usize) -> Result<Vec<u8>> {
         GGML_TYPE_Q6_K => dequant::f32_blob_bytes(&dequant::dequantize_q6_k(blob, nelem)?),
         _ => blob.to_vec(),
     })
+}
+
+/// Dequantize a single `TensorData` that carries a GGUF-quantized dtype into an `f32` Vec.
+/// Returns `None` if the dtype is not a supported GGUF quantization type.
+pub fn dequantize_gguf_tensor(td: &TensorData) -> Option<Vec<f32>> {
+    let nelem = td.element_count();
+    match td.dtype {
+        DataType::Q4_0 => dequant::dequantize_q4_0(&td.data, nelem).ok(),
+        DataType::Q5_0 => dequant::dequantize_q5_0(&td.data, nelem).ok(),
+        DataType::Q8_0 => dequant::dequantize_q8_0(&td.data, nelem).ok(),
+        DataType::Q4_K => dequant::dequantize_q4_k(&td.data, nelem).ok(),
+        DataType::Q6_K => dequant::dequantize_q6_k(&td.data, nelem).ok(),
+        _ => None,
+    }
 }
 
 fn ggml_type_hint(ty: u32) -> &'static str {
@@ -424,9 +539,12 @@ mod tests {
 
         let m = parse_gguf_bytes(&buf, Path::new("q4.gguf"))?;
         let t = &m.tensors["w"];
-        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.dtype, DataType::Q4_0);
         assert_eq!(t.shape, vec![32usize]);
-        assert_eq!(t.data, vec![0u8; 32 * 4]);
+        assert_eq!(t.data.len(), 18);
+        let f = dequantize_gguf_tensor(t).expect("dequantize");
+        assert_eq!(f.len(), 32);
+        assert!(f.iter().all(|&v| v.abs() < 1e-5), "Q4_0 zeros expected");
         Ok(())
     }
 
@@ -466,14 +584,13 @@ mod tests {
 
         let m = parse_gguf_bytes(&buf, Path::new("q8.gguf"))?;
         let t = &m.tensors["w"];
-        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.dtype, DataType::Q8_0);
         assert_eq!(t.shape, vec![32usize]);
-        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
-        assert!((first - 3.0).abs() < 1e-5, "got {first}");
-        for i in 1..32 {
-            let v = f32::from_le_bytes(
-                std::convert::TryInto::try_into(&t.data[i * 4..(i + 1) * 4]).unwrap(),
-            );
+        assert_eq!(t.data.len(), 34);
+        let f = dequantize_gguf_tensor(t).expect("dequantize");
+        assert_eq!(f.len(), 32);
+        assert!((f[0] - 3.0).abs() < 1e-5, "got {}", f[0]);
+        for (i, &v) in f.iter().enumerate().skip(1) {
             assert!((v - 0.0).abs() < 1e-6, "idx {i} got {v}");
         }
         Ok(())
@@ -521,11 +638,13 @@ mod tests {
 
         let m = parse_gguf_bytes(&buf, Path::new("q5.gguf"))?;
         let t = &m.tensors["w"];
-        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.dtype, DataType::Q5_0);
         assert_eq!(t.shape, vec![32usize]);
+        assert_eq!(t.data.len(), 22);
+        let f = dequantize_gguf_tensor(t).expect("dequantize");
+        assert_eq!(f.len(), 32);
         // First few elements should be non-zero because high bit=1
-        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
-        assert!(first.abs() > 0.01, "expected non-zero Q5_0 value, got {}", first);
+        assert!(f[0].abs() > 0.01, "expected non-zero Q5_0 value, got {}", f[0]);
         Ok(())
     }
 
@@ -568,10 +687,12 @@ mod tests {
 
         let m = parse_gguf_bytes(&buf, Path::new("q4k.gguf"))?;
         let t = &m.tensors["w"];
-        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.dtype, DataType::Q4_K);
         assert_eq!(t.shape, vec![256usize]);
-        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
-        assert!((first - 0.0).abs() > 1e-6 || first.abs() < 100.0, "Q4_K sanity check");
+        assert_eq!(t.data.len(), 144);
+        let f = dequantize_gguf_tensor(t).expect("dequantize");
+        assert_eq!(f.len(), 256);
+        assert!(f[0].abs() < 100.0, "Q4_K sanity check");
         Ok(())
     }
 
@@ -615,10 +736,12 @@ mod tests {
 
         let m = parse_gguf_bytes(&buf, Path::new("q6k.gguf"))?;
         let t = &m.tensors["w"];
-        assert_eq!(t.dtype, DataType::F32);
+        assert_eq!(t.dtype, DataType::Q6_K);
         assert_eq!(t.shape, vec![256usize]);
-        let first = f32::from_le_bytes(std::convert::TryInto::try_into(&t.data[0..4]).unwrap());
-        assert!((first - 0.0).abs() > 1e-6 || first.abs() < 100.0, "Q6_K sanity check");
+        assert_eq!(t.data.len(), 210);
+        let f = dequantize_gguf_tensor(t).expect("dequantize");
+        assert_eq!(f.len(), 256);
+        assert!(f[0].abs() < 100.0, "Q6_K sanity check");
         Ok(())
     }
 
@@ -669,6 +792,55 @@ mod tests {
             .collect();
         assert!((out[0] - 1.25f32).abs() < 1e-5);
         assert!((out[1] - (-0.5f32)).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn extract_tokenizer_metadata_reads_vocab_and_merges() -> Result<()> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+
+        let tensor_count: u64 = 0;
+        let kv_count: u64 = 4;
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        buf.extend_from_slice(&kv_count.to_le_bytes());
+
+        // tokenizer.ggml.model
+        buf.extend_from_slice(&gguf_string_bytes("tokenizer.ggml.model"));
+        buf.extend_from_slice(&VAL_STRING.to_le_bytes());
+        buf.extend_from_slice(&gguf_string_bytes("gpt2"));
+
+        // tokenizer.ggml.tokens (array of 3 strings)
+        buf.extend_from_slice(&gguf_string_bytes("tokenizer.ggml.tokens"));
+        buf.extend_from_slice(&VAL_ARRAY.to_le_bytes());
+        buf.extend_from_slice(&VAL_STRING.to_le_bytes());
+        buf.extend_from_slice(&3u64.to_le_bytes());
+        buf.extend_from_slice(&gguf_string_bytes("a"));
+        buf.extend_from_slice(&gguf_string_bytes("b"));
+        buf.extend_from_slice(&gguf_string_bytes("ab"));
+
+        // tokenizer.ggml.merges (array of 1 string)
+        buf.extend_from_slice(&gguf_string_bytes("tokenizer.ggml.merges"));
+        buf.extend_from_slice(&VAL_ARRAY.to_le_bytes());
+        buf.extend_from_slice(&VAL_STRING.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&gguf_string_bytes("a b"));
+
+        // tokenizer.ggml.bos_token_id
+        buf.extend_from_slice(&gguf_string_bytes("tokenizer.ggml.bos_token_id"));
+        buf.extend_from_slice(&VAL_UINT32.to_le_bytes());
+        buf.extend_from_slice(&100u32.to_le_bytes());
+
+        let tmp = tempfile::NamedTempFile::new()?;
+        std::fs::write(tmp.path(), &buf)?;
+
+        let meta = extract_tokenizer_metadata(tmp.path())?;
+        assert_eq!(meta.model, "gpt2");
+        assert_eq!(meta.vocab, vec!["a", "b", "ab"]);
+        assert_eq!(meta.merges, vec!["a b"]);
+        assert_eq!(meta.bos_token_id, Some(100));
+        assert_eq!(meta.eos_token_id, None);
         Ok(())
     }
 

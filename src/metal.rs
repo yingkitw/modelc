@@ -74,7 +74,8 @@ mod backend {
                 return None;
             }
 
-            let total_bytes = ((a.data.len() + b.data.len() + m * n) * std::mem::size_of::<f32>()) as u64;
+            let total_bytes =
+                ((a.data.len() + b.data.len() + m * n) * std::mem::size_of::<f32>()) as u64;
             if self.would_exceed_gpu_memory(total_bytes) {
                 return None;
             }
@@ -93,10 +94,9 @@ mod backend {
             );
 
             let result_size = m * n * std::mem::size_of::<f32>();
-            let c_buffer = self.device.new_buffer(
-                result_size as u64,
-                MTLResourceOptions::StorageModeShared,
-            );
+            let c_buffer = self
+                .device
+                .new_buffer(result_size as u64, MTLResourceOptions::StorageModeShared);
 
             // Create compute pipeline
             let kernel_name = "matmul_kernel";
@@ -105,7 +105,10 @@ mod backend {
             let pipeline_descriptor = ComputePipelineDescriptor::new();
             pipeline_descriptor.set_compute_function(Some(&function));
 
-            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+            let pipeline = self
+                .device
+                .new_compute_pipeline_state(&pipeline_descriptor)
+                .ok()?;
 
             // Prepare constants
             let m_val = m as u32;
@@ -143,7 +146,7 @@ mod backend {
                 encoder.set_buffer(4, Some(&n_const), 0);
                 encoder.set_buffer(5, Some(&k_const), 0);
 
-                let thread_groups = MTLSize::new(((m + 15) / 16) as u64, ((n + 15) / 16) as u64, 1);
+                let thread_groups = MTLSize::new(m.div_ceil(16) as u64, n.div_ceil(16) as u64, 1);
                 let threads_per_group = MTLSize::new(16, 16, 1);
                 encoder.dispatch_thread_groups(thread_groups, threads_per_group);
                 encoder.end_encoding();
@@ -196,7 +199,10 @@ mod backend {
             let function = library.get_function("relu_kernel", None).ok()?;
             let pipeline_descriptor = ComputePipelineDescriptor::new();
             pipeline_descriptor.set_compute_function(Some(&function));
-            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+            let pipeline = self
+                .device
+                .new_compute_pipeline_state(&pipeline_descriptor)
+                .ok()?;
 
             autoreleasepool(|| {
                 let command_buffer = self.command_queue.new_command_buffer();
@@ -205,7 +211,7 @@ mod backend {
                 encoder.set_buffer(0, Some(&a_buffer), 0);
                 encoder.set_buffer(1, Some(&out_buffer), 0);
                 encoder.set_buffer(2, Some(&len_buffer), 0);
-                let groups = MTLSize::new(((len + 255) / 256) as u64, 1, 1);
+                let groups = MTLSize::new(len.div_ceil(256) as u64, 1, 1);
                 let group_size = MTLSize::new(256, 1, 1);
                 encoder.dispatch_thread_groups(groups, group_size);
                 encoder.end_encoding();
@@ -263,7 +269,10 @@ mod backend {
             let function = library.get_function("add_kernel", None).ok()?;
             let pipeline_descriptor = ComputePipelineDescriptor::new();
             pipeline_descriptor.set_compute_function(Some(&function));
-            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+            let pipeline = self
+                .device
+                .new_compute_pipeline_state(&pipeline_descriptor)
+                .ok()?;
 
             autoreleasepool(|| {
                 let command_buffer = self.command_queue.new_command_buffer();
@@ -273,7 +282,7 @@ mod backend {
                 encoder.set_buffer(1, Some(&b_buffer), 0);
                 encoder.set_buffer(2, Some(&out_buffer), 0);
                 encoder.set_buffer(3, Some(&len_buffer), 0);
-                let groups = MTLSize::new(((len + 255) / 256) as u64, 1, 1);
+                let groups = MTLSize::new(len.div_ceil(256) as u64, 1, 1);
                 let group_size = MTLSize::new(256, 1, 1);
                 encoder.dispatch_thread_groups(groups, group_size);
                 encoder.end_encoding();
@@ -328,7 +337,10 @@ mod backend {
             let function = library.get_function("mul_scalar_kernel", None).ok()?;
             let pipeline_descriptor = ComputePipelineDescriptor::new();
             pipeline_descriptor.set_compute_function(Some(&function));
-            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+            let pipeline = self
+                .device
+                .new_compute_pipeline_state(&pipeline_descriptor)
+                .ok()?;
 
             autoreleasepool(|| {
                 let command_buffer = self.command_queue.new_command_buffer();
@@ -338,7 +350,7 @@ mod backend {
                 encoder.set_buffer(1, Some(&out_buffer), 0);
                 encoder.set_buffer(2, Some(&s_buffer), 0);
                 encoder.set_buffer(3, Some(&len_buffer), 0);
-                let groups = MTLSize::new(((len + 255) / 256) as u64, 1, 1);
+                let groups = MTLSize::new(len.div_ceil(256) as u64, 1, 1);
                 let group_size = MTLSize::new(256, 1, 1);
                 encoder.dispatch_thread_groups(groups, group_size);
                 encoder.end_encoding();
@@ -408,7 +420,10 @@ mod backend {
             let function = library.get_function("softmax_kernel", None).ok()?;
             let pipeline_descriptor = ComputePipelineDescriptor::new();
             pipeline_descriptor.set_compute_function(Some(&function));
-            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+            let pipeline = self
+                .device
+                .new_compute_pipeline_state(&pipeline_descriptor)
+                .ok()?;
 
             autoreleasepool(|| {
                 let command_buffer = self.command_queue.new_command_buffer();
@@ -419,11 +434,7 @@ mod backend {
                 encoder.set_buffer(2, Some(&dim_const), 0);
                 encoder.set_buffer(3, Some(&outer_const), 0);
                 encoder.set_buffer(4, Some(&inner_const), 0);
-                let groups = MTLSize::new(
-                    ((outer + 15) / 16) as u64,
-                    ((inner + 15) / 16) as u64,
-                    1,
-                );
+                let groups = MTLSize::new(outer.div_ceil(16) as u64, inner.div_ceil(16) as u64, 1);
                 let group_size = MTLSize::new(16, 16, 1);
                 encoder.dispatch_thread_groups(groups, group_size);
                 encoder.end_encoding();
@@ -442,7 +453,13 @@ mod backend {
             Some(Tensor::from_vec(result, a.shape.clone()))
         }
 
-        pub fn layer_norm_gpu(&self, a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Option<Tensor> {
+        pub fn layer_norm_gpu(
+            &self,
+            a: &Tensor,
+            weight: &Tensor,
+            bias: &Tensor,
+            eps: f32,
+        ) -> Option<Tensor> {
             let library = self.library.as_ref()?;
             let last_dim = *a.shape.last()?;
             let n_elements = a.data.len();
@@ -451,7 +468,8 @@ mod backend {
                 return Some(Tensor::from_vec(vec![], a.shape.clone()));
             }
 
-            let total_bytes = ((n_elements * 2 + weight.data.len() + bias.data.len()) * std::mem::size_of::<f32>()) as u64;
+            let total_bytes = ((n_elements * 2 + weight.data.len() + bias.data.len())
+                * std::mem::size_of::<f32>()) as u64;
             if self.would_exceed_gpu_memory(total_bytes) {
                 return None;
             }
@@ -497,7 +515,10 @@ mod backend {
             let function = library.get_function("layer_norm_kernel", None).ok()?;
             let pipeline_descriptor = ComputePipelineDescriptor::new();
             pipeline_descriptor.set_compute_function(Some(&function));
-            let pipeline = self.device.new_compute_pipeline_state(&pipeline_descriptor).ok()?;
+            let pipeline = self
+                .device
+                .new_compute_pipeline_state(&pipeline_descriptor)
+                .ok()?;
 
             autoreleasepool(|| {
                 let command_buffer = self.command_queue.new_command_buffer();
@@ -511,8 +532,8 @@ mod backend {
                 encoder.set_buffer(5, Some(&eps_const), 0);
                 encoder.set_buffer(6, Some(&n_vectors_const), 0);
                 let groups = MTLSize::new(
-                    ((n_vectors + 15) / 16) as u64,
-                    ((last_dim + 15) / 16) as u64,
+                    n_vectors.div_ceil(16) as u64,
+                    last_dim.div_ceil(16) as u64,
                     1,
                 );
                 let group_size = MTLSize::new(16, 16, 1);
@@ -589,7 +610,13 @@ impl MetalBackend {
         None
     }
 
-    pub fn layer_norm_gpu(&self, _a: &Tensor, _weight: &Tensor, _bias: &Tensor, _eps: f32) -> Option<Tensor> {
+    pub fn layer_norm_gpu(
+        &self,
+        _a: &Tensor,
+        _weight: &Tensor,
+        _bias: &Tensor,
+        _eps: f32,
+    ) -> Option<Tensor> {
         None
     }
 

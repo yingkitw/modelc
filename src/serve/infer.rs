@@ -10,16 +10,19 @@ pub(super) fn runtime_to_tensor_data(runtime: &Runtime) -> HashMap<String, Tenso
     let names = runtime.tensor_names();
     let mut map = HashMap::new();
     for name in &names {
-        if let Some(tensor) = runtime.get(*name) {
+        if let Some(tensor) = runtime.get(name) {
             let mut data = Vec::with_capacity(tensor.data.len() * 4);
             for &v in &tensor.data {
                 data.extend_from_slice(&v.to_le_bytes());
             }
-            map.insert(name.to_string(), TensorData {
-                shape: tensor.shape.clone(),
-                dtype: DataType::F32,
-                data,
-            });
+            map.insert(
+                name.to_string(),
+                TensorData {
+                    shape: tensor.shape.clone(),
+                    dtype: DataType::F32,
+                    data,
+                },
+            );
         }
     }
     map
@@ -36,13 +39,84 @@ pub(super) fn run_inference(state: &AppState, input: &[f32]) -> Vec<f32> {
         }
     }
     if let Some(plan) = &state.mlp_plan {
-        run_mlp_forward(&state.runtime, plan, input, state.profile)
+        return run_mlp_forward(&state.runtime, plan, input, state.profile);
+    }
+    if let Some(output) = run_transformer(state, input) {
+        return output;
+    }
+    input.to_vec()
+}
+
+/// Execute a GPT-2 / LLaMA forward when the artifact is a transformer. Inputs are resized to
+/// the model's hidden size (truncated or zero-padded) so `/infer` is tolerant of length
+/// mismatches instead of erroring. Returns `None` for non-transformer models or when the
+/// forward has no usable output head (caller then falls back to echo).
+fn run_transformer(state: &AppState, input: &[f32]) -> Option<Vec<f32>> {
+    let hidden = state.transformer_hidden?;
+    let resized = resize_to_hidden(input, hidden);
+    let start = std::time::Instant::now();
+    let out = match state.architecture.as_str() {
+        "gpt2" => {
+            crate::runtime::transformer::forward_gpt2(&state.runtime, &resized, state.profile)
+        }
+        "llama" => {
+            crate::runtime::transformer::forward_llama(&state.runtime, &resized, state.profile)
+        }
+        _ => None,
+    };
+    if state.profile
+        && let Some(o) = &out
+    {
+        eprintln!(
+            "  transformer forward ({}): {} out dims in {:.3} ms",
+            state.architecture,
+            o.len(),
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    out
+}
+
+fn resize_to_hidden(input: &[f32], hidden: usize) -> Vec<f32> {
+    if input.len() == hidden {
+        return input.to_vec();
+    }
+    if input.len() > hidden {
+        input[..hidden].to_vec()
     } else {
-        input.to_vec()
+        let mut v = input.to_vec();
+        v.resize(hidden, 0.0);
+        v
+    }
+}
+
+pub(super) fn run_embeddings(state: &AppState, input: &[f32]) -> Option<Vec<f32>> {
+    let hidden = state.transformer_hidden?;
+    let resized = resize_to_hidden(input, hidden);
+    match state.architecture.as_str() {
+        "gpt2" => crate::runtime::transformer::embed_gpt2(&state.runtime, &resized, state.profile),
+        "llama" => crate::runtime::transformer::embed_llama(&state.runtime, &resized, state.profile),
+        _ => None,
     }
 }
 
 pub(super) fn run_text_inference(state: &AppState, prompt: &str) -> String {
+    // For transformer models, use autoregressive generation.
+    if (state.architecture == "gpt2" || state.architecture == "llama")
+        && let Some(hidden) = state.transformer_hidden
+    {
+        let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+        let config = crate::generate::GenerationConfig::default();
+        return crate::generate::generate(
+            &state.runtime,
+            &state.architecture,
+            hidden,
+            &tokenizer,
+            prompt,
+            &config,
+        );
+    }
+
     let input: Vec<f32> = prompt.bytes().map(|b| b as f32 / 255.0).collect();
 
     if let Some(plan) = &state.onnx_plan {
@@ -50,6 +124,10 @@ pub(super) fn run_text_inference(state: &AppState, prompt: &str) -> String {
         if let Ok(result) = crate::onnx_exec::execute_plan(plan, &runtime_tensors, &input) {
             return serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
         }
+    }
+
+    if let Some(output) = run_transformer(state, &input) {
+        return serde_json::to_string(&output).unwrap_or_else(|_| "[]".to_string());
     }
 
     let plan = state.mlp_plan.as_ref();
@@ -73,7 +151,12 @@ pub(super) fn run_text_inference(state: &AppState, prompt: &str) -> String {
     serde_json::to_string(&output).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub(super) fn run_mlp_forward(runtime: &Runtime, plan: &[(String, String)], input: &[f32], profile: bool) -> Vec<f32> {
+pub(super) fn run_mlp_forward(
+    runtime: &Runtime,
+    plan: &[(String, String)],
+    input: &[f32],
+    profile: bool,
+) -> Vec<f32> {
     if plan.is_empty() {
         return input.to_vec();
     }
@@ -87,18 +170,96 @@ pub(super) fn run_mlp_forward(runtime: &Runtime, plan: &[(String, String)], inpu
         let start = std::time::Instant::now();
         cur = gemv_bias(w, b, &cur);
         if profile {
-            eprintln!("    matmul+bias ({}): {:.3} ms", w_name, start.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "    matmul+bias ({}): {:.3} ms",
+                w_name,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         }
         if idx != last {
             let r_start = std::time::Instant::now();
             relu_inplace(&mut cur);
             if profile {
-                eprintln!("    relu: {:.3} ms", r_start.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "    relu: {:.3} ms",
+                    r_start.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
     }
 
     cur
+}
+
+/// Batched MLP forward: run the same MLP plan on multiple inputs in one pass.
+/// Each input must have the same length. Returns one output vector per input.
+pub(super) fn run_mlp_forward_batched(
+    runtime: &Runtime,
+    plan: &[(String, String)],
+    inputs: &[Vec<f32>],
+    profile: bool,
+) -> Vec<Vec<f32>> {
+    if plan.is_empty() {
+        return inputs.to_vec();
+    }
+
+    let mut cur = inputs.to_vec();
+    let last = plan.len() - 1;
+
+    for (idx, (w_name, b_name)) in plan.iter().enumerate() {
+        let w = runtime.get(w_name).expect("mlp weight missing");
+        let b = runtime.get(b_name).expect("mlp bias missing");
+        let start = std::time::Instant::now();
+        let refs: Vec<&[f32]> = cur.iter().map(|v| v.as_slice()).collect();
+        cur = batched_gemv_bias(w, b, &refs);
+        if profile {
+            eprintln!(
+                "    batched matmul+bias ({}): {} items, {:.3} ms",
+                w_name,
+                inputs.len(),
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        if idx != last {
+            let r_start = std::time::Instant::now();
+            for v in &mut cur {
+                relu_inplace(v);
+            }
+            if profile {
+                eprintln!(
+                    "    batched relu: {:.3} ms",
+                    r_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+    }
+
+    cur
+}
+
+fn batched_gemv_bias(weight: &Tensor, bias: &Tensor, inputs: &[&[f32]]) -> Vec<Vec<f32>> {
+    assert_eq!(weight.shape.len(), 2, "weight must be 2D");
+    assert_eq!(bias.shape.len(), 1, "bias must be 1D");
+    let rows = weight.shape[0];
+    let cols = weight.shape[1];
+    let batch = inputs.len();
+    assert_eq!(bias.shape[0], rows, "batched gemv: bias size mismatch");
+    for (i, inp) in inputs.iter().enumerate() {
+        assert_eq!(inp.len(), cols, "batched gemv: input {i} size mismatch");
+    }
+
+    let mut outs = vec![vec![0.0f32; rows]; batch];
+    for (r, row) in weight.data.chunks_exact(cols).enumerate().take(rows) {
+        let b = bias.data[r];
+        for (batch_idx, inp) in inputs.iter().enumerate() {
+            let mut acc = b;
+            for (wv, xv) in row.iter().zip(inp.iter()) {
+                acc += wv * xv;
+            }
+            outs[batch_idx][r] = acc;
+        }
+    }
+    outs
 }
 
 fn gemv_bias(weight: &Tensor, bias: &Tensor, x: &[f32]) -> Vec<f32> {
@@ -124,5 +285,41 @@ fn gemv_bias(weight: &Tensor, bias: &Tensor, x: &[f32]) -> Vec<f32> {
 fn relu_inplace(xs: &mut [f32]) {
     for v in xs {
         *v = v.max(0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::tensor::Tensor;
+
+    use super::batched_gemv_bias;
+
+    #[test]
+    fn batched_gemv_two_inputs() {
+        let weight = Tensor::from_vec(
+            vec![
+                1.0, 0.0, // row 0
+                0.0, 1.0, // row 1
+            ],
+            vec![2, 2],
+        );
+        let bias = Tensor::from_vec(vec![10.0, 20.0], vec![2]);
+        let inputs: Vec<Vec<f32>> = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let refs: Vec<&[f32]> = inputs.iter().map(|v| v.as_slice()).collect();
+        let outs = batched_gemv_bias(&weight, &bias, &refs);
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0], vec![11.0, 22.0]); // [10+1, 20+2]
+        assert_eq!(outs[1], vec![13.0, 24.0]); // [10+3, 20+4]
+    }
+
+    #[test]
+    fn batched_gemv_single_input() {
+        let weight = Tensor::from_vec(vec![2.0, 3.0], vec![1, 2]);
+        let bias = Tensor::from_vec(vec![5.0], vec![1]);
+        let inputs: Vec<Vec<f32>> = vec![vec![1.0, 1.0]];
+        let refs: Vec<&[f32]> = inputs.iter().map(|v| v.as_slice()).collect();
+        let outs = batched_gemv_bias(&weight, &bias, &refs);
+        assert_eq!(outs.len(), 1);
+        assert!((outs[0][0] - 10.0).abs() < 1e-6, "expected 10.0, got {}", outs[0][0]);
     }
 }

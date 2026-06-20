@@ -159,11 +159,31 @@ fn test_dequantize_i8_in_place() {
     model.dequantize_in_place();
     let td = &model.tensors["weight"];
     assert_eq!(td.dtype, DataType::F32);
-    let vals: Vec<f32> = td.data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
-    assert!((vals[0] - 1.0).abs() < 1e-5, "expected 1.0, got {}", vals[0]);
-    assert!((vals[1] - 2.0).abs() < 1e-5, "expected 2.0, got {}", vals[1]);
-    assert!((vals[2] - (-1.0)).abs() < 1e-5, "expected -1.0, got {}", vals[2]);
-    assert!((vals[3] - 0.0).abs() < 1e-5, "expected 0.0, got {}", vals[3]);
+    let vals: Vec<f32> = td
+        .data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert!(
+        (vals[0] - 1.0).abs() < 1e-5,
+        "expected 1.0, got {}",
+        vals[0]
+    );
+    assert!(
+        (vals[1] - 2.0).abs() < 1e-5,
+        "expected 2.0, got {}",
+        vals[1]
+    );
+    assert!(
+        (vals[2] - (-1.0)).abs() < 1e-5,
+        "expected -1.0, got {}",
+        vals[2]
+    );
+    assert!(
+        (vals[3] - 0.0).abs() < 1e-5,
+        "expected 0.0, got {}",
+        vals[3]
+    );
 }
 
 #[test]
@@ -194,11 +214,23 @@ fn test_dequantize_int4_in_place() {
     model.dequantize_in_place();
     let td = &model.tensors["weight"];
     assert_eq!(td.dtype, DataType::F32);
-    let vals: Vec<f32> = td.data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let vals: Vec<f32> = td
+        .data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     assert_eq!(vals.len(), 4);
     // Each nibble: (15 - 8) = 7, (0 - 8) = -8
-    assert!((vals[0] - 7.0).abs() < 1e-5, "expected 7.0, got {}", vals[0]);
-    assert!((vals[1] - (-8.0)).abs() < 1e-5, "expected -8.0, got {}", vals[1]);
+    assert!(
+        (vals[0] - 7.0).abs() < 1e-5,
+        "expected 7.0, got {}",
+        vals[0]
+    );
+    assert!(
+        (vals[1] - (-8.0)).abs() < 1e-5,
+        "expected -8.0, got {}",
+        vals[1]
+    );
 }
 
 #[test]
@@ -209,16 +241,22 @@ fn test_infer_architecture_gpt2() {
         metadata: HashMap::new(),
         tensors: {
             let mut t = HashMap::new();
-            t.insert("transformer.wte.weight".to_string(), TensorData {
-                shape: vec![50257, 768],
-                dtype: DataType::F32,
-                data: vec![0u8; 50257 * 768 * 4],
-            });
-            t.insert("transformer.h.0.ln_1.weight".to_string(), TensorData {
-                shape: vec![768],
-                dtype: DataType::F32,
-                data: vec![0u8; 768 * 4],
-            });
+            t.insert(
+                "transformer.wte.weight".to_string(),
+                TensorData {
+                    shape: vec![50257, 768],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 50257 * 768 * 4],
+                },
+            );
+            t.insert(
+                "transformer.h.0.ln_1.weight".to_string(),
+                TensorData {
+                    shape: vec![768],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 768 * 4],
+                },
+            );
             t
         },
     };
@@ -233,16 +271,22 @@ fn test_infer_architecture_llama() {
         metadata: HashMap::new(),
         tensors: {
             let mut t = HashMap::new();
-            t.insert("model.layers.0.input_layernorm.weight".to_string(), TensorData {
-                shape: vec![4096],
-                dtype: DataType::F32,
-                data: vec![0u8; 4096 * 4],
-            });
-            t.insert("model.layers.0.self_attn.q_proj.weight".to_string(), TensorData {
-                shape: vec![4096, 4096],
-                dtype: DataType::F32,
-                data: vec![0u8; 4096 * 4096 * 4],
-            });
+            t.insert(
+                "model.layers.0.input_layernorm.weight".to_string(),
+                TensorData {
+                    shape: vec![4096],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 4096 * 4],
+                },
+            );
+            t.insert(
+                "model.layers.0.self_attn.q_proj.weight".to_string(),
+                TensorData {
+                    shape: vec![4096, 4096],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 4096 * 4096 * 4],
+                },
+            );
             t
         },
     };
@@ -257,16 +301,22 @@ fn test_infer_architecture_bert() {
         metadata: HashMap::new(),
         tensors: {
             let mut t = HashMap::new();
-            t.insert("embeddings.word_embeddings.weight".to_string(), TensorData {
-                shape: vec![30522, 768],
-                dtype: DataType::F32,
-                data: vec![0u8; 30522 * 768 * 4],
-            });
-            t.insert("encoder.layer.0.attention.self.query.weight".to_string(), TensorData {
-                shape: vec![768, 768],
-                dtype: DataType::F32,
-                data: vec![0u8; 768 * 768 * 4],
-            });
+            t.insert(
+                "embeddings.word_embeddings.weight".to_string(),
+                TensorData {
+                    shape: vec![30522, 768],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 30522 * 768 * 4],
+                },
+            );
+            t.insert(
+                "encoder.layer.0.attention.self.query.weight".to_string(),
+                TensorData {
+                    shape: vec![768, 768],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 768 * 768 * 4],
+                },
+            );
             t
         },
     };
@@ -281,16 +331,22 @@ fn test_infer_architecture_mlp() {
         metadata: HashMap::new(),
         tensors: {
             let mut t = HashMap::new();
-            t.insert("weight".to_string(), TensorData {
-                shape: vec![2, 3],
-                dtype: DataType::F32,
-                data: vec![0u8; 2 * 3 * 4],
-            });
-            t.insert("bias".to_string(), TensorData {
-                shape: vec![2],
-                dtype: DataType::F32,
-                data: vec![0u8; 2 * 4],
-            });
+            t.insert(
+                "weight".to_string(),
+                TensorData {
+                    shape: vec![2, 3],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 2 * 3 * 4],
+                },
+            );
+            t.insert(
+                "bias".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 2 * 4],
+                },
+            );
             t
         },
     };

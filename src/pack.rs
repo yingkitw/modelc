@@ -138,8 +138,8 @@ pub fn read_header(path: &Path) -> Result<ArtifactHeader> {
     let mut header_json = vec![0u8; header_len as usize];
     file.read_exact(&mut header_json)
         .context("artifact file too short (header)")?;
-    let header: ArtifactHeader = serde_json::from_slice(&header_json)
-        .context("failed to deserialize artifact header")?;
+    let header: ArtifactHeader =
+        serde_json::from_slice(&header_json).context("failed to deserialize artifact header")?;
 
     Ok(header)
 }
@@ -187,8 +187,8 @@ pub fn unpack(path: &Path) -> Result<Model> {
     let mut header_json = vec![0u8; header_len as usize];
     file.read_exact(&mut header_json)
         .context("artifact file too short (header)")?;
-    let header: ArtifactHeader = serde_json::from_slice(&header_json)
-        .context("failed to deserialize artifact header")?;
+    let header: ArtifactHeader =
+        serde_json::from_slice(&header_json).context("failed to deserialize artifact header")?;
 
     // Read tensor data blob.
     let mut data_blob = Vec::new();
@@ -246,6 +246,11 @@ fn data_type_to_str(dt: DataType) -> String {
         DataType::I8 => "i8".to_string(),
         DataType::U8 => "u8".to_string(),
         DataType::Bool => "bool".to_string(),
+        DataType::Q4_0 => "q4_0".to_string(),
+        DataType::Q5_0 => "q5_0".to_string(),
+        DataType::Q8_0 => "q8_0".to_string(),
+        DataType::Q4_K => "q4_k".to_string(),
+        DataType::Q6_K => "q6_k".to_string(),
     }
 }
 
@@ -260,6 +265,11 @@ fn str_to_data_type(s: &str) -> Result<DataType> {
         "i8" => Ok(DataType::I8),
         "u8" => Ok(DataType::U8),
         "bool" => Ok(DataType::Bool),
+        "q4_0" => Ok(DataType::Q4_0),
+        "q5_0" => Ok(DataType::Q5_0),
+        "q8_0" => Ok(DataType::Q8_0),
+        "q4_k" => Ok(DataType::Q4_K),
+        "q6_k" => Ok(DataType::Q6_K),
         _ => anyhow::bail!("unknown dtype '{}' in artifact", s),
     }
 }
@@ -302,8 +312,8 @@ pub fn verify(path: &Path) -> Result<()> {
     let mut header_json = vec![0u8; header_len as usize];
     file.read_exact(&mut header_json)
         .context("artifact file too short (header)")?;
-    let header: ArtifactHeader = serde_json::from_slice(&header_json)
-        .context("failed to deserialize artifact header")?;
+    let header: ArtifactHeader =
+        serde_json::from_slice(&header_json).context("failed to deserialize artifact header")?;
 
     let mut data_blob = Vec::new();
     file.read_to_end(&mut data_blob)
@@ -359,11 +369,14 @@ pub fn export_to_safetensors(path: &Path, output: &Path) -> Result<()> {
 
     let mut tensors: Vec<(String, SafetensorsView)> = Vec::new();
     for (name, td) in &model.tensors {
-        tensors.push((name.clone(), SafetensorsView {
-            data: td.data.clone(),
-            dtype: data_type_to_safetensors_dtype(td.dtype),
-            shape: td.shape.clone(),
-        }));
+        tensors.push((
+            name.clone(),
+            SafetensorsView {
+                data: td.data.clone(),
+                dtype: data_type_to_safetensors_dtype(td.dtype),
+                shape: td.shape.clone(),
+            },
+        ));
     }
 
     safetensors::serialize_to_file(tensors, &Some(metadata), output)
@@ -384,6 +397,9 @@ fn data_type_to_safetensors_dtype(dt: DataType) -> safetensors::Dtype {
         DataType::I8 => safetensors::Dtype::I8,
         DataType::U8 => safetensors::Dtype::U8,
         DataType::Bool => safetensors::Dtype::BOOL,
+        DataType::Q4_0 | DataType::Q5_0 | DataType::Q8_0 | DataType::Q4_K | DataType::Q6_K => {
+            panic!("cannot export GGUF-quantized tensor to safetensors; dequantize first")
+        }
     }
 }
 

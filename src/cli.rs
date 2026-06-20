@@ -111,7 +111,11 @@ pub enum Commands {
         #[arg(long, help = "Quantize FP32 tensors (fp16, int8, int4)", value_enum)]
         quantize: Option<QuantizeMode>,
 
-        #[arg(long, help = "Prune weights with abs(value) < threshold", value_name = "THRESHOLD")]
+        #[arg(
+            long,
+            help = "Prune weights with abs(value) < threshold",
+            value_name = "THRESHOLD"
+        )]
         prune: Option<f32>,
     },
 
@@ -120,12 +124,7 @@ pub enum Commands {
         #[arg(help = "Path to .modelc artifact or model name", value_hint = ValueHint::FilePath)]
         input: String,
 
-        #[arg(
-            short = 'p',
-            long,
-            default_value_t = 8080u16,
-            help = "Listening port"
-        )]
+        #[arg(short = 'p', long, default_value_t = 8080u16, help = "Listening port")]
         port: u16,
 
         #[arg(
@@ -166,10 +165,20 @@ pub enum Commands {
         #[arg(help = "Path to .modelc artifact or model name")]
         input: String,
 
-        #[arg(short, long, default_value_t = 100, help = "Number of warmup iterations")]
+        #[arg(
+            short,
+            long,
+            default_value_t = 100,
+            help = "Number of warmup iterations"
+        )]
         warmup: usize,
 
-        #[arg(short, long, default_value_t = 1000, help = "Number of benchmark iterations")]
+        #[arg(
+            short,
+            long,
+            default_value_t = 1000,
+            help = "Number of benchmark iterations"
+        )]
         iterations: usize,
     },
 
@@ -235,6 +244,18 @@ pub enum Commands {
         #[arg(short, long, help = "Output artifact path")]
         output: Option<PathBuf>,
     },
+
+    #[command(about = "Remove a model from the local store")]
+    Rm {
+        #[arg(help = "Model name to remove")]
+        name: String,
+
+        #[arg(short, long, help = "Also delete all versioned copies")]
+        all: bool,
+
+        #[arg(short, long, help = "Force deletion even if versioned copies exist")]
+        force: bool,
+    },
 }
 
 /// Resolve `--listen` vs `--bind` + `--port` before calling [`crate::compiler::compile`].
@@ -285,7 +306,10 @@ pub fn generate_completions(shell_name: &str) -> anyhow::Result<()> {
         "fish" => clap_complete::Shell::Fish,
         "elvish" => clap_complete::Shell::Elvish,
         "powershell" | "pwsh" | "ps" => clap_complete::Shell::PowerShell,
-        _ => anyhow::bail!("unsupported shell '{}'. Supported: bash, zsh, fish, elvish, powershell", shell_name),
+        _ => anyhow::bail!(
+            "unsupported shell '{}'. Supported: bash, zsh, fish, elvish, powershell",
+            shell_name
+        ),
     };
     let mut cmd = <Cli as clap::CommandFactory>::command();
     clap_complete::generate(shell, &mut cmd, "modelc", &mut std::io::stdout());

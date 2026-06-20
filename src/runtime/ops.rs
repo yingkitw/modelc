@@ -7,10 +7,10 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
     // Try GPU acceleration on macOS
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new() {
-            if let Some(result) = backend.matmul_gpu(a, b) {
-                return result;
-            }
+        if let Some(backend) = MetalBackend::new()
+            && let Some(result) = backend.matmul_gpu(a, b)
+        {
+            return result;
         }
     }
 
@@ -28,7 +28,9 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx") {
-            unsafe { matmul_avx(a, b, &mut out); }
+            unsafe {
+                matmul_avx(a, b, &mut out);
+            }
             return Tensor::from_vec(out, vec![m, n]);
         }
     }
@@ -36,7 +38,9 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("neon") {
-            unsafe { matmul_neon(a, b, &mut out); }
+            unsafe {
+                matmul_neon(a, b, &mut out);
+            }
             return Tensor::from_vec(out, vec![m, n]);
         }
     }
@@ -47,12 +51,12 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
         out.par_chunks_exact_mut(n)
             .enumerate()
             .for_each(|(i, row_out)| {
-                for j in 0..n {
+                for (j, out_cell) in row_out.iter_mut().enumerate() {
                     let mut sum = 0.0f32;
                     for p in 0..k {
                         sum += a.data[i * k + p] * b.data[p * n + j];
                     }
-                    row_out[j] = sum;
+                    *out_cell = sum;
                 }
             });
     } else {
@@ -131,10 +135,10 @@ unsafe fn matmul_neon(a: &Tensor, b: &Tensor, out: &mut [f32]) {
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new() {
-            if let Some(result) = backend.add_gpu(a, b) {
-                return result;
-            }
+        if let Some(backend) = MetalBackend::new()
+            && let Some(result) = backend.add_gpu(a, b)
+        {
+            return result;
         }
     }
 
@@ -160,10 +164,10 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
 pub fn mul_scalar(a: &Tensor, s: f32) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new() {
-            if let Some(result) = backend.mul_scalar_gpu(a, s) {
-                return result;
-            }
+        if let Some(backend) = MetalBackend::new()
+            && let Some(result) = backend.mul_scalar_gpu(a, s)
+        {
+            return result;
         }
     }
 
@@ -174,10 +178,10 @@ pub fn mul_scalar(a: &Tensor, s: f32) -> Tensor {
 pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new() {
-            if let Some(result) = backend.softmax_gpu(a, axis) {
-                return result;
-            }
+        if let Some(backend) = MetalBackend::new()
+            && let Some(result) = backend.softmax_gpu(a, axis)
+        {
+            return result;
         }
     }
 
@@ -224,10 +228,10 @@ pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
 pub fn relu(a: &Tensor) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new() {
-            if let Some(result) = backend.relu_gpu(a) {
-                return result;
-            }
+        if let Some(backend) = MetalBackend::new()
+            && let Some(result) = backend.relu_gpu(a)
+        {
+            return result;
         }
     }
 
@@ -238,10 +242,10 @@ pub fn relu(a: &Tensor) -> Tensor {
 pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new() {
-            if let Some(result) = backend.layer_norm_gpu(a, weight, bias, eps) {
-                return result;
-            }
+        if let Some(backend) = MetalBackend::new()
+            && let Some(result) = backend.layer_norm_gpu(a, weight, bias, eps)
+        {
+            return result;
         }
     }
 

@@ -1,8 +1,11 @@
+pub mod arch;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
 pub mod config;
 pub mod containerize;
+pub mod chat_template;
+pub mod generate;
 pub mod lora;
 pub mod metal;
 pub mod model;
@@ -12,6 +15,7 @@ pub mod parsers;
 pub mod runtime;
 pub mod serve;
 pub mod store;
+pub mod tokenizer;
 
 /// Semver plus short git SHA from `build.rs`, shown by `modelc --version`.
 pub const CLI_VERSION: &str = concat!(

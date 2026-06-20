@@ -65,6 +65,10 @@ pub fn compile(
         PathBuf::from(format!("{}_serve", p.display()))
     });
 
+    // Codegen expects FP32 tensors in the embedded weights blob; dequantize any GGUF-quantized
+    // or INT8/INT4 tensors before generating the server.
+    model.dequantize_in_place();
+
     let build_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let codegen = NativeCodegen;
     let project_dir = codegen.generate(&model, build_dir.path(), listen)?;
@@ -174,7 +178,9 @@ pub fn pack(
                 pruned += 1;
             }
         }
-        model.metadata.insert("pruned".to_string(), threshold.to_string());
+        model
+            .metadata
+            .insert("pruned".to_string(), threshold.to_string());
         eprintln!("  pruned {} tensors", pruned);
     }
 
@@ -215,7 +221,9 @@ pub fn pack(
                         }
                         td.dtype = DataType::I8;
                         td.data = new_data;
-                        model.metadata.insert(format!("quant_scale.{}", name), scale.to_string());
+                        model
+                            .metadata
+                            .insert(format!("quant_scale.{}", name), scale.to_string());
                         quantized += 1;
                     }
                 }
@@ -229,7 +237,7 @@ pub fn pack(
                     let max_abs = floats.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
                     if max_abs > 0.0 {
                         let scale = max_abs / 7.0;
-                        let mut new_data = Vec::with_capacity((count + 1) / 2);
+                        let mut new_data = Vec::with_capacity(count.div_ceil(2));
                         let mut idx = 0;
                         while idx < count {
                             let q0 = (floats[idx] / scale).clamp(-7.0, 7.0).round() as i8;
@@ -245,8 +253,12 @@ pub fn pack(
                         }
                         td.dtype = DataType::I8;
                         td.data = new_data;
-                        model.metadata.insert(format!("quant_scale.{}", name), scale.to_string());
-                        model.metadata.insert(format!("quant_mode.{}", name), "int4".to_string());
+                        model
+                            .metadata
+                            .insert(format!("quant_scale.{}", name), scale.to_string());
+                        model
+                            .metadata
+                            .insert(format!("quant_mode.{}", name), "int4".to_string());
                         quantized += 1;
                     }
                 }
@@ -261,12 +273,21 @@ pub fn pack(
         p
     });
 
-    eprintln!("modelc: packing {} tensors -> {:?}...", model.tensors.len(), output_path);
+    eprintln!(
+        "modelc: packing {} tensors -> {:?}...",
+        model.tensors.len(),
+        output_path
+    );
     crate::pack::pack(&model, &output_path, compress)?;
     if compress {
         let raw = model.total_bytes();
         let packed = std::fs::metadata(&output_path)?.len();
-        eprintln!("  compressed: {} bytes -> {} bytes ({:.1}%)", raw, packed, 100.0 * packed as f64 / raw.max(1) as f64);
+        eprintln!(
+            "  compressed: {} bytes -> {} bytes ({:.1}%)",
+            raw,
+            packed,
+            100.0 * packed as f64 / raw.max(1) as f64
+        );
     }
     eprintln!("modelc: done -> {:?}", output_path);
 

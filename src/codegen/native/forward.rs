@@ -1,3 +1,7 @@
+use crate::arch::{
+    detect_layers, gpt2_head_count, gpt2_hidden_dim, has_pair, llama_head_count, llama_hidden_dim,
+    llama_layers,
+};
 use crate::model::Model;
 
 pub(super) fn emit_forward_fn(model: &Model) -> String {
@@ -22,102 +26,297 @@ fn placeholder_forward() -> String {
     .to_string()
 }
 
-fn build_gpt2_forward(_model: &Model) -> String {
-    r#"fn forward(state: &AppState, input: &[f32]) -> Vec<f32> {
-    let mut hidden = input.to_vec();
-    let n_layers = state.tensors.keys().filter(|k| k.starts_with("transformer.h.")).count() / 12;
-    for layer in 0..n_layers {
-        let prefix = format!("transformer.h.{}", layer);
-        if let Some(ln1) = state.tensors.get(&format!("{}.ln_1.weight", prefix)) {
-            let w = decode_f32(state, &format!("{}.ln_1.weight", prefix));
-            let b = decode_f32(state, &format!("{}.ln_1.bias", prefix));
-            hidden = layer_norm_1d(&hidden, &w, &b);
+fn build_gpt2_forward(model: &Model) -> String {
+    let layers = detect_layers(model, "transformer.h.");
+    let hidden = gpt2_hidden_dim(model, &layers);
+    let n_heads = gpt2_head_count(hidden);
+
+    let mut body = String::new();
+    body.push_str("    let mut hidden = input.to_vec();\n");
+
+    for &layer in &layers {
+        let p = format!("transformer.h.{layer}.");
+        let attn_block = gpt2_attention_block(model, &p, hidden, n_heads);
+        let mlp_block = gpt2_mlp_block(model, &p);
+        if attn_block.is_empty() && mlp_block.is_empty() {
+            continue;
         }
+        body.push_str(&format!("    // --- transformer block {layer} ---\n"));
+        body.push_str(&attn_block);
+        body.push_str(&mlp_block);
     }
-    if let Some(wte) = state.tensors.get("transformer.wte.weight") {
-        let w = decode_f32(state, "transformer.wte.weight");
-        gemv(&w, wte.shape[1], &hidden)
+
+    // Final layer norm + output projection (lm_head, or tied via wte).
+    if has_pair(model, "transformer.ln_f.weight", "transformer.ln_f.bias") {
+        body.push_str("    {\n");
+        body.push_str("        let w = decode_f32(state, \"transformer.ln_f.weight\");\n");
+        body.push_str("        let b = decode_f32(state, \"transformer.ln_f.bias\");\n");
+        body.push_str("        hidden = layer_norm(&hidden, &w, &b, 1e-5);\n");
+        body.push_str("    }\n");
+    }
+
+    if model.tensors.contains_key("lm_head.weight") {
+        let bias = if model.tensors.contains_key("lm_head.bias") {
+            "Some(\"lm_head.bias\")"
+        } else {
+            "None"
+        };
+        body.push_str(&format!(
+            "    hidden = linear(state, \"lm_head.weight\", {bias}, &hidden);\n"
+        ));
+    } else if model.tensors.contains_key("transformer.wte.weight") {
+        // Weight-tied output projection: lm_head = wte^T.
+        body.push_str("    hidden = linear(state, \"transformer.wte.weight\", None, &hidden);\n");
+    }
+
+    body.push_str("    hidden");
+    finalize_forward(&body)
+}
+
+fn gpt2_attention_block(model: &Model, prefix: &str, hidden: usize, n_heads: usize) -> String {
+    let ln = has_pair(
+        model,
+        &format!("{prefix}ln_1.weight"),
+        &format!("{prefix}ln_1.bias"),
+    );
+    let c_attn = has_pair(
+        model,
+        &format!("{prefix}attn.c_attn.weight"),
+        &format!("{prefix}attn.c_attn.bias"),
+    );
+    let c_proj = has_pair(
+        model,
+        &format!("{prefix}attn.c_proj.weight"),
+        &format!("{prefix}attn.c_proj.bias"),
+    );
+
+    if !c_attn {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("    {\n");
+    if ln {
+        out.push_str(&format!(
+            "        let w = decode_f32(state, \"{prefix}ln_1.weight\");\n"
+        ));
+        out.push_str(&format!(
+            "        let b = decode_f32(state, \"{prefix}ln_1.bias\");\n"
+        ));
+        out.push_str("        let h = layer_norm(&hidden, &w, &b, 1e-5);\n");
     } else {
-        hidden
+        out.push_str("        let h = hidden.clone();\n");
     }
-}
 
-fn layer_norm_1d(x: &[f32], w: &[f32], b: &[f32]) -> Vec<f32> {
-    let mean = x.iter().sum::<f32>() / x.len().max(1) as f32;
-    let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / x.len().max(1) as f32;
-    let std = (var + 1e-5).sqrt();
-    x.iter().enumerate().map(|(i, v)| {
-        let wi = w.get(i).copied().unwrap_or(1.0);
-        let bi = b.get(i).copied().unwrap_or(0.0);
-        (v - mean) / std * wi + bi
-    }).collect()
-}
+    out.push_str(&format!(
+        "        let qkv = linear(state, \"{prefix}attn.c_attn.weight\", Some(\"{prefix}attn.c_attn.bias\"), &h);\n"
+    ));
+    out.push_str(&format!(
+        "        let (q, rest) = qkv.split_at({hidden});\n"
+    ));
+    out.push_str(&format!("        let (k, v) = rest.split_at({hidden});\n"));
+    out.push_str(&format!(
+        "        let attn = single_token_attention(q, k, v, {n_heads});\n"
+    ));
 
-fn gemv(weights: &[f32], cols: usize, x: &[f32]) -> Vec<f32> {
-    let rows = weights.len() / cols.max(1);
-    let mut out = vec![0.0f32; rows];
-    for r in 0..rows {
-        let mut acc = 0.0f32;
-        for c in 0..cols.min(x.len()) {
-            acc += weights[r * cols + c] * x[c];
-        }
-        out[r] = acc;
+    if c_proj {
+        out.push_str(&format!(
+            "        let proj = linear(state, \"{prefix}attn.c_proj.weight\", Some(\"{prefix}attn.c_proj.bias\"), &attn);\n"
+        ));
+        out.push_str("        hidden = add(&hidden, &proj);\n");
+    } else {
+        out.push_str("        hidden = add(&hidden, &attn);\n");
     }
+    out.push_str("    }\n");
     out
-}"#
-    .to_string()
 }
 
-fn build_llama_forward(_model: &Model) -> String {
-    r#"fn forward(state: &AppState, input: &[f32]) -> Vec<f32> {
-    let mut hidden = input.to_vec();
-    let n_layers = state.tensors.keys().filter(|k| k.starts_with("model.layers.")).count() / 10;
-    for layer in 0..n_layers {
-        let prefix = format!("model.layers.{}", layer);
-        if let Some(_) = state.tensors.get(&format!("{}.input_layernorm.weight", prefix)) {
-            let w = decode_f32(state, &format!("{}.input_layernorm.weight", prefix));
-            hidden = rms_norm_1d(&hidden, &w);
-        }
-        if let Some(_) = state.tensors.get(&format!("{}.self_attn.q_proj.weight", prefix)) {
-            let q = gemv_t(&decode_f32(state, &format!("{}.self_attn.q_proj.weight", prefix)), &hidden);
-            let v = gemv_t(&decode_f32(state, &format!("{}.self_attn.v_proj.weight", prefix)), &hidden);
-            hidden = q.iter().zip(v.iter()).map(|(a, b)| a + b).collect();
-        }
-        if let Some(_) = state.tensors.get(&format!("{}.mlp.gate_proj.weight", prefix)) {
-            let gate = gemv_t(&decode_f32(state, &format!("{}.mlp.gate_proj.weight", prefix)), &hidden);
-            let up = gemv_t(&decode_f32(state, &format!("{}.mlp.up_proj.weight", prefix)), &hidden);
-            let silu: Vec<f32> = gate.iter().map(|v| v * (1.0 / (1.0 + (-v).exp()))).collect();
-            hidden = silu.iter().zip(up.iter()).map(|(a, b)| a * b).collect();
-            let down = gemv_t(&decode_f32(state, &format!("{}.mlp.down_proj.weight", prefix)), &hidden);
-            hidden = down;
-        }
+fn gpt2_mlp_block(model: &Model, prefix: &str) -> String {
+    let ln = has_pair(
+        model,
+        &format!("{prefix}ln_2.weight"),
+        &format!("{prefix}ln_2.bias"),
+    );
+    let c_fc = has_pair(
+        model,
+        &format!("{prefix}mlp.c_fc.weight"),
+        &format!("{prefix}mlp.c_fc.bias"),
+    );
+    let c_proj = has_pair(
+        model,
+        &format!("{prefix}mlp.c_proj.weight"),
+        &format!("{prefix}mlp.c_proj.bias"),
+    );
+
+    if !c_fc || !c_proj {
+        return String::new();
     }
-    hidden
-}
 
-fn rms_norm_1d(x: &[f32], w: &[f32]) -> Vec<f32> {
-    let sum_sq = x.iter().map(|v| v * v).sum::<f32>();
-    let rms = (sum_sq / x.len().max(1) as f32 + 1e-6).sqrt();
-    x.iter().enumerate().map(|(i, v)| {
-        let wi = w.get(i).copied().unwrap_or(1.0);
-        v / rms * wi
-    }).collect()
-}
-
-fn gemv_t(weights: &[f32], x: &[f32]) -> Vec<f32> {
-    let cols = x.len();
-    let rows = weights.len() / cols.max(1);
-    let mut out = vec![0.0f32; rows];
-    for r in 0..rows {
-        let mut acc = 0.0f32;
-        for c in 0..cols {
-            acc += weights[r * cols + c] * x[c];
-        }
-        out[r] = acc;
+    let mut out = String::new();
+    out.push_str("    {\n");
+    if ln {
+        out.push_str(&format!(
+            "        let w = decode_f32(state, \"{prefix}ln_2.weight\");\n"
+        ));
+        out.push_str(&format!(
+            "        let b = decode_f32(state, \"{prefix}ln_2.bias\");\n"
+        ));
+        out.push_str("        let h = layer_norm(&hidden, &w, &b, 1e-5);\n");
+    } else {
+        out.push_str("        let h = hidden.clone();\n");
     }
+
+    out.push_str(&format!(
+        "        let fc = linear(state, \"{prefix}mlp.c_fc.weight\", Some(\"{prefix}mlp.c_fc.bias\"), &h);\n"
+    ));
+    out.push_str("        let act = gelu(&fc);\n");
+    out.push_str(&format!(
+        "        let proj = linear(state, \"{prefix}mlp.c_proj.weight\", Some(\"{prefix}mlp.c_proj.bias\"), &act);\n"
+    ));
+    out.push_str("        hidden = add(&hidden, &proj);\n");
+    out.push_str("    }\n");
     out
-}"#
-    .to_string()
+}
+
+fn build_llama_forward(model: &Model) -> String {
+    let layers = llama_layers(model);
+    let hidden = llama_hidden_dim(model, &layers);
+    let n_heads = llama_head_count(model, hidden);
+
+    let mut body = String::new();
+    body.push_str("    let mut hidden = input.to_vec();\n");
+
+    for &layer in &layers {
+        let p = format!("model.layers.{layer}.");
+        let attn = llama_attention_block(model, &p, n_heads);
+        let mlp = llama_mlp_block(model, &p);
+        if attn.is_empty() && mlp.is_empty() {
+            continue;
+        }
+        body.push_str(&format!("    // --- decoder layer {layer} ---\n"));
+        body.push_str(&attn);
+        body.push_str(&mlp);
+    }
+
+    if model.tensors.contains_key("model.norm.weight") {
+        body.push_str("    {\n");
+        body.push_str("        let w = decode_f32(state, \"model.norm.weight\");\n");
+        body.push_str("        hidden = rms_norm(&hidden, &w, 1e-6);\n");
+        body.push_str("    }\n");
+    }
+
+    if model.tensors.contains_key("lm_head.weight") {
+        body.push_str("    hidden = linear(state, \"lm_head.weight\", &hidden);\n");
+    } else if model.tensors.contains_key("model.embed_tokens.weight") {
+        // Tied embeddings: project back through the token table.
+        body.push_str("    hidden = linear(state, \"model.embed_tokens.weight\", &hidden);\n");
+    }
+
+    body.push_str("    hidden");
+    finalize_forward(&body)
+}
+
+fn llama_attention_block(model: &Model, prefix: &str, n_heads: usize) -> String {
+    let has_norm = model
+        .tensors
+        .contains_key(&format!("{prefix}input_layernorm.weight"));
+    let q = model
+        .tensors
+        .contains_key(&format!("{prefix}self_attn.q_proj.weight"));
+    let k = model
+        .tensors
+        .contains_key(&format!("{prefix}self_attn.k_proj.weight"));
+    let v = model
+        .tensors
+        .contains_key(&format!("{prefix}self_attn.v_proj.weight"));
+    let o = model
+        .tensors
+        .contains_key(&format!("{prefix}self_attn.o_proj.weight"));
+
+    if !(q && k && v && o) {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("    {\n");
+    if has_norm {
+        out.push_str(&format!(
+            "        let w = decode_f32(state, \"{prefix}input_layernorm.weight\");\n"
+        ));
+        out.push_str("        let h = rms_norm(&hidden, &w, 1e-6);\n");
+    } else {
+        out.push_str("        let h = hidden.clone();\n");
+    }
+
+    out.push_str(&format!(
+        "        let q = linear(state, \"{prefix}self_attn.q_proj.weight\", &h);\n"
+    ));
+    out.push_str(&format!(
+        "        let k = linear(state, \"{prefix}self_attn.k_proj.weight\", &h);\n"
+    ));
+    out.push_str(&format!(
+        "        let v = linear(state, \"{prefix}self_attn.v_proj.weight\", &h);\n"
+    ));
+    // Position 0 → RoPE is identity, but keeps the full sequence structure intact.
+    out.push_str(&format!("        let q = rope(&q, 0, {n_heads});\n"));
+    out.push_str(&format!("        let k = rope(&k, 0, {n_heads});\n"));
+    out.push_str(&format!(
+        "        let attn = single_token_attention(&q, &k, &v, {n_heads});\n"
+    ));
+    out.push_str(&format!(
+        "        let proj = linear(state, \"{prefix}self_attn.o_proj.weight\", &attn);\n"
+    ));
+    out.push_str("        hidden = add(&hidden, &proj);\n");
+    out.push_str("    }\n");
+    out
+}
+
+fn llama_mlp_block(model: &Model, prefix: &str) -> String {
+    let has_norm = model
+        .tensors
+        .contains_key(&format!("{prefix}post_attention_layernorm.weight"));
+    let gate = model
+        .tensors
+        .contains_key(&format!("{prefix}mlp.gate_proj.weight"));
+    let up = model
+        .tensors
+        .contains_key(&format!("{prefix}mlp.up_proj.weight"));
+    let down = model
+        .tensors
+        .contains_key(&format!("{prefix}mlp.down_proj.weight"));
+
+    if !(gate && up && down) {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("    {\n");
+    if has_norm {
+        out.push_str(&format!(
+            "        let w = decode_f32(state, \"{prefix}post_attention_layernorm.weight\");\n"
+        ));
+        out.push_str("        let h = rms_norm(&hidden, &w, 1e-6);\n");
+    } else {
+        out.push_str("        let h = hidden.clone();\n");
+    }
+
+    // SwiGLU: down(silu(gate(x)) * up(x))
+    out.push_str(&format!(
+        "        let gate = linear(state, \"{prefix}mlp.gate_proj.weight\", &h);\n"
+    ));
+    out.push_str(&format!(
+        "        let up = linear(state, \"{prefix}mlp.up_proj.weight\", &h);\n"
+    ));
+    out.push_str("        let act = silu(&gate);\n");
+    out.push_str(
+        "        let prod: Vec<f32> = act.iter().zip(up.iter()).map(|(a, b)| a * b).collect();\n",
+    );
+    out.push_str(&format!(
+        "        let proj = linear(state, \"{prefix}mlp.down_proj.weight\", &prod);\n"
+    ));
+    out.push_str("        hidden = add(&hidden, &proj);\n");
+    out.push_str("    }\n");
+    out
 }
 
 fn build_forward_from_plan(plan: Vec<(String, String)>) -> String {

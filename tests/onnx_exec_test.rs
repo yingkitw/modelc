@@ -3,15 +3,15 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use modelc::model::{DataType, TensorData};
-use modelc::onnx_exec::{ExecutionPlan, Op, AttributeValue, execute_plan};
+use modelc::onnx_exec::{AttributeValue, ExecutionPlan, Op, execute_plan};
 
 fn make_f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> TensorData {
     let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-    TensorData { shape, dtype: DataType::F32, data: bytes }
-}
-
-fn f32_vec(td: &TensorData) -> Vec<f32> {
-    td.data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    TensorData {
+        shape,
+        dtype: DataType::F32,
+        data: bytes,
+    }
 }
 
 #[test]
@@ -37,7 +37,10 @@ fn execute_plan_matmul_add() -> Result<()> {
 
     let mut weights = HashMap::new();
     // W: 2x2 identity
-    weights.insert("W".to_string(), make_f32_tensor(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]));
+    weights.insert(
+        "W".to_string(),
+        make_f32_tensor(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]),
+    );
     // B: bias [1.0, 2.0]
     weights.insert("B".to_string(), make_f32_tensor(vec![1.0, 2.0], vec![2]));
 
@@ -58,19 +61,20 @@ fn execute_plan_gemm_alpha_beta() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["input".to_string()],
         outputs: vec!["out".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Gemm".to_string(),
-                inputs: vec!["input".to_string(), "W".to_string(), "C".to_string()],
-                outputs: vec!["out".to_string()],
-                attrs,
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Gemm".to_string(),
+            inputs: vec!["input".to_string(), "W".to_string(), "C".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs,
+        }],
     };
 
     let mut weights = HashMap::new();
     // W: 2x2 identity
-    weights.insert("W".to_string(), make_f32_tensor(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]));
+    weights.insert(
+        "W".to_string(),
+        make_f32_tensor(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]),
+    );
     // C: bias [2.0, 2.0]
     weights.insert("C".to_string(), make_f32_tensor(vec![2.0, 2.0], vec![2]));
 
@@ -87,14 +91,12 @@ fn execute_plan_relu() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["input".to_string()],
         outputs: vec!["out".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Relu".to_string(),
-                inputs: vec!["input".to_string()],
-                outputs: vec!["out".to_string()],
-                attrs: HashMap::new(),
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Relu".to_string(),
+            inputs: vec!["input".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs: HashMap::new(),
+        }],
     };
 
     let weights = HashMap::new();
@@ -111,20 +113,22 @@ fn execute_plan_sigmoid() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["input".to_string()],
         outputs: vec!["out".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Sigmoid".to_string(),
-                inputs: vec!["input".to_string()],
-                outputs: vec!["out".to_string()],
-                attrs: HashMap::new(),
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Sigmoid".to_string(),
+            inputs: vec!["input".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs: HashMap::new(),
+        }],
     };
 
     let weights = HashMap::new();
     let result = execute_plan(&plan, &weights, &[0.0])?;
     assert_eq!(result.len(), 1);
-    assert!((result[0] - 0.5).abs() < 1e-5, "sigmoid(0) should be 0.5, got {}", result[0]);
+    assert!(
+        (result[0] - 0.5).abs() < 1e-5,
+        "sigmoid(0) should be 0.5, got {}",
+        result[0]
+    );
     Ok(())
 }
 
@@ -136,14 +140,12 @@ fn execute_plan_softmax() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["input".to_string()],
         outputs: vec!["out".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Softmax".to_string(),
-                inputs: vec!["input".to_string()],
-                outputs: vec!["out".to_string()],
-                attrs,
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Softmax".to_string(),
+            inputs: vec!["input".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs,
+        }],
     };
 
     let weights = HashMap::new();
@@ -159,14 +161,12 @@ fn execute_plan_identity() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["input".to_string()],
         outputs: vec!["out".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Identity".to_string(),
-                inputs: vec!["input".to_string()],
-                outputs: vec!["out".to_string()],
-                attrs: HashMap::new(),
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Identity".to_string(),
+            inputs: vec!["input".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs: HashMap::new(),
+        }],
     };
 
     let weights = HashMap::new();
@@ -211,18 +211,19 @@ fn execute_plan_sub() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["input".to_string()],
         outputs: vec!["out".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Sub".to_string(),
-                inputs: vec!["input".to_string(), "bias".to_string()],
-                outputs: vec!["out".to_string()],
-                attrs: HashMap::new(),
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Sub".to_string(),
+            inputs: vec!["input".to_string(), "bias".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs: HashMap::new(),
+        }],
     };
 
     let mut weights = HashMap::new();
-    weights.insert("bias".to_string(), make_f32_tensor(vec![1.0, 2.0], vec![1, 2]));
+    weights.insert(
+        "bias".to_string(),
+        make_f32_tensor(vec![1.0, 2.0], vec![1, 2]),
+    );
 
     let result = execute_plan(&plan, &weights, &[5.0, 5.0])?;
     assert_eq!(result, vec![4.0, 3.0]);
@@ -234,14 +235,12 @@ fn execution_plan_serde_roundtrip() -> Result<()> {
     let plan = ExecutionPlan {
         inputs: vec!["x".to_string()],
         outputs: vec!["y".to_string()],
-        ops: vec![
-            Op {
-                op_type: "Relu".to_string(),
-                inputs: vec!["x".to_string()],
-                outputs: vec!["y".to_string()],
-                attrs: HashMap::new(),
-            },
-        ],
+        ops: vec![Op {
+            op_type: "Relu".to_string(),
+            inputs: vec!["x".to_string()],
+            outputs: vec!["y".to_string()],
+            attrs: HashMap::new(),
+        }],
     };
 
     let json = plan.to_json()?;

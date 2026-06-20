@@ -35,3 +35,25 @@
 - [x] **Chat/completion endpoints** — `/chat`, `/complete`, `/chat/stream` (SSE).
 - [x] **Batch inference API** — `/infer` accepts `{"inputs": [...]}`.
 - [x] **Code modularization** — split large files into focused submodules (`gguf/`, `onnx/`, `onnx_exec/`, `codegen/native/`, `serve/`).
+- [x] **Transformer runtime in `run`** — `modelc run` now executes GPT-2 / LLaMA forward passes directly from the in-memory runtime (`src/runtime/transformer.rs`) instead of echoing input. Structure inspection shared with codegen via `src/arch.rs`; numeric helpers mirror the emitted codegen so `run` and `compile` outputs match.
+
+## Next / Competitive gaps
+
+- [x] **`modelc rm <name>`** — Delete a model from the local store (and its versioned copies). Every model manager (Ollama, Docker) has this; we don't.
+- [x] **OpenAI-compatible API** — `/v1/models`, `/v1/chat/completions` (non-streaming). Ollama, llama.cpp server, vLLM, and SGLang all expose this; it's the dominant integration pattern for client libraries.
+- [x] **`/embeddings` endpoint** — Produce vector embeddings from the hidden-state pooler via `POST /embeddings`.
+- [x] **KV cache in transformer runtime** — `KvCache` struct stores per-layer K/V vectors. `forward_gpt2_cached` and `forward_llama_cached` accept optional cache, append current K/V, and compute attention over all cached positions via `attention_kv`. Eliminates redundant K/V recomputation during autoregressive generation.
+- [x] **Built-in tokenization** — Byte-level BPE tokenizer (`src/tokenizer.rs`) with encode/decode and greedy merge algorithm. Foundation for real text-in/text-out transformer inference.
+- [x] **GGUF tokenizer metadata extraction** — `extract_tokenizer_metadata` reads vocab, merges, BOS/EOS IDs from GGUF KV metadata. `BpeTokenizer::from_gguf` constructs a working tokenizer from this data.
+- [x] **`/health` endpoint** — Standard liveness probe for inference servers and container orchestration.
+- [x] **Model deletion guard** — Optional `--force` flag on `rm`; refuse to delete the main artifact if versioned copies exist unless `--all` or `--force` is provided.
+
+## Competitive gaps (research-driven)
+
+- [x] **Autoregressive text generation** — `src/generate.rs` provides `generate()` with greedy and temperature sampling. Wires into `run_text_inference` for transformer models so `/chat`, `/complete`, and `/v1/chat/completions` return real generated text instead of logits JSON.
+- [x] **Chat template support** — reads Jinja2 chat templates from GGUF metadata (`tokenizer.chat_template`) and applies them to format messages before tokenization via `minijinja`. Falls back to simple `role: content\n` concatenation when no template is present.
+- [x] **GGUF quantization inference** — GGUF parser preserves Q4_0, Q5_0, Q8_0, Q4_K, Q6_K block-quantized bytes in IR instead of expanding to F32 at parse time. `Runtime::from_raw` dequantizes on-the-fly via `dequantize_gguf_tensor`. This reduces `.modelc` artifact size (~8x for Q4_0) while keeping inference functional. Codegen path calls `dequantize_in_place` before generating the server.
+- [x] **Structured output / JSON mode** — `response_format: { type: "json_object" }` on `/v1/chat/completions` injects a system prompt instructing JSON-only output, then post-processes generated text with `extract_json_object` to extract the first well-formed JSON object or array. Falls back to raw text if no valid JSON is found.
+- [x] **Function calling / tool use** — `POST /v1/chat/completions` accepts an OpenAI-compatible `tools` array. When tools are present, a system prompt describing available tools is injected. Generated output is parsed for a `tool_calls` JSON array; if found, the response returns `tool_calls` with `finish_reason: "tool_calls"`. Otherwise falls back to regular content.
+- [x] **Continuous batching (MLP)** — `POST /infer` with multiple `inputs` and MLP architecture now routes to `run_mlp_forward_batched`, which computes all items in a single pass via `batched_gemv_bias`. Eliminates redundant weight traversal and improves cache locality. Transformer generation batching remains future work.
+- [x] **Speculative decoding** — `generate()` supports `config.gamma > 0` to enable speculative decoding with an n-gram draft model (`src/generate.rs`). The draft model proposes `gamma` candidate tokens by looking up trigram continuations from the prefix; the target model verifies each candidate in a loop using the KV cache. Accepted tokens skip the sampling step. Establishes infrastructure for future faster draft models (e.g., smaller transformer or prompt lookup decoding).

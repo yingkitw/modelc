@@ -20,8 +20,8 @@ pub fn apply_lora(model: &mut Model, lora_path: &Path, alpha: f32) -> Result<()>
     let mut skipped = 0;
 
     for name in lora.names() {
-        let view = lora.tensor(&name)?;
-        let base_name = lora_base_name(&name);
+        let view = lora.tensor(name)?;
+        let base_name = lora_base_name(name);
 
         if let Some(base_tensor) = model.tensors.get_mut(base_name) {
             if base_tensor.dtype != DataType::F32 {
@@ -31,12 +31,15 @@ pub fn apply_lora(model: &mut Model, lora_path: &Path, alpha: f32) -> Result<()>
             }
 
             let lora_f32 = view_to_f32(&view)?;
-            let rank = infer_rank(&name, lora_f32.len(), base_tensor.element_count());
+            let rank = infer_rank(name, lora_f32.len(), base_tensor.element_count());
             let scale = alpha / rank.max(1.0);
 
             apply_low_rank_update(base_tensor, &lora_f32, scale)?;
             applied += 1;
-            eprintln!("  applied LoRA to {} (rank={}, scale={:.4})", base_name, rank, scale);
+            eprintln!(
+                "  applied LoRA to {} (rank={}, scale={:.4})",
+                base_name, rank, scale
+            );
         } else {
             eprintln!("  skipping {} (no matching base tensor)", base_name);
             skipped += 1;
@@ -100,10 +103,7 @@ fn apply_low_rank_update(base: &mut TensorData, lora: &[f32], scale: f32) -> Res
         base_f32.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
 
-    anyhow::ensure!(
-        base_f32.len() == base_count,
-        "base tensor decode mismatch"
-    );
+    anyhow::ensure!(base_f32.len() == base_count, "base tensor decode mismatch");
 
     // Simple element-wise addition for single-matrix LoRA tensors.
     // For proper BA application we'd need both A and B matrices.

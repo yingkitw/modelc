@@ -8,16 +8,18 @@ pub struct Tensor {
 
 // Memory pool for reusing tensor buffers
 thread_local! {
-    static MEMORY_POOL: RefCell<VecDeque<Vec<f32>>> = RefCell::new(VecDeque::new());
+    static MEMORY_POOL: RefCell<VecDeque<Vec<f32>>> = const { RefCell::new(VecDeque::new()) };
 }
 
 pub fn with_capacity(size: usize) -> Vec<f32> {
     MEMORY_POOL.with_borrow_mut(|pool| {
-        if let Some(mut buf) = pool.pop_front() {
-            if buf.capacity() >= size {
-                unsafe { buf.set_len(size); }
-                return buf;
+        if let Some(mut buf) = pool.pop_front()
+            && buf.capacity() >= size
+        {
+            unsafe {
+                buf.set_len(size);
             }
+            return buf;
         }
         Vec::with_capacity(size)
     })
@@ -25,7 +27,8 @@ pub fn with_capacity(size: usize) -> Vec<f32> {
 
 pub fn return_to_pool(buf: Vec<f32>) {
     MEMORY_POOL.with_borrow_mut(|pool| {
-        if pool.len() < 32 { // Limit pool size to prevent unbounded growth
+        if pool.len() < 32 {
+            // Limit pool size to prevent unbounded growth
             pool.push_back(buf);
         }
     });

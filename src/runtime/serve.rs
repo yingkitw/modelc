@@ -113,6 +113,8 @@ fn bytes_to_f32_slice(td: &TensorData) -> Option<Vec<f32>> {
             }
             Some(out)
         }
+        // GGUF quantized types are dequantized on-the-fly by Runtime::from_raw.
+        DataType::Q4_0 | DataType::Q5_0 | DataType::Q8_0 | DataType::Q4_K | DataType::Q6_K => None,
     }
 }
 
@@ -120,8 +122,10 @@ impl Runtime {
     pub fn from_raw(raw: &HashMap<String, TensorData>) -> Self {
         let mut tensors = HashMap::new();
         for (name, td) in raw {
-            if let Some(fdata) = bytes_to_f32_slice(td) {
-                tensors.insert(name.clone(), Tensor::from_vec(fdata, td.shape.clone()));
+            let fdata = bytes_to_f32_slice(td)
+                .or_else(|| crate::parsers::gguf::dequantize_gguf_tensor(td));
+            if let Some(data) = fdata {
+                tensors.insert(name.clone(), Tensor::from_vec(data, td.shape.clone()));
             }
         }
         Self { tensors }
@@ -135,5 +139,61 @@ impl Runtime {
         let mut names: Vec<&String> = self.tensors.keys().collect();
         names.sort();
         names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use half::f16;
+
+    use crate::model::{DataType, TensorData};
+    use crate::runtime::serve::Runtime;
+
+    #[test]
+    fn runtime_dequantizes_q8_0_on_the_fly() {
+        // Build a Q8_0 block: 32 elements, delta 2.0, first quant = 5 (=> 10.0), rest 0.
+        let mut block = Vec::with_capacity(34);
+        block.extend_from_slice(&f16::from_f32(2.0).to_bits().to_le_bytes());
+        for j in 0..32 {
+            block.push(if j == 0 { 5i8 as u8 } else { 0 });
+        }
+
+        let raw = HashMap::from([(
+            "w".to_string(),
+            TensorData {
+                shape: vec![32],
+                dtype: DataType::Q8_0,
+                data: block,
+            },
+        )]);
+
+        let rt = Runtime::from_raw(&raw);
+        let t = rt.get("w").expect("tensor loaded");
+        assert_eq!(t.data.len(), 32);
+        assert!((t.data[0] - 10.0).abs() < 1e-5, "first element: {}", t.data[0]);
+        assert!(t.data[1..].iter().all(|&v| v.abs() < 1e-6), "rest should be zero");
+    }
+
+    #[test]
+    fn runtime_dequantizes_q4_0_on_the_fly() {
+        // Build a Q4_0 block: 32 elements, delta 1.0, all nibbles = 0x88.
+        let mut block = Vec::with_capacity(18);
+        block.extend_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        block.extend(vec![0x88u8; 16]);
+
+        let raw = HashMap::from([(
+            "w".to_string(),
+            TensorData {
+                shape: vec![32],
+                dtype: DataType::Q4_0,
+                data: block,
+            },
+        )]);
+
+        let rt = Runtime::from_raw(&raw);
+        let t = rt.get("w").expect("tensor loaded");
+        assert_eq!(t.data.len(), 32);
     }
 }

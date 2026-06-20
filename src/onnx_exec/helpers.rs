@@ -6,23 +6,40 @@ use crate::runtime::tensor::Tensor;
 
 use super::AttributeValue;
 
-pub(super) fn get_attr_f32(attrs: &HashMap<String, AttributeValue>, key: &str, default: f32) -> f32 {
-    attrs.get(key).map(|v| match v {
-        AttributeValue::Float(f) => *f,
-        AttributeValue::Int(i) => *i as f32,
-        _ => default,
-    }).unwrap_or(default)
+pub(super) fn get_attr_f32(
+    attrs: &HashMap<String, AttributeValue>,
+    key: &str,
+    default: f32,
+) -> f32 {
+    attrs
+        .get(key)
+        .map(|v| match v {
+            AttributeValue::Float(f) => *f,
+            AttributeValue::Int(i) => *i as f32,
+            _ => default,
+        })
+        .unwrap_or(default)
 }
 
-pub(super) fn get_attr_int(attrs: &HashMap<String, AttributeValue>, key: &str, default: i64) -> i64 {
-    attrs.get(key).map(|v| match v {
-        AttributeValue::Int(i) => *i,
-        AttributeValue::Float(f) => *f as i64,
-        _ => default,
-    }).unwrap_or(default)
+pub(super) fn get_attr_int(
+    attrs: &HashMap<String, AttributeValue>,
+    key: &str,
+    default: i64,
+) -> i64 {
+    attrs
+        .get(key)
+        .map(|v| match v {
+            AttributeValue::Int(i) => *i,
+            AttributeValue::Float(f) => *f as i64,
+            _ => default,
+        })
+        .unwrap_or(default)
 }
 
-pub(super) fn get_attr_ints(attrs: &HashMap<String, AttributeValue>, key: &str) -> Option<Vec<i64>> {
+pub(super) fn get_attr_ints(
+    attrs: &HashMap<String, AttributeValue>,
+    key: &str,
+) -> Option<Vec<i64>> {
     attrs.get(key).map(|v| match v {
         AttributeValue::Ints(v) => v.clone(),
         _ => Vec::new(),

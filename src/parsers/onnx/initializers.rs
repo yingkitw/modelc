@@ -44,7 +44,12 @@ pub(super) fn onnx_initializer_bytes(t: &TensorProto<'_>, elem: DataType) -> Res
         | DataType::U8
         | DataType::I8
         | DataType::I16
-        | DataType::Bool => {
+        | DataType::Bool
+        | DataType::Q4_0
+        | DataType::Q5_0
+        | DataType::Q8_0
+        | DataType::Q4_K
+        | DataType::Q6_K => {
             anyhow::bail!(
                 "{:?} missing raw_data for packed dtype {:?}",
                 t.name(),
@@ -69,7 +74,10 @@ pub(super) fn onnx_tensor_storage_width(dt: OnnxDt) -> Result<usize> {
     })
 }
 
-pub(super) fn load_onnx_external_bytes(model_path: &Path, init: &TensorProto<'_>) -> Result<Vec<u8>> {
+pub(super) fn load_onnx_external_bytes(
+    model_path: &Path,
+    init: &TensorProto<'_>,
+) -> Result<Vec<u8>> {
     let mut location: Option<&str> = None;
     let mut offset: u64 = 0;
     let mut length: Option<u64> = None;

@@ -2,10 +2,8 @@ use anyhow::{Context, Result, anyhow};
 use byteorder::{ByteOrder, LittleEndian};
 
 use super::{
-    MAX_STRING_BYTES,
-    VAL_ARRAY, VAL_BOOL, VAL_FLOAT32, VAL_FLOAT64,
-    VAL_INT16, VAL_INT32, VAL_INT64, VAL_INT8,
-    VAL_STRING, VAL_UINT16, VAL_UINT32, VAL_UINT64, VAL_UINT8,
+    MAX_STRING_BYTES, VAL_ARRAY, VAL_BOOL, VAL_FLOAT32, VAL_FLOAT64, VAL_INT8, VAL_INT16,
+    VAL_INT32, VAL_INT64, VAL_STRING, VAL_UINT8, VAL_UINT16, VAL_UINT32, VAL_UINT64,
 };
 
 pub(super) struct Cursor<'a> {
@@ -88,6 +86,22 @@ impl<'a> Cursor<'a> {
             VAL_FLOAT64 => format!("{}", f64::from_bits(self.read_u64()?)),
             _ => anyhow::bail!("unknown GGUF metadata value type {vt}"),
         })
+    }
+
+    /// Read a GGUF metadata array of strings and return all elements.
+    /// `inner_type` must be `VAL_STRING`.
+    pub(super) fn read_string_array(&mut self) -> Result<Vec<String>> {
+        let inner_type = self.read_u32()?;
+        if inner_type != VAL_STRING {
+            anyhow::bail!("expected string array, got inner type {inner_type}");
+        }
+        let len_u = self.read_u64()?;
+        let n = usize::try_from(len_u).map_err(|_| anyhow!("array length overflow"))?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(self.read_string()?);
+        }
+        Ok(out)
     }
 
     fn read_kv_array_summary(&mut self) -> Result<String> {

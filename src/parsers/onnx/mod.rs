@@ -300,7 +300,11 @@ mod tests {
         let m = OnnxParser.parse(&onnx_path)?;
         let t = &m.tensors["w"];
         assert_eq!(t.shape, vec![2usize]);
-        let vals: Vec<f32> = t.data.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        let vals: Vec<f32> = t
+            .data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(vals, vec![3.0, 4.0]);
         Ok(())
     }

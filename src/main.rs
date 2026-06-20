@@ -241,6 +241,9 @@ fn main() -> Result<()> {
             modelc::pack::pack(&m, &out_path, false)?;
             eprintln!("Saved adapted model -> {:?}", out_path);
         }
+        modelc::cli::Commands::Rm { name, all, force } => {
+            modelc::store::remove_model(name, *all, *force)?;
+        }
     }
 
     Ok(())

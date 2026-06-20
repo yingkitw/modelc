@@ -18,6 +18,7 @@ pub struct TensorData {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum DataType {
     F32,
     F16,
@@ -28,6 +29,16 @@ pub enum DataType {
     I8,
     U8,
     Bool,
+    /// GGML Q4_0 block-quantized (18 bytes per 32 elements).
+    Q4_0,
+    /// GGML Q5_0 block-quantized (22 bytes per 32 elements).
+    Q5_0,
+    /// GGML Q8_0 block-quantized (34 bytes per 32 elements).
+    Q8_0,
+    /// GGML Q4_K super-block-quantized (144 bytes per 256 elements).
+    Q4_K,
+    /// GGML Q6_K super-block-quantized (210 bytes per 256 elements).
+    Q6_K,
 }
 
 impl DataType {
@@ -37,6 +48,8 @@ impl DataType {
             Self::F16 | Self::BF16 | Self::I16 => 2,
             Self::I64 => 8,
             Self::I8 | Self::U8 | Self::Bool => 1,
+            // Block-quantized types have no fixed per-element byte size.
+            Self::Q4_0 | Self::Q5_0 | Self::Q8_0 | Self::Q4_K | Self::Q6_K => 0,
         }
     }
 
@@ -56,6 +69,11 @@ impl DataType {
             Self::I8 => "i8",
             Self::U8 => "u8",
             Self::Bool => "bool",
+            Self::Q4_0 => "q4_0",
+            Self::Q5_0 => "q5_0",
+            Self::Q8_0 => "q8_0",
+            Self::Q4_K => "q4_k",
+            Self::Q6_K => "q6_k",
         }
     }
 
@@ -65,8 +83,10 @@ impl DataType {
 }
 
 impl TensorData {
+    /// Returns the actual length of the stored data bytes. For quantized types this is the
+    /// on-disk / on-wire byte count, not the dequantized element count × byte_size.
     pub fn byte_len(&self) -> usize {
-        self.dtype.total_bytes(&self.shape)
+        self.data.len()
     }
 
     pub fn element_count(&self) -> usize {
@@ -83,43 +103,57 @@ impl Model {
         self.tensors.values().map(|t| t.byte_len()).sum()
     }
 
-    /// Dequantize any I8 (or INT4-packed-as-I8) tensors that have `quant_scale.<name>` metadata back to F32 in place.
+    /// Dequantize any I8 (or INT4-packed-as-I8) tensors that have `quant_scale.<name>` metadata
+    /// back to F32 in place. Also dequantizes GGUF-quantized tensors (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K).
     pub fn dequantize_in_place(&mut self) {
+        // Handle our own INT8 / INT4 quantization.
         for (name, td) in self.tensors.iter_mut() {
             if td.dtype != DataType::I8 {
                 continue;
             }
             let scale_key = format!("quant_scale.{}", name);
-            if let Some(scale_str) = self.metadata.get(&scale_key) {
-                if let Ok(scale) = scale_str.parse::<f32>() {
-                    let mode_key = format!("quant_mode.{}", name);
-                    let is_int4 = self.metadata.get(&mode_key).map(|m| m == "int4").unwrap_or(false);
-                    let count = td.element_count();
-                    let mut new_data = Vec::with_capacity(count * 4);
-                    if is_int4 {
-                        // Unpack two signed nibbles per byte.
-                        let mut remaining = count;
-                        for &byte in &td.data {
-                            let nibble0 = ((byte >> 4) & 0x0F) as i8 - 8;
-                            let val0 = nibble0 as f32 * scale;
-                            new_data.extend_from_slice(&val0.to_le_bytes());
+            if let Some(scale_str) = self.metadata.get(&scale_key)
+                && let Ok(scale) = scale_str.parse::<f32>()
+            {
+                let mode_key = format!("quant_mode.{}", name);
+                let is_int4 = self
+                    .metadata
+                    .get(&mode_key)
+                    .map(|m| m == "int4")
+                    .unwrap_or(false);
+                let count = td.element_count();
+                let mut new_data = Vec::with_capacity(count * 4);
+                if is_int4 {
+                    // Unpack two signed nibbles per byte.
+                    let mut remaining = count;
+                    for &byte in &td.data {
+                        let nibble0 = ((byte >> 4) & 0x0F) as i8 - 8;
+                        let val0 = nibble0 as f32 * scale;
+                        new_data.extend_from_slice(&val0.to_le_bytes());
+                        remaining -= 1;
+                        if remaining > 0 {
+                            let nibble1 = (byte & 0x0F) as i8 - 8;
+                            let val1 = nibble1 as f32 * scale;
+                            new_data.extend_from_slice(&val1.to_le_bytes());
                             remaining -= 1;
-                            if remaining > 0 {
-                                let nibble1 = (byte & 0x0F) as i8 - 8;
-                                let val1 = nibble1 as f32 * scale;
-                                new_data.extend_from_slice(&val1.to_le_bytes());
-                                remaining -= 1;
-                            }
-                        }
-                    } else {
-                        for &b in &td.data {
-                            let val = b as i8 as f32 * scale;
-                            new_data.extend_from_slice(&val.to_le_bytes());
                         }
                     }
-                    td.dtype = DataType::F32;
-                    td.data = new_data;
+                } else {
+                    for &b in &td.data {
+                        let val = b as i8 as f32 * scale;
+                        new_data.extend_from_slice(&val.to_le_bytes());
+                    }
                 }
+                td.dtype = DataType::F32;
+                td.data = new_data;
+            }
+        }
+
+        // Handle GGUF block-quantized types.
+        for (_, td) in self.tensors.iter_mut() {
+            if let Some(fdata) = crate::parsers::gguf::dequantize_gguf_tensor(td) {
+                td.dtype = DataType::F32;
+                td.data = fdata.into_iter().flat_map(|f| f.to_le_bytes()).collect();
             }
         }
     }
@@ -129,8 +163,12 @@ impl Model {
         let names: Vec<&str> = self.tensors.keys().map(|s| s.as_str()).collect();
 
         // Llama-like: model.layers.*, layers.*, transformer.h.* with rotary/attention names
-        if names.iter().any(|n| n.starts_with("model.layers.") || n.starts_with("layers."))
-            && names.iter().any(|n| n.contains("rotary") || n.contains("attention") || n.contains("q_proj"))
+        if names
+            .iter()
+            .any(|n| n.starts_with("model.layers.") || n.starts_with("layers."))
+            && names
+                .iter()
+                .any(|n| n.contains("rotary") || n.contains("attention") || n.contains("q_proj"))
         {
             return "llama".to_string();
         }
@@ -150,7 +188,9 @@ impl Model {
         }
 
         // MLP: layerN.weight / layerN.bias or single weight/bias pair
-        if names.iter().any(|n| n.starts_with("layer") && n.contains(".weight"))
+        if names
+            .iter()
+            .any(|n| n.starts_with("layer") && n.contains(".weight"))
             || (names.contains(&"weight") && names.contains(&"bias"))
         {
             return "mlp".to_string();

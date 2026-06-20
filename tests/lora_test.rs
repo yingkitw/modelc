@@ -62,7 +62,11 @@ fn lora_apply_changes_base_tensor() -> Result<()> {
 
     // Base was all zeros, LoRA adds scaled values.
     // The first element should be non-zero after LoRA application.
-    assert!(values[0].abs() > 0.001, "expected LoRA to modify weight, got {:?}", values);
+    assert!(
+        values[0].abs() > 0.001,
+        "expected LoRA to modify weight, got {:?}",
+        values
+    );
     Ok(())
 }
 

@@ -5,11 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// Generate a Dockerfile and entrypoint script for the given artifact.
-pub fn containerize(
-    artifact_path: &Path,
-    output_dir: &Path,
-    base_image: &str,
-) -> Result<()> {
+pub fn containerize(artifact_path: &Path, output_dir: &Path, base_image: &str) -> Result<()> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create output directory {:?}", output_dir))?;
 

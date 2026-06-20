@@ -57,7 +57,7 @@ impl CodeGenerator for NativeCodegen {
 
         let cargo_toml = generate_cargo_toml();
         let listen_str = listen.to_string();
-        let optional_helpers = helpers::emit_mlp_helpers(model);
+        let optional_helpers = helpers::emit_helpers(model);
         let forward_fn = forward::emit_forward_fn(model);
         let main_rs = generate_main_rs(
             model,

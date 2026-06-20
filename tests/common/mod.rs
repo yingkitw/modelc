@@ -180,3 +180,179 @@ pub fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
+
+const GPT2_HIDDEN: usize = 12;
+const GPT2_FFN: usize = 48;
+const GPT2_VOCAB: usize = 10;
+
+fn fp32_matrix(rows: usize, cols: usize) -> Vec<u8> {
+    (0..(rows * cols))
+        .flat_map(|i| ((i as f32 % 7.0) - 3.0).to_le_bytes())
+        .collect()
+}
+
+fn fp32_vector(len: usize, fill: f32) -> Vec<u8> {
+    (0..len).flat_map(|_| fill.to_le_bytes()).collect()
+}
+
+/// Minimal but complete single-layer GPT-2 fixture with tied `wte`/`lm_head`.
+pub fn create_gpt2_test_model() -> Model {
+    let h = GPT2_HIDDEN;
+    let mut tensors = HashMap::new();
+    let mut mk = |name: &str, shape: Vec<usize>, data: Vec<u8>| {
+        tensors.insert(
+            name.to_string(),
+            TensorData {
+                shape,
+                dtype: DataType::F32,
+                data,
+            },
+        );
+    };
+
+    mk("transformer.h.0.ln_1.weight", vec![h], fp32_vector(h, 1.0));
+    mk("transformer.h.0.ln_1.bias", vec![h], fp32_vector(h, 0.0));
+    mk(
+        "transformer.h.0.attn.c_attn.weight",
+        vec![3 * h, h],
+        fp32_matrix(3 * h, h),
+    );
+    mk(
+        "transformer.h.0.attn.c_attn.bias",
+        vec![3 * h],
+        fp32_vector(3 * h, 0.0),
+    );
+    mk(
+        "transformer.h.0.attn.c_proj.weight",
+        vec![h, h],
+        fp32_matrix(h, h),
+    );
+    mk(
+        "transformer.h.0.attn.c_proj.bias",
+        vec![h],
+        fp32_vector(h, 0.0),
+    );
+    mk("transformer.h.0.ln_2.weight", vec![h], fp32_vector(h, 1.0));
+    mk("transformer.h.0.ln_2.bias", vec![h], fp32_vector(h, 0.0));
+    mk(
+        "transformer.h.0.mlp.c_fc.weight",
+        vec![GPT2_FFN, h],
+        fp32_matrix(GPT2_FFN, h),
+    );
+    mk(
+        "transformer.h.0.mlp.c_fc.bias",
+        vec![GPT2_FFN],
+        fp32_vector(GPT2_FFN, 0.0),
+    );
+    mk(
+        "transformer.h.0.mlp.c_proj.weight",
+        vec![h, GPT2_FFN],
+        fp32_matrix(h, GPT2_FFN),
+    );
+    mk(
+        "transformer.h.0.mlp.c_proj.bias",
+        vec![h],
+        fp32_vector(h, 0.0),
+    );
+    mk("transformer.ln_f.weight", vec![h], fp32_vector(h, 1.0));
+    mk("transformer.ln_f.bias", vec![h], fp32_vector(h, 0.0));
+    mk(
+        "transformer.wte.weight",
+        vec![GPT2_VOCAB, h],
+        fp32_matrix(GPT2_VOCAB, h),
+    );
+
+    Model {
+        name: "mini_gpt2".to_string(),
+        architecture: "gpt2".to_string(),
+        tensors,
+        metadata: HashMap::new(),
+    }
+}
+
+const LLAMA_HIDDEN: usize = 12;
+const LLAMA_INTER: usize = 48;
+const LLAMA_VOCAB: usize = 10;
+
+/// Minimal but complete single-layer LLaMA fixture with explicit `lm_head`.
+pub fn create_llama_test_model() -> Model {
+    let h = LLAMA_HIDDEN;
+    let mut tensors = HashMap::new();
+    let mut mk = |name: &str, shape: Vec<usize>, data: Vec<u8>| {
+        tensors.insert(
+            name.to_string(),
+            TensorData {
+                shape,
+                dtype: DataType::F32,
+                data,
+            },
+        );
+    };
+
+    mk(
+        "model.layers.0.input_layernorm.weight",
+        vec![h],
+        fp32_vector(h, 1.0),
+    );
+    mk(
+        "model.layers.0.self_attn.q_proj.weight",
+        vec![h, h],
+        fp32_matrix(h, h),
+    );
+    mk(
+        "model.layers.0.self_attn.k_proj.weight",
+        vec![h, h],
+        fp32_matrix(h, h),
+    );
+    mk(
+        "model.layers.0.self_attn.v_proj.weight",
+        vec![h, h],
+        fp32_matrix(h, h),
+    );
+    mk(
+        "model.layers.0.self_attn.o_proj.weight",
+        vec![h, h],
+        fp32_matrix(h, h),
+    );
+    mk(
+        "model.layers.0.post_attention_layernorm.weight",
+        vec![h],
+        fp32_vector(h, 1.0),
+    );
+    mk(
+        "model.layers.0.mlp.gate_proj.weight",
+        vec![LLAMA_INTER, h],
+        fp32_matrix(LLAMA_INTER, h),
+    );
+    mk(
+        "model.layers.0.mlp.up_proj.weight",
+        vec![LLAMA_INTER, h],
+        fp32_matrix(LLAMA_INTER, h),
+    );
+    mk(
+        "model.layers.0.mlp.down_proj.weight",
+        vec![h, LLAMA_INTER],
+        fp32_matrix(h, LLAMA_INTER),
+    );
+    mk(
+        "model.embed_tokens.weight",
+        vec![LLAMA_VOCAB, h],
+        fp32_matrix(LLAMA_VOCAB, h),
+    );
+    mk("model.norm.weight", vec![h], fp32_vector(h, 1.0));
+    mk(
+        "lm_head.weight",
+        vec![LLAMA_VOCAB, h],
+        fp32_matrix(LLAMA_VOCAB, h),
+    );
+
+    let mut metadata = HashMap::new();
+    metadata.insert("attention.head_count".to_string(), "2".to_string());
+
+    Model {
+        name: "mini_llama".to_string(),
+        architecture: "llama".to_string(),
+        tensors,
+        metadata,
+    }
+}

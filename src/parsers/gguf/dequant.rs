@@ -21,7 +21,10 @@ pub(super) fn f32_blob_bytes(vals: &[f32]) -> Vec<u8> {
 }
 
 pub(super) fn dequantize_q4_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    anyhow::ensure!(nelem.is_multiple_of(super::GGML_BLOCK_ELEMENTS), "q4_0 uneven row");
+    anyhow::ensure!(
+        nelem.is_multiple_of(super::GGML_BLOCK_ELEMENTS),
+        "q4_0 uneven row"
+    );
     const BLK_BYTES: usize = 18;
     let nb = nelem / super::GGML_BLOCK_ELEMENTS;
     anyhow::ensure!(src.len() == nb * BLK_BYTES);
@@ -43,7 +46,10 @@ pub(super) fn dequantize_q4_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
 }
 
 pub(super) fn dequantize_q8_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    anyhow::ensure!(nelem.is_multiple_of(super::GGML_BLOCK_ELEMENTS), "q8_0 uneven row");
+    anyhow::ensure!(
+        nelem.is_multiple_of(super::GGML_BLOCK_ELEMENTS),
+        "q8_0 uneven row"
+    );
     const BLK_BYTES: usize = 34;
     let nb = nelem / super::GGML_BLOCK_ELEMENTS;
     anyhow::ensure!(src.len() == nb * BLK_BYTES);
@@ -61,7 +67,10 @@ pub(super) fn dequantize_q8_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
 }
 
 pub(super) fn dequantize_q5_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
-    anyhow::ensure!(nelem.is_multiple_of(super::GGML_BLOCK_ELEMENTS), "q5_0 uneven row");
+    anyhow::ensure!(
+        nelem.is_multiple_of(super::GGML_BLOCK_ELEMENTS),
+        "q5_0 uneven row"
+    );
     const BLK_BYTES: usize = 22;
     let nb = nelem / super::GGML_BLOCK_ELEMENTS;
     anyhow::ensure!(src.len() == nb * BLK_BYTES);
@@ -138,8 +147,8 @@ pub(super) fn dequantize_q6_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
         let ql = &src[bo + 18..bo + 146];
         let qh = &src[bo + 146..bo + 210];
 
-        for sb in 0..16 {
-            let scale = scales[sb] as f32 * d;
+        for (sb, &scale_byte) in scales.iter().enumerate() {
+            let scale = scale_byte as f32 * d;
             for j in 0..16 {
                 let idx = sb * 16 + j;
                 let ql_idx = idx / 2;

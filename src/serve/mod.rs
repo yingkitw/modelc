@@ -3,7 +3,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::model::Model;
@@ -11,6 +14,7 @@ use crate::runtime::serve::Runtime;
 
 mod handlers;
 mod infer;
+mod openai;
 
 pub async fn run_server(model: Model, addr: SocketAddr, profile: bool) -> anyhow::Result<()> {
     let app = build_router(model, profile);
@@ -27,6 +31,11 @@ fn build_router(model: Model, profile: bool) -> Router {
         .get("onnx.execution_plan")
         .and_then(|json| crate::onnx_exec::ExecutionPlan::from_json(json).ok());
 
+    let chat_template = model
+        .metadata
+        .get("tokenizer.chat_template")
+        .cloned();
+
     let state = Arc::new(AppState {
         name: model.name.clone(),
         architecture: model.architecture.clone(),
@@ -40,15 +49,21 @@ fn build_router(model: Model, profile: bool) -> Router {
         runtime: Runtime::from_raw(&model.tensors),
         mlp_plan: infer_mlp_plan(&model),
         onnx_plan,
+        transformer_hidden: transformer_hidden_dim(&model),
+        chat_template,
         profile,
     });
 
     Router::new()
         .route("/infer", post(handlers::infer))
         .route("/info", get(handlers::model_info))
+        .route("/health", get(handlers::health))
         .route("/chat", post(handlers::chat))
         .route("/chat/stream", post(handlers::chat_stream))
         .route("/complete", post(handlers::complete))
+        .route("/embeddings", post(handlers::embeddings))
+        .route("/v1/models", get(openai::list_models))
+        .route("/v1/chat/completions", post(openai::chat_completion))
         .with_state(state)
 }
 
@@ -61,6 +76,13 @@ struct AppState {
     runtime: Runtime,
     mlp_plan: Option<Vec<(String, String)>>,
     onnx_plan: Option<crate::onnx_exec::ExecutionPlan>,
+    /// Hidden size for transformer (`gpt2`/`llama`) artifacts, so `/infer` inputs of the wrong
+    /// length can be gracefully resized before the transformer forward. `None` for non-
+    /// transformer architectures or when the hidden size cannot be determined.
+    transformer_hidden: Option<usize>,
+    /// Jinja2 chat template from model metadata (e.g. `tokenizer.chat_template`), used to
+    /// format messages before tokenization for chat endpoints.
+    chat_template: Option<String>,
     profile: bool,
 }
 
@@ -81,12 +103,30 @@ struct InferResponse {
 }
 
 #[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    model: String,
+    architecture: String,
+}
+
+#[derive(Serialize)]
 struct ModelInfo {
     name: String,
     architecture: String,
     total_params: usize,
     total_bytes: usize,
     tensors: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsRequest {
+    input: String,
+}
+
+#[derive(Serialize)]
+struct EmbeddingsResponse {
+    embedding: Vec<f32>,
+    model: String,
 }
 
 #[derive(Deserialize)]
@@ -209,4 +249,22 @@ fn parse_layer_suffix(name: &str) -> Option<u32> {
     }
 
     idx.parse::<u32>().ok()
+}
+
+/// Resolve the hidden dimension for transformer architectures so `/infer` can resize inputs
+/// to the expected single-vector width. Returns `None` for non-transformer models or when the
+/// hidden size is zero / undetectable.
+fn transformer_hidden_dim(model: &Model) -> Option<usize> {
+    let hidden = match model.architecture.as_str() {
+        "gpt2" => {
+            let layers = crate::arch::detect_layers(model, "transformer.h.");
+            crate::arch::gpt2_hidden_dim(model, &layers)
+        }
+        "llama" => {
+            let layers = crate::arch::llama_layers(model);
+            crate::arch::llama_hidden_dim(model, &layers)
+        }
+        _ => return None,
+    };
+    (hidden > 0).then_some(hidden)
 }

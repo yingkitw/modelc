@@ -76,6 +76,14 @@ modelc run my-model.modelc --port 8080 --profile
 modelc list
 ```
 
+**Remove** a model from the local store:
+
+```bash
+modelc rm my-model
+modelc rm my-model --all          # also delete versioned copies
+modelc rm my-model --force        # delete even if versioned copies exist
+```
+
 **Pull** models from remote sources:
 
 ```bash
@@ -150,18 +158,23 @@ Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GG
 
 ## HTTP API (run + model-serve)
 
-| Method | Path           | Body / response |
-|--------|----------------|-----------------|
-| `GET`  | `/info`        | JSON: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (names). |
-| `POST` | `/infer`       | Request JSON: `{ "input": [f32, ...] }` or `{ "inputs": [[f32, ...], ...] }` for batch. Response: `{ "output": [f32, ...] }` or `{ "outputs": [[f32, ...], ...] }`. |
-| `POST` | `/chat`        | Request JSON: `{ "messages": [{"role": "user", "content": "..."}] }`. Response: `{ "message": {"role": "assistant", "content": "..."} }`. |
-| `POST` | `/chat/stream` | SSE stream of `{ "delta": "...", "done": bool }` chunks. |
-| `POST` | `/complete`    | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
+| Method | Path                    | Body / response |
+|--------|-------------------------|-----------------|
+| `GET`  | `/info`                 | JSON: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (names). |
+| `GET`  | `/health`               | JSON: `status`, `model`, `architecture` — liveness probe. |
+| `POST` | `/infer`                | Request JSON: `{ "input": [f32, ...] }` or `{ "inputs": [[f32, ...], ...] }` for batch. Response: `{ "output": [f32, ...] }` or `{ "outputs": [[f32, ...], ...] }`. |
+| `POST` | `/chat`                 | Request JSON: `{ "messages": [{"role": "user", "content": "..."}] }`. Response: `{ "message": {"role": "assistant", "content": "..."} }`. |
+| `POST` | `/chat/stream`          | SSE stream of `{ "delta": "...", "done": bool }` chunks. |
+| `POST` | `/complete`             | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
+| `POST` | `/embeddings`           | Request JSON: `{ "input": "..." }`. Response: `{ "embedding": [f32, ...], "model": "..." }`. |
+| `GET`  | `/v1/models`            | OpenAI-compatible model list. |
+| `POST` | `/v1/chat/completions`  | OpenAI-compatible chat completion (non-streaming). |
 
 **Inference backends** (priority order):
 1. **ONNX execution plan** — if the model metadata contains `onnx.execution_plan`, ops are executed via the runtime tensor engine (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast).
-2. **MLP GEMV** — when `architecture == "mlp"`, emits a stacked GEMV + bias (+ ReLU between hidden layers) using `layerN.weight`/`layerN.bias` or a single `weight`/`bias`.
-3. **Echo fallback** — returns input unchanged when no execution plan matches.
+2. **Transformer forward** — when `architecture == "gpt2"` or `"llama"`, runs the full FP32 transformer forward (layer norm / RMS norm, GeLU / SwiGLU, RoPE, single-token causal attention, output projection). Inputs are resized to the model hidden size; numerics match the `compile`-emitted server.
+3. **MLP GEMV** — when `architecture == "mlp"`, emits a stacked GEMV + bias (+ ReLU between hidden layers) using `layerN.weight`/`layerN.bias` or a single `weight`/`bias`.
+4. **Echo fallback** — returns input unchanged when no execution plan matches.
 
 All JSON responses are `application/json`; SSE uses `text/event-stream`.
 
@@ -190,6 +203,16 @@ Before the first (`modelc`) publish:
 - **Model versioning** — store multiple versions and `modelc switch <name> <version>`.
 - **Shell completions** — generate bash/zsh/fish completions for all subcommands.
 - **Per-op profiling** — `--profile` flag on `run` prints timing per inference step.
+- **KV cache** — `KvCache` stores per-layer Key/Value vectors for autoregressive generation. `forward_gpt2_cached` / `forward_llama_cached` append current K/V and compute attention over all cached positions, eliminating redundant recomputation.
+- **Autoregressive text generation** — `src/generate.rs` provides `generate()` with greedy and temperature sampling, KV cache reuse, and token embedding lookup. Wires into the HTTP server so `/chat`, `/complete`, and `/v1/chat/completions` return real generated text for GPT-2 / LLaMA models.
+- **Byte-level BPE tokenizer** — `src/tokenizer.rs` provides encode/decode with greedy merge algorithm. Foundation for real text-in/text-out transformer inference.
+- **GGUF tokenizer metadata extraction** — reads vocab, merges, and BOS/EOS token IDs directly from GGUF KV metadata (`extract_tokenizer_metadata`). Constructs a `BpeTokenizer` from in-file tokenizer data without external files.
+- **Chat template rendering** — `src/chat_template.rs` reads Jinja2 templates from GGUF metadata (`tokenizer.chat_template`) and formats messages before tokenization using `minijinja`. Falls back to simple concatenation when no template is present.
+- **GGUF quantization inference** — Q4_0, Q5_0, Q8_0, Q4_K, Q6_K block-quantized tensors are preserved in IR and dequantized on-the-fly by `Runtime::from_raw` (`src/runtime/serve.rs`). Reduces `.modelc` artifact size ~8x for Q4_0 models while keeping the transformer forward pass functional. Codegen path (`compile`) calls `dequantize_in_place` before emitting the server so generated binaries still receive FP32 weights.
+- **Structured output / JSON mode** — `POST /v1/chat/completions` accepts `response_format: { type: "json_object" }` to constrain output to valid JSON. Injects a system prompt requesting JSON-only responses and post-processes generated text with `extract_json_object` to extract the first well-formed JSON object or array. Falls back to raw text if no valid JSON is found.
+- **Function calling / tool use** — `POST /v1/chat/completions` accepts an OpenAI-compatible `tools` array. When tools are present, a system prompt describing available tools is injected into the conversation. Generated output is parsed for a `tool_calls` JSON array; if found, the response returns `tool_calls` with `finish_reason: "tool_calls"`. Otherwise falls back to regular text content. Supports both inline JSON arguments and pre-serialized argument strings.
+- **Continuous batching (MLP)** — `POST /infer` with multiple `inputs` and MLP architecture routes to `run_mlp_forward_batched` (`src/serve/infer.rs`), which computes the entire batch in a single pass via `batched_gemv_bias`. Eliminates redundant weight traversal and improves CPU cache locality compared to serial per-item inference. Transformer generation batching is future work.
+- **Speculative decoding** — `generate()` supports `config.gamma > 0` to enable speculative decoding with an n-gram draft model (`src/generate.rs`). The draft model proposes `gamma` candidate tokens by looking up trigram continuations from the prefix; the target model verifies each candidate in a loop using the KV cache. Accepted tokens skip the sampling step. Disabled by default (`gamma: 0`). Establishes infrastructure for future faster draft models (e.g., smaller transformer or prompt lookup decoding).
 
 ## Repository layout
 
@@ -198,6 +221,8 @@ Before the first (`modelc`) publish:
   - `src/onnx_exec/` — ONNX graph execution plan builder and executor (`mod.rs`, `helpers.rs`).
   - `src/codegen/native/` — native code generator, modularized (`mod.rs`, `forward.rs`, `helpers.rs`).
   - `src/serve/` — HTTP inference server, modularized (`mod.rs`, `handlers.rs`, `infer.rs`).
+  - `src/tokenizer.rs` — byte-level BPE tokenizer (encode/decode with greedy merge algorithm).
+  - `src/chat_template.rs` — Jinja2 chat template rendering for message formatting before tokenization.
 - `examples/` — runnable `cargo --example` programs ([`examples/README.md`](./examples/README.md)).
 - `tests/` — integration tests.
 

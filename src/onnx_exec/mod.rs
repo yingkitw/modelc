@@ -78,7 +78,10 @@ pub fn build_plan(graph: &onnx_rs::ast::Graph) -> Result<ExecutionPlan> {
                 AttributeType::Ints => AttributeValue::Ints(attr.ints.clone()),
                 AttributeType::Floats => AttributeValue::Floats(attr.floats.clone()),
                 AttributeType::Strings => AttributeValue::Strings(
-                    attr.strings.iter().map(|s| String::from_utf8_lossy(s).to_string()).collect(),
+                    attr.strings
+                        .iter()
+                        .map(|s| String::from_utf8_lossy(s).to_string())
+                        .collect(),
                 ),
                 _ => continue,
             };
@@ -94,11 +97,7 @@ pub fn build_plan(graph: &onnx_rs::ast::Graph) -> Result<ExecutionPlan> {
     }
 
     let plan_inputs: Vec<String> = graph.input.iter().map(|v| v.name.to_string()).collect();
-    let plan_outputs: Vec<String> = graph
-        .output
-        .iter()
-        .map(|v| v.name.to_string())
-        .collect();
+    let plan_outputs: Vec<String> = graph.output.iter().map(|v| v.name.to_string()).collect();
 
     Ok(ExecutionPlan {
         ops,
@@ -121,21 +120,34 @@ pub fn execute_plan(
         let fdata: Option<Vec<f32>> = match td.dtype {
             DataType::F32 => {
                 let byte_len = count * 4;
-                if td.data.len() < byte_len { None }
-                else {
-                    Some(td.data[..byte_len].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+                if td.data.len() < byte_len {
+                    None
+                } else {
+                    Some(
+                        td.data[..byte_len]
+                            .chunks_exact(4)
+                            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                            .collect(),
+                    )
                 }
             }
             DataType::F16 => {
                 let byte_len = count * 2;
-                if td.data.len() < byte_len { None }
-                else {
-                    Some(td.data[..byte_len].chunks_exact(2).map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32()).collect())
+                if td.data.len() < byte_len {
+                    None
+                } else {
+                    Some(
+                        td.data[..byte_len]
+                            .chunks_exact(2)
+                            .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
+                            .collect(),
+                    )
                 }
             }
             DataType::I8 => {
-                if td.data.len() < count { None }
-                else {
+                if td.data.len() < count {
+                    None
+                } else {
                     Some(td.data[..count].iter().map(|&b| b as i8 as f32).collect())
                 }
             }
@@ -182,8 +194,16 @@ pub fn execute_plan(
                 let trans_a = helpers::get_attr_int(&op.attrs, "transA", 0) != 0;
                 let trans_b = helpers::get_attr_int(&op.attrs, "transB", 0) != 0;
 
-                let a_t = if trans_a { helpers::transpose(a) } else { Tensor::from_vec(a.data.clone(), a.shape.clone()) };
-                let b_t = if trans_b { helpers::transpose(b) } else { Tensor::from_vec(b.data.clone(), b.shape.clone()) };
+                let a_t = if trans_a {
+                    helpers::transpose(a)
+                } else {
+                    Tensor::from_vec(a.data.clone(), a.shape.clone())
+                };
+                let b_t = if trans_b {
+                    helpers::transpose(b)
+                } else {
+                    Tensor::from_vec(b.data.clone(), b.shape.clone())
+                };
                 let mut out = ops::matmul(&a_t, &b_t);
                 if alpha != 1.0 {
                     out = ops::mul_scalar(&out, alpha);
@@ -282,12 +302,18 @@ pub fn execute_plan(
             "Identity" => {
                 ensure!(!op.inputs.is_empty(), "Identity needs input");
                 let a = env.get(&op.inputs[0]).context("Identity missing input")?;
-                env.insert(op.outputs[0].clone(), Tensor::from_vec(a.data.clone(), a.shape.clone()));
+                env.insert(
+                    op.outputs[0].clone(),
+                    Tensor::from_vec(a.data.clone(), a.shape.clone()),
+                );
             }
             "Cast" => {
                 ensure!(!op.inputs.is_empty(), "Cast needs input");
                 let a = env.get(&op.inputs[0]).context("Cast missing input")?;
-                env.insert(op.outputs[0].clone(), Tensor::from_vec(a.data.clone(), a.shape.clone()));
+                env.insert(
+                    op.outputs[0].clone(),
+                    Tensor::from_vec(a.data.clone(), a.shape.clone()),
+                );
             }
             "Sigmoid" => {
                 ensure!(!op.inputs.is_empty(), "Sigmoid needs input");
