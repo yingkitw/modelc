@@ -205,7 +205,10 @@ pub fn remove_model(name: &str, all: bool, force: bool) -> Result<()> {
             {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("failed to remove {:?}", path))?;
-                println!("Removed versioned copy {:?}.", path.file_name().unwrap_or_default());
+                println!(
+                    "Removed versioned copy {:?}.",
+                    path.file_name().unwrap_or_default()
+                );
             }
         }
     }

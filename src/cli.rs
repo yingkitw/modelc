@@ -137,6 +137,31 @@ pub enum Commands {
 
         #[arg(long, help = "Print per-operation timing for each inference request")]
         profile: bool,
+
+        #[arg(long, value_name = "N", help = "Default maximum tokens to generate")]
+        max_tokens: Option<usize>,
+
+        #[arg(long, value_name = "FLOAT", help = "Default sampling temperature (0.0 = greedy)")]
+        temperature: Option<f32>,
+
+        #[arg(long, value_name = "N", help = "Maximum context length before KV cache shifting")]
+        max_context: Option<usize>,
+
+        #[arg(long, value_name = "N", help = "Number of initial anchor tokens to preserve during context shifting")]
+        anchor_tokens: Option<usize>,
+
+        #[arg(long, value_name = "REGEX", help = "Default regex grammar constraint for all requests")]
+        grammar: Option<String>,
+
+        #[arg(long, value_name = "KEY", help = "Require Bearer token authentication on all endpoints")]
+        api_key: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Max requests per minute per client IP (0 = unlimited)"
+        )]
+        rate_limit: Option<u32>,
     },
 
     #[command(about = "List installed model packages")]

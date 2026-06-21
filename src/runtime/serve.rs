@@ -122,8 +122,8 @@ impl Runtime {
     pub fn from_raw(raw: &HashMap<String, TensorData>) -> Self {
         let mut tensors = HashMap::new();
         for (name, td) in raw {
-            let fdata = bytes_to_f32_slice(td)
-                .or_else(|| crate::parsers::gguf::dequantize_gguf_tensor(td));
+            let fdata =
+                bytes_to_f32_slice(td).or_else(|| crate::parsers::gguf::dequantize_gguf_tensor(td));
             if let Some(data) = fdata {
                 tensors.insert(name.clone(), Tensor::from_vec(data, td.shape.clone()));
             }
@@ -172,8 +172,15 @@ mod tests {
         let rt = Runtime::from_raw(&raw);
         let t = rt.get("w").expect("tensor loaded");
         assert_eq!(t.data.len(), 32);
-        assert!((t.data[0] - 10.0).abs() < 1e-5, "first element: {}", t.data[0]);
-        assert!(t.data[1..].iter().all(|&v| v.abs() < 1e-6), "rest should be zero");
+        assert!(
+            (t.data[0] - 10.0).abs() < 1e-5,
+            "first element: {}",
+            t.data[0]
+        );
+        assert!(
+            t.data[1..].iter().all(|&v| v.abs() < 1e-6),
+            "rest should be zero"
+        );
     }
 
     #[test]

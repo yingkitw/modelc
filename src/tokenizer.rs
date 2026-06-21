@@ -24,10 +24,7 @@ impl BpeTokenizer {
     /// `vocab[i]` is the byte sequence for token ID `i`.  
     /// `merges` is a list of `(first_id, second_id, merged_id)` in priority order.
     pub fn new(vocab: Vec<Vec<u8>>, merges: Vec<(u32, u32, u32)>) -> Self {
-        let merge_map = merges
-            .iter()
-            .map(|(a, b, m)| ((*a, *b), *m))
-            .collect();
+        let merge_map = merges.iter().map(|(a, b, m)| ((*a, *b), *m)).collect();
         let mut byte_to_id = HashMap::new();
         for (id, seq) in vocab.iter().enumerate() {
             if seq.len() == 1 {
@@ -72,7 +69,10 @@ impl BpeTokenizer {
                 let key = (window[0], window[1]);
                 if let Some(&merged) = self.merge_map.get(&key) {
                     // Find the rank (priority) of this merge.
-                    let rank = self.merges.iter().position(|(a, b, _)| *a == key.0 && *b == key.1);
+                    let rank = self
+                        .merges
+                        .iter()
+                        .position(|(a, b, _)| *a == key.0 && *b == key.1);
                     if let Some(r) = rank
                         && best_rank.is_none_or(|br| r < br)
                     {
@@ -105,6 +105,12 @@ impl BpeTokenizer {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    /// Raw byte sequence for a token ID, or `None` if the ID is out of range.
+    /// Useful for emitting per-token `bytes` fields (e.g. OpenAI logprobs payloads).
+    pub fn token_bytes(&self, id: u32) -> Option<&[u8]> {
+        self.vocab.get(id as usize).map(Vec::as_slice)
+    }
+
     /// Vocabulary size (number of distinct tokens).
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
@@ -123,11 +129,7 @@ impl BpeTokenizer {
             anyhow::bail!("GGUF tokenizer metadata has no vocab");
         }
 
-        let vocab: Vec<Vec<u8>> = meta
-            .vocab
-            .iter()
-            .map(|s| s.as_bytes().to_vec())
-            .collect();
+        let vocab: Vec<Vec<u8>> = meta.vocab.iter().map(|s| s.as_bytes().to_vec()).collect();
 
         // Build token string → ID map for merge lookups.
         let mut token_to_id: std::collections::HashMap<Vec<u8>, u32> =
@@ -148,14 +150,14 @@ impl BpeTokenizer {
             let first_id = *token_to_id
                 .get(&first_bytes)
                 .with_context(|| format!("merge rule first token not in vocab: {first_str:?}"))?;
-            let second_id = *token_to_id.get(&second_bytes).with_context(|| {
-                format!("merge rule second token not in vocab: {second_str:?}")
-            })?;
+            let second_id = *token_to_id
+                .get(&second_bytes)
+                .with_context(|| format!("merge rule second token not in vocab: {second_str:?}"))?;
 
             let merged_bytes: Vec<u8> = first_bytes.iter().chain(&second_bytes).copied().collect();
-            let merged_id = *token_to_id
-                .get(&merged_bytes)
-                .with_context(|| format!("merged token not in vocab: {first_str:?}+{second_str:?}"))?;
+            let merged_id = *token_to_id.get(&merged_bytes).with_context(|| {
+                format!("merged token not in vocab: {first_str:?}+{second_str:?}")
+            })?;
 
             merges.push((first_id, second_id, merged_id));
         }
@@ -188,12 +190,7 @@ mod tests {
     #[test]
     fn bpe_merge_combines_tokens() {
         // Vocab: 0='a', 1='b', 2='c', 3="ab" (merged)
-        let vocab = vec![
-            vec![b'a'],
-            vec![b'b'],
-            vec![b'c'],
-            vec![b'a', b'b'],
-        ];
+        let vocab = vec![vec![b'a'], vec![b'b'], vec![b'c'], vec![b'a', b'b']];
         // Merge 'a' (0) + 'b' (1) → "ab" (3)
         let merges = vec![(0, 1, 3)];
         let tok = BpeTokenizer::new(vocab, merges);

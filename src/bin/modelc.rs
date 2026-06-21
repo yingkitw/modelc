@@ -105,6 +105,13 @@ fn main() -> Result<()> {
             port,
             bind,
             profile,
+            max_tokens,
+            temperature,
+            max_context,
+            anchor_tokens,
+            grammar,
+            api_key,
+            rate_limit,
         } => {
             let path = modelc::store::resolve_model_path(input)?;
             eprintln!("modelc run: loading {:?}...", path);
@@ -125,8 +132,34 @@ fn main() -> Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid bind address: {}", e))?;
 
+            let mut generation = modelc::generate::GenerationConfig::default();
+            if let Some(n) = max_tokens {
+                generation.max_tokens = *n;
+            }
+            if let Some(t) = temperature {
+                generation.temperature = *t;
+            }
+            if let Some(c) = max_context {
+                generation.max_context = Some(*c);
+            }
+            if let Some(a) = anchor_tokens {
+                generation.anchor_tokens = *a;
+            }
+            if let Some(g) = grammar
+                && let Some(c) = modelc::constraint::RegexConstraint::new(g)
+            {
+                generation.constraint = Some(std::sync::Arc::new(c));
+            }
+
+            let auth = modelc::serve::auth::AuthConfig::new(api_key.clone(), *rate_limit);
+            let auth_opt = if api_key.is_some() || rate_limit.is_some() {
+                Some(auth)
+            } else {
+                None
+            };
+
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(modelc::serve::run_server(model, addr, *profile))?;
+            rt.block_on(modelc::serve::run_server(model, addr, *profile, generation, auth_opt))?;
         }
         modelc::cli::Commands::List => {
             let models = modelc::store::list_models()?;

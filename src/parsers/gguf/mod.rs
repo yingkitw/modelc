@@ -31,7 +31,10 @@ const GGML_TYPE_F64: u32 = 28;
 const GGML_TYPE_BF16: u32 = 30;
 
 fn is_gguf_quant_type(ty: u32) -> bool {
-    matches!(ty, GGML_TYPE_Q4_0 | GGML_TYPE_Q5_0 | GGML_TYPE_Q8_0 | GGML_TYPE_Q4_K | GGML_TYPE_Q6_K)
+    matches!(
+        ty,
+        GGML_TYPE_Q4_0 | GGML_TYPE_Q5_0 | GGML_TYPE_Q8_0 | GGML_TYPE_Q4_K | GGML_TYPE_Q6_K
+    )
 }
 
 // gguf_metadata_value_type
@@ -644,7 +647,11 @@ mod tests {
         let f = dequantize_gguf_tensor(t).expect("dequantize");
         assert_eq!(f.len(), 32);
         // First few elements should be non-zero because high bit=1
-        assert!(f[0].abs() > 0.01, "expected non-zero Q5_0 value, got {}", f[0]);
+        assert!(
+            f[0].abs() > 0.01,
+            "expected non-zero Q5_0 value, got {}",
+            f[0]
+        );
         Ok(())
     }
 

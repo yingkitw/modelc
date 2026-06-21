@@ -29,8 +29,9 @@ pub(super) fn runtime_to_tensor_data(runtime: &Runtime) -> HashMap<String, Tenso
 }
 
 pub(super) fn run_inference(state: &AppState, input: &[f32]) -> Vec<f32> {
+    let runtime = state.runtime.read().expect("runtime lock poisoned");
     if let Some(plan) = &state.onnx_plan {
-        let runtime_tensors = runtime_to_tensor_data(&state.runtime);
+        let runtime_tensors = runtime_to_tensor_data(&runtime);
         match crate::onnx_exec::execute_plan(plan, &runtime_tensors, input) {
             Ok(result) => return result,
             Err(e) => {
@@ -39,9 +40,9 @@ pub(super) fn run_inference(state: &AppState, input: &[f32]) -> Vec<f32> {
         }
     }
     if let Some(plan) = &state.mlp_plan {
-        return run_mlp_forward(&state.runtime, plan, input, state.profile);
+        return run_mlp_forward(&runtime, plan, input, state.profile);
     }
-    if let Some(output) = run_transformer(state, input) {
+    if let Some(output) = run_transformer(state, &runtime, input) {
         return output;
     }
     input.to_vec()
@@ -51,16 +52,20 @@ pub(super) fn run_inference(state: &AppState, input: &[f32]) -> Vec<f32> {
 /// the model's hidden size (truncated or zero-padded) so `/infer` is tolerant of length
 /// mismatches instead of erroring. Returns `None` for non-transformer models or when the
 /// forward has no usable output head (caller then falls back to echo).
-fn run_transformer(state: &AppState, input: &[f32]) -> Option<Vec<f32>> {
+fn run_transformer(
+    state: &AppState,
+    runtime: &Runtime,
+    input: &[f32],
+) -> Option<Vec<f32>> {
     let hidden = state.transformer_hidden?;
     let resized = resize_to_hidden(input, hidden);
     let start = std::time::Instant::now();
     let out = match state.architecture.as_str() {
         "gpt2" => {
-            crate::runtime::transformer::forward_gpt2(&state.runtime, &resized, state.profile)
+            crate::runtime::transformer::forward_gpt2(runtime, &resized, state.profile)
         }
         "llama" => {
-            crate::runtime::transformer::forward_llama(&state.runtime, &resized, state.profile)
+            crate::runtime::transformer::forward_llama(runtime, &resized, state.profile)
         }
         _ => None,
     };
@@ -93,46 +98,99 @@ fn resize_to_hidden(input: &[f32], hidden: usize) -> Vec<f32> {
 pub(super) fn run_embeddings(state: &AppState, input: &[f32]) -> Option<Vec<f32>> {
     let hidden = state.transformer_hidden?;
     let resized = resize_to_hidden(input, hidden);
+    let runtime = state.runtime.read().expect("runtime lock poisoned");
     match state.architecture.as_str() {
-        "gpt2" => crate::runtime::transformer::embed_gpt2(&state.runtime, &resized, state.profile),
-        "llama" => crate::runtime::transformer::embed_llama(&state.runtime, &resized, state.profile),
+        "gpt2" => crate::runtime::transformer::embed_gpt2(&runtime, &resized, state.profile),
+        "llama" => {
+            crate::runtime::transformer::embed_llama(&runtime, &resized, state.profile)
+        }
         _ => None,
     }
 }
 
-pub(super) fn run_text_inference(state: &AppState, prompt: &str) -> String {
-    // For transformer models, use autoregressive generation.
+pub(super) fn run_text_inference_with_config(
+    state: &AppState,
+    prompt: &str,
+    config: &crate::generate::GenerationConfig,
+) -> String {
+    let input: Vec<f32> = prompt.bytes().map(|b| b as f32 / 255.0).collect();
+
+    // For transformer models, use autoregressive generation (with the prefix cache).
     if (state.architecture == "gpt2" || state.architecture == "llama")
         && let Some(hidden) = state.transformer_hidden
     {
         let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
-        let config = crate::generate::GenerationConfig::default();
-        return crate::generate::generate(
-            &state.runtime,
-            &state.architecture,
-            hidden,
-            &tokenizer,
-            prompt,
-            &config,
-        );
+        let prompt_ids = tokenizer.encode(prompt);
+        // Brief read lock for prefix cache lookup.
+        let lookup = {
+            let guard = state.prefix_cache.read().expect("prefix cache poisoned");
+            guard.lookup(&prompt_ids)
+        };
+        let runtime = state.runtime.read().expect("runtime lock poisoned");
+        let (ids, maybe_kv) = if config.gamma > 0 {
+            let (text, kv) = crate::generate::speculative_generate(
+                &runtime,
+                &state.architecture,
+                hidden,
+                &tokenizer,
+                prompt,
+                config,
+                lookup,
+                state.draft_model.as_ref().map(|dm| dm.as_ref()),
+            );
+            let prompt_ids = tokenizer.encode(prompt);
+            let all_ids = tokenizer.encode(&(prompt.to_string() + &text));
+            let ids = if all_ids.len() > prompt_ids.len() {
+                all_ids[prompt_ids.len()..].to_vec()
+            } else {
+                Vec::new()
+            };
+            (ids, kv)
+        } else {
+            let (ids, _, kv) = crate::generate::generate_core(
+                &runtime,
+                &state.architecture,
+                hidden,
+                &tokenizer,
+                prompt,
+                config,
+                lookup,
+                false,
+                0,
+            );
+            (ids, kv)
+        };
+        // Brief write lock for prefix cache insertion.
+        if let Some(kv) = maybe_kv {
+            let mut guard = state.prefix_cache.write().expect("prefix cache poisoned");
+            let mut full_ids = prompt_ids.clone();
+            full_ids.extend_from_slice(&ids);
+            guard.insert(
+                full_ids,
+                crate::prefix_cache::CachedPrefix {
+                    kv,
+                    last_logits: Vec::new(),
+                },
+            );
+        }
+        return tokenizer.decode(&ids);
     }
 
-    let input: Vec<f32> = prompt.bytes().map(|b| b as f32 / 255.0).collect();
-
+    let runtime = state.runtime.read().expect("runtime lock poisoned");
     if let Some(plan) = &state.onnx_plan {
-        let runtime_tensors = runtime_to_tensor_data(&state.runtime);
+        let runtime_tensors = runtime_to_tensor_data(&runtime);
         if let Ok(result) = crate::onnx_exec::execute_plan(plan, &runtime_tensors, &input) {
             return serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
         }
     }
 
-    if let Some(output) = run_transformer(state, &input) {
+    if let Some(output) = run_transformer(state, &runtime, &input) {
         return serde_json::to_string(&output).unwrap_or_else(|_| "[]".to_string());
     }
 
     let plan = state.mlp_plan.as_ref();
     let output = if let Some(plan) = plan {
-        if let Some(w) = state.runtime.get(&plan[0].0) {
+        if let Some(w) = runtime.get(&plan[0].0) {
             let input_size = w.shape.get(1).copied().unwrap_or(input.len());
             let vec = if input.len() >= input_size {
                 input[..input_size].to_vec()
@@ -141,7 +199,7 @@ pub(super) fn run_text_inference(state: &AppState, prompt: &str) -> String {
                 v.resize(input_size, 0.0);
                 v
             };
-            run_mlp_forward(&state.runtime, plan, &vec, state.profile)
+            run_mlp_forward(&runtime, plan, &vec, state.profile)
         } else {
             Vec::new()
         }
@@ -149,6 +207,121 @@ pub(super) fn run_text_inference(state: &AppState, prompt: &str) -> String {
         Vec::new()
     };
     serde_json::to_string(&output).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Generate token IDs for transformer models, returning the newly generated IDs.
+/// Non-transformer models return an empty Vec.
+pub(super) fn run_text_inference_token_ids(
+    state: &AppState,
+    prompt: &str,
+    config: &crate::generate::GenerationConfig,
+) -> Vec<u32> {
+    if (state.architecture == "gpt2" || state.architecture == "llama")
+        && let Some(hidden) = state.transformer_hidden
+    {
+        let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+        let prompt_ids = tokenizer.encode(prompt);
+        let lookup = {
+            let guard = state.prefix_cache.read().expect("prefix cache poisoned");
+            guard.lookup(&prompt_ids)
+        };
+        let runtime = state.runtime.read().expect("runtime lock poisoned");
+        let (ids, maybe_kv) = if config.gamma > 0 {
+            let (text, kv) = crate::generate::speculative_generate(
+                &runtime,
+                &state.architecture,
+                hidden,
+                &tokenizer,
+                prompt,
+                config,
+                lookup,
+                state.draft_model.as_ref().map(|dm| dm.as_ref()),
+            );
+            let prompt_ids = tokenizer.encode(prompt);
+            let all_ids = tokenizer.encode(&(prompt.to_string() + &text));
+            let ids = if all_ids.len() > prompt_ids.len() {
+                all_ids[prompt_ids.len()..].to_vec()
+            } else {
+                Vec::new()
+            };
+            (ids, kv)
+        } else {
+            let (ids, _, kv) = crate::generate::generate_core(
+                &runtime,
+                &state.architecture,
+                hidden,
+                &tokenizer,
+                prompt,
+                config,
+                lookup,
+                false,
+                0,
+            );
+            (ids, kv)
+        };
+        if let Some(kv) = maybe_kv {
+            let mut guard = state.prefix_cache.write().expect("prefix cache poisoned");
+            let mut full_ids = prompt_ids.clone();
+            full_ids.extend_from_slice(&ids);
+            guard.insert(
+                full_ids,
+                crate::prefix_cache::CachedPrefix {
+                    kv,
+                    last_logits: Vec::new(),
+                },
+            );
+        }
+        return ids;
+    }
+    Vec::new()
+}
+
+/// Generate token IDs for a transformer model, also returning per-token logprobs.
+///
+/// Returns `None` for non-transformer architectures (caller should fall back to
+/// `run_text_inference_with_config`). When successful, returns the newly
+/// generated token IDs and one `TokenLogprob` per generated token.
+pub(super) fn run_text_inference_with_logprobs(
+    state: &AppState,
+    prompt: &str,
+    config: &crate::generate::GenerationConfig,
+    top_logprobs: usize,
+) -> Option<(Vec<u32>, Vec<crate::generate::TokenLogprob>)> {
+    let hidden = state.transformer_hidden?;
+    if state.architecture != "gpt2" && state.architecture != "llama" {
+        return None;
+    }
+    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+    let prompt_ids = tokenizer.encode(prompt);
+    let lookup = {
+        let guard = state.prefix_cache.read().expect("prefix cache poisoned");
+        guard.lookup(&prompt_ids)
+    };
+    let runtime = state.runtime.read().expect("runtime lock poisoned");
+    let (ids, logprobs, maybe_kv) = crate::generate::generate_core(
+        &runtime,
+        &state.architecture,
+        hidden,
+        &tokenizer,
+        prompt,
+        config,
+        lookup,
+        true,
+        top_logprobs,
+    );
+    if let Some(kv) = maybe_kv {
+        let mut guard = state.prefix_cache.write().expect("prefix cache poisoned");
+        let mut full_ids = prompt_ids.clone();
+        full_ids.extend_from_slice(&ids);
+        guard.insert(
+            full_ids,
+            crate::prefix_cache::CachedPrefix {
+                kv,
+                last_logits: Vec::new(),
+            },
+        );
+    }
+    Some((ids, logprobs))
 }
 
 pub(super) fn run_mlp_forward(
@@ -320,6 +493,10 @@ mod tests {
         let refs: Vec<&[f32]> = inputs.iter().map(|v| v.as_slice()).collect();
         let outs = batched_gemv_bias(&weight, &bias, &refs);
         assert_eq!(outs.len(), 1);
-        assert!((outs[0][0] - 10.0).abs() < 1e-6, "expected 10.0, got {}", outs[0][0]);
+        assert!(
+            (outs[0][0] - 10.0).abs() < 1e-6,
+            "expected 10.0, got {}",
+            outs[0][0]
+        );
     }
 }

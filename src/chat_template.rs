@@ -17,7 +17,10 @@ pub struct ChatMessage {
 /// Apply a Jinja2 chat template to a list of messages.
 ///
 /// If `template` is `None`, falls back to a simple `role: content\n` concatenation.
-pub fn apply_chat_template(template: Option<&str>, messages: &[ChatMessage]) -> anyhow::Result<String> {
+pub fn apply_chat_template(
+    template: Option<&str>,
+    messages: &[ChatMessage],
+) -> anyhow::Result<String> {
     if let Some(tpl) = template {
         let mut env = Environment::new();
         env.add_template("chat", tpl)?;
@@ -53,12 +56,10 @@ mod tests {
 
     #[test]
     fn fallback_without_template() {
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
         let out = apply_chat_template(None, &messages).unwrap();
         assert_eq!(out, "user: hello\n");
     }
@@ -66,12 +67,10 @@ mod tests {
     #[test]
     fn simple_jinja_template() {
         let template = "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}assistant:";
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: "hi".to_string(),
-            },
-        ];
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
         let out = apply_chat_template(Some(template), &messages).unwrap();
         assert_eq!(out, "user: hi\nassistant:");
     }
