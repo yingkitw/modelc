@@ -137,6 +137,15 @@ From the built artifact in this repository (no install):
 
 - **`--port`** — HTTP server port (default `8080`).
 - **`--bind`** — HTTP server bind address (default `0.0.0.0`).
+- **`--api-key <key>`** — Require `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`.
+- **`--rate-limit <N>`** — Max requests per minute per client IP (default: unlimited).
+- **`--max-context <N>`** — Hard context limit; triggers sliding-window KV eviction when exceeded.
+- **`--anchor-tokens <N>`** — Preserve the first N tokens during context shifting (StreamingLLM-style).
+- **`--temperature <T>`** — Sampling temperature (default `1.0`).
+- **`--max-tokens <N>`** — Max tokens to generate (default `256`).
+- **`--top-p <P>`** — Nucleus sampling threshold (default `0.0`, disabled).
+- **`--grammar <pattern>`** — Regex grammar constraint applied during sampling.
+- **`--profile`** — Print per-step inference timing.
 
 ### Compile flags (legacy)
 
@@ -171,7 +180,8 @@ Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GG
 | `POST` | `/complete`             | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
 | `POST` | `/embeddings`           | Request JSON: `{ "input": "..." }`. Response: `{ "embedding": [f32, ...], "model": "..." }`. |
 | `GET`  | `/v1/models`            | OpenAI-compatible model list. |
-| `POST` | `/v1/chat/completions`  | OpenAI-compatible chat completion (non-streaming). |
+| `POST` | `/v1/chat/completions`  | OpenAI-compatible chat completion (streaming + non-streaming). |
+| `POST` | `/v1/completions`       | OpenAI-compatible legacy text completion (streaming + non-streaming). |
 
 **Inference backends** (priority order):
 1. **ONNX execution plan** — if the model metadata contains `onnx.execution_plan`, ops are executed via the runtime tensor engine (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast).
@@ -226,6 +236,14 @@ Before the first (`modelc`) publish:
 - **Prometheus metrics** — `GET /metrics` renders request counts, inference latency histograms (buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, +Inf), active request gauge, and tokens-generated counter in Prometheus text format. Handlers use `ActiveRequestGuard` and `InferenceTimer` RAII structs so instrumentation is automatic and zero-overhead when not scraped.
 - **JSON Schema constrained generation** — `POST /chat`, `/complete`, and `/v1/chat/completions` accept an optional `json_schema` object per request. Generated text is parsed as JSON and validated against the schema using the `jsonschema` crate. If invalid, generation is retried up to 3 times with increasing temperature to encourage diversity. More robust than the post-hoc `json_object` mode (`response_format: { type: "json_object" }`), which still works for backward compatibility.
 - **Context shifting (sliding window KV cache)** — `GenerationConfig.max_context` sets a hard context limit. When total tokens exceed it during generation, `generate_core` shifts both the `KvCache` (`KvLayer::shift` removes oldest K/V vectors from every layer) and `token_ids` left, keeping roughly the newest 75%. `prompt_len` is adjusted so generation continues seamlessly. Enables effectively infinite context length at the cost of losing distant history.
+- **Mixed-precision KV cache** — `KvLayer::Mixed` stores recent tokens in FP32 and automatically moves older tokens to INT8 cold storage when the hot window (default 64 tokens) overflows. Preserves accuracy for the actively attended context while reducing memory footprint vs pure FP32. Compatible with prefix caching, context shifting, and speculative decoding.
+- **Anchor token preservation (StreamingLLM-style)** — `GenerationConfig.anchor_tokens` (default 0, set via `--anchor-tokens N`) preserves the first N initial tokens during context shifting. The first few tokens act as "attention sinks"; evicting them degrades generation quality. `KvLayer::shift_anchored` removes tokens from the middle (after anchors) rather than from the beginning. Works with all KV cache variants (FP32, INT8, Mixed).
+- **Concurrent transformer generation** — The prefix cache was a `Mutex` that serialized all transformer requests. Refactored to `RwLock` with brief lock hold times: read-lock for lookup, release during generation, write-lock for insertion. Multiple transformer requests now run in parallel, limited only by CPU cores. Covered by `run_server_handles_concurrent_transformer_requests` test.
+- **Attention allocation optimization** — `attention_kv` previously allocated ~3×n_heads buffers per attention call (e.g., ~432 allocations per token for a 12-layer, 12-head model). Rewrote to use a single pre-allocated scratch buffer reused across heads, plus `softmax_inplace` with zero allocations. Eliminates the dominant allocation hotspot in the transformer forward pass.
+- **OpenAI `/v1/completions` endpoint** — Legacy (non-chat) completions API: `POST /v1/completions { model, prompt, max_tokens, temperature, top_p, stop, stream }`. Returns `text_completion` objects with `choices[].text`. Supports streaming SSE, `logprobs`, `top_logprobs`, `grammar`, and `json_schema`.
+- **EAGLE3 / neural speculative decoding** — `src/draft.rs` introduces a `DraftModel` trait and an `MlpDraftModel`: a tiny 2-layer MLP (embedding → FC1 + ReLU → FC2 → logits) that is orders of magnitude faster than the full transformer. Falls back to n-gram draft when no neural draft tensors are present. Wired into all serve endpoints automatically.
+- **API key authentication + rate limiting** — `modelc run` accepts `--api-key <key>` (requires `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`) and `--rate-limit <N>` (max requests per minute per client IP). Returns standard HTTP status codes (`401 Unauthorized`, `429 Too Many Requests`).
+- **Stop sequences** — `GenerationConfig.stop` holds a list of strings that halt generation when any appear in the decoded output. Checked after each token; output is truncated to just before the matched sequence. Wired through all text generation endpoints.
 
 ## Repository layout
 
