@@ -17,6 +17,7 @@ fn config(max_tokens: usize) -> GenerationConfig {
         max_context: None,
         anchor_tokens: 0,
         stop: vec![],
+        seed: None,
     }
 }
 

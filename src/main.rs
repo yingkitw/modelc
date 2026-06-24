@@ -98,6 +98,7 @@ fn main() -> Result<()> {
             profile,
             max_tokens,
             temperature,
+            seed,
             max_context,
             anchor_tokens,
             grammar,
@@ -129,6 +130,9 @@ fn main() -> Result<()> {
             }
             if let Some(t) = temperature {
                 generation.temperature = *t;
+            }
+            if let Some(s) = seed {
+                generation.seed = Some(*s);
             }
             if let Some(c) = max_context {
                 generation.max_context = Some(*c);

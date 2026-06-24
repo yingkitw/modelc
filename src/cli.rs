@@ -144,6 +144,9 @@ pub enum Commands {
         #[arg(long, value_name = "FLOAT", help = "Default sampling temperature (0.0 = greedy)")]
         temperature: Option<f32>,
 
+        #[arg(long, value_name = "N", help = "Random seed for reproducible sampling")]
+        seed: Option<u64>,
+
         #[arg(long, value_name = "N", help = "Maximum context length before KV cache shifting")]
         max_context: Option<usize>,
 

@@ -77,6 +77,9 @@ pub(super) struct ChatCompletionRequest {
     /// Optional stop sequences that halt generation.
     #[serde(default)]
     stop: Vec<String>,
+    /// Optional seed for reproducible sampling.
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -87,9 +90,6 @@ pub(super) struct ResponseFormat {
 
 #[derive(Deserialize, Clone)]
 pub(super) struct Tool {
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    tool_type: String,
     function: ToolFunction,
 }
 
@@ -98,9 +98,6 @@ pub(super) struct ToolFunction {
     name: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    parameters: serde_json::Value,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -265,6 +262,7 @@ pub(super) async fn chat_completion(
         max_context: state.generation.max_context,
         anchor_tokens: state.generation.anchor_tokens,
         stop: if req.stop.is_empty() { state.generation.stop.clone() } else { req.stop },
+        seed: req.seed.or(state.generation.seed),
     };
 
     let model_name = if req.model.is_empty() {
@@ -506,6 +504,9 @@ pub(super) struct CompletionRequest {
     /// Optional stop sequences that halt generation.
     #[serde(default)]
     stop: Vec<String>,
+    /// Optional seed for reproducible sampling.
+    #[serde(default)]
+    seed: Option<u64>,
     #[serde(default)]
     stream: bool,
 }
@@ -567,6 +568,7 @@ pub(super) async fn completions(
         max_context: state.generation.max_context,
         anchor_tokens: state.generation.anchor_tokens,
         stop: if req.stop.is_empty() { state.generation.stop.clone() } else { req.stop },
+        seed: req.seed.or(state.generation.seed),
     };
 
     let model_name = if req.model.is_empty() {
@@ -785,11 +787,9 @@ mod tests {
     #[test]
     fn build_tool_description_lists_tools() {
         let tools = vec![Tool {
-            tool_type: "function".to_string(),
             function: ToolFunction {
                 name: "get_weather".to_string(),
                 description: "Get current weather".to_string(),
-                parameters: serde_json::Value::Null,
             },
         }];
         let desc = build_tool_description(&tools);

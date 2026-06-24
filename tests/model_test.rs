@@ -32,19 +32,6 @@ fn test_dtype_total_bytes() {
 }
 
 #[test]
-fn test_dtype_rust_type() {
-    assert_eq!(DataType::F32.rust_type(), "f32");
-    assert_eq!(DataType::F16.rust_type(), "u16");
-    assert_eq!(DataType::BF16.rust_type(), "u16");
-    assert_eq!(DataType::I64.rust_type(), "i64");
-    assert_eq!(DataType::I32.rust_type(), "i32");
-    assert_eq!(DataType::I16.rust_type(), "i16");
-    assert_eq!(DataType::I8.rust_type(), "i8");
-    assert_eq!(DataType::U8.rust_type(), "u8");
-    assert_eq!(DataType::Bool.rust_type(), "bool");
-}
-
-#[test]
 fn test_tensor_data_byte_len() {
     let td = TensorData {
         shape: vec![2, 3],

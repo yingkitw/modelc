@@ -227,9 +227,6 @@ struct EmbeddingsResponse {
 struct ChatRequest {
     messages: Vec<Message>,
     #[serde(default)]
-    #[allow(dead_code)]
-    stream: bool,
-    #[serde(default)]
     max_tokens: Option<usize>,
     #[serde(default)]
     temperature: Option<f32>,
@@ -244,6 +241,9 @@ struct ChatRequest {
     /// Optional stop sequences that halt generation.
     #[serde(default)]
     stop: Vec<String>,
+    /// Optional seed for reproducible sampling.
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -275,6 +275,9 @@ struct CompleteRequest {
     /// Optional stop sequences that halt generation.
     #[serde(default)]
     stop: Vec<String>,
+    /// Optional seed for reproducible sampling.
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 #[derive(Serialize)]

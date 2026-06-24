@@ -83,6 +83,9 @@ pub struct GenerationConfig {
     pub anchor_tokens: usize,
     /// Optional stop sequences. Generation halts when any sequence appears in the output.
     pub stop: Vec<String>,
+    /// Optional seed for reproducible sampling. When set, the same prompt + seed
+    /// always produces the same output (greedy decoding ignores this).
+    pub seed: Option<u64>,
 }
 
 impl Clone for GenerationConfig {
@@ -98,6 +101,7 @@ impl Clone for GenerationConfig {
             max_context: self.max_context,
             anchor_tokens: self.anchor_tokens,
             stop: self.stop.clone(),
+            seed: self.seed,
         }
     }
 }
@@ -115,6 +119,7 @@ impl Default for GenerationConfig {
             max_context: None,
             anchor_tokens: 0,
             stop: Vec::new(),
+            seed: None,
         }
     }
 }
@@ -387,6 +392,7 @@ pub(crate) fn generate_core(
             config,
             tokenizer,
             &token_ids[prompt_len..],
+            generated,
         );
         if collect_logprobs {
             logprobs.push(match logits.as_deref() {
@@ -569,7 +575,8 @@ pub(crate) fn speculative_generate(
                 "llama" => forward_llama_cached(runtime, &embedding, false, &mut kv_cache_opt),
                 _ => break,
             };
-            let next_token = sample_constrained(logits.as_deref(), config, tokenizer, &token_ids[prompt_len..]);
+            let step = token_ids.len() - prompt_len;
+            let next_token = sample_constrained(logits.as_deref(), config, tokenizer, &token_ids[prompt_len..], step);
             token_ids.push(next_token);
             ngram_index = update_ngram_index(&ngram_index, &token_ids, n);
 
@@ -598,7 +605,8 @@ pub(crate) fn speculative_generate(
                 "llama" => forward_llama_cached(runtime, &embedding, false, &mut kv_cache_opt),
                 _ => break,
             };
-            let next_token = sample_constrained(logits.as_deref(), config, tokenizer, &token_ids[prompt_len..]);
+            let step = token_ids.len() - prompt_len;
+            let next_token = sample_constrained(logits.as_deref(), config, tokenizer, &token_ids[prompt_len..], step);
             if next_token == draft_token {
                 token_ids.push(draft_token);
                 accepted += 1;
@@ -750,7 +758,7 @@ fn count_layers(runtime: &Runtime, arch: &str) -> usize {
     max + 1
 }
 
-fn sample(logits: Option<&[f32]>, config: &GenerationConfig) -> u32 {
+fn sample(logits: Option<&[f32]>, config: &GenerationConfig, step: usize) -> u32 {
     let logits = logits.unwrap_or(&[]);
     if logits.is_empty() {
         return 0;
@@ -767,7 +775,7 @@ fn sample(logits: Option<&[f32]>, config: &GenerationConfig) -> u32 {
         apply_top_p(&mut probs, config.top_p);
     }
 
-    multinomial(&probs)
+    multinomial(&probs, step, config.seed)
 }
 
 /// Sample with an optional grammar constraint applied to the logits.
@@ -780,6 +788,7 @@ fn sample_constrained(
     config: &GenerationConfig,
     tokenizer: &BpeTokenizer,
     generated_tokens: &[u32],
+    step: usize,
 ) -> u32 {
     let logits = logits.unwrap_or(&[]);
     if logits.is_empty() {
@@ -799,10 +808,10 @@ fn sample_constrained(
                 masked[i] = f32::NEG_INFINITY;
             }
         }
-        return sample(Some(&masked), config);
+        return sample(Some(&masked), config, step);
     }
 
-    sample(Some(logits), config)
+    sample(Some(logits), config, step)
 }
 
 /// In-place nucleus (top-p) filtering.
@@ -859,10 +868,15 @@ pub(crate) fn softmax(xs: &[f32]) -> Vec<f32> {
     exps.into_iter().map(|e| e / sum).collect()
 }
 
-pub(crate) fn multinomial(probs: &[f32]) -> u32 {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let r: f32 = rng.r#gen();
+pub(crate) fn multinomial(probs: &[f32], step: usize, seed: Option<u64>) -> u32 {
+    use rand::{Rng, SeedableRng};
+    let r: f32 = if let Some(s) = seed {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(s.wrapping_add(step as u64));
+        rng.r#gen()
+    } else {
+        let mut rng = rand::thread_rng();
+        rng.r#gen()
+    };
     let mut cum = 0.0f32;
     for (i, &p) in probs.iter().enumerate() {
         cum += p;
@@ -902,8 +916,9 @@ mod tests {
             max_context: None,
             anchor_tokens: 0,
             stop: vec![],
+            seed: None,
         };
-        assert_eq!(sample(Some(&[1.0, 5.0, 2.0]), &config), 1);
+        assert_eq!(sample(Some(&[1.0, 5.0, 2.0]), &config, 0), 1);
     }
 
     #[test]
@@ -979,6 +994,7 @@ mod tests {
             max_context: None,
             anchor_tokens: 0,
             stop: vec![],
+            seed: None,
         };
         let ids = generate_token_ids(&runtime, "unknown", 4, &tokenizer, "hello", &config, None);
         assert!(
@@ -1028,5 +1044,46 @@ mod tests {
         assert_eq!(lp.token, 0);
         assert!(lp.logprob.is_infinite() && lp.logprob.is_sign_negative());
         assert!(lp.top_logprobs.is_empty());
+    }
+
+    #[test]
+    fn multinomial_same_seed_same_step_is_deterministic() {
+        let probs = vec![0.1f32, 0.2, 0.3, 0.4];
+        let seed = 42u64;
+        let a = multinomial(&probs, 0, Some(seed));
+        let b = multinomial(&probs, 0, Some(seed));
+        assert_eq!(a, b, "same seed + step should produce identical sample");
+    }
+
+    #[test]
+    fn multinomial_same_seed_different_step_differs() {
+        let probs = vec![0.1f32, 0.2, 0.3, 0.4];
+        let seed = 42u64;
+        let a = multinomial(&probs, 0, Some(seed));
+        let b = multinomial(&probs, 1, Some(seed));
+        // With a non-trivial distribution, different steps should usually differ.
+        // (The probability of collision is tiny for 4 categories.)
+        assert_ne!(a, b, "same seed but different step should produce different sample");
+    }
+
+    #[test]
+    fn sample_with_seed_is_deterministic() {
+        let config = GenerationConfig {
+            max_tokens: 1,
+            temperature: 1.0,
+            top_p: 0.0,
+            gamma: 0,
+            use_int8_kv: false,
+            use_mixed_kv: false,
+            constraint: None,
+            max_context: None,
+            anchor_tokens: 0,
+            stop: vec![],
+            seed: Some(123),
+        };
+        let logits = vec![1.0f32, 2.0, 3.0];
+        let a = sample(Some(&logits), &config, 0);
+        let b = sample(Some(&logits), &config, 0);
+        assert_eq!(a, b, "sample with same seed and step should be deterministic");
     }
 }

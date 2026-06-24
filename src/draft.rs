@@ -137,7 +137,7 @@ impl DraftModel for MlpDraftModel {
                 if self.top_p > 0.0 && self.top_p < 1.0 {
                     crate::generate::apply_top_p(&mut probs, self.top_p);
                 }
-                multinomial(&probs)
+                multinomial(&probs, 0, None)
             };
             draft.push(next);
             current = next;

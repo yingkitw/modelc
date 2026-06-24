@@ -57,26 +57,6 @@ impl DataType {
         shape.iter().product::<usize>()
     }
 
-    #[allow(dead_code)]
-    pub fn rust_type(&self) -> &'static str {
-        match self {
-            Self::F32 => "f32",
-            Self::F16 => "u16",
-            Self::BF16 => "u16",
-            Self::I64 => "i64",
-            Self::I32 => "i32",
-            Self::I16 => "i16",
-            Self::I8 => "i8",
-            Self::U8 => "u8",
-            Self::Bool => "bool",
-            Self::Q4_0 => "q4_0",
-            Self::Q5_0 => "q5_0",
-            Self::Q8_0 => "q8_0",
-            Self::Q4_K => "q4_k",
-            Self::Q6_K => "q6_k",
-        }
-    }
-
     pub fn total_bytes(&self, shape: &[usize]) -> usize {
         self.element_count(shape) * self.byte_size()
     }

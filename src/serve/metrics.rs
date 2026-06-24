@@ -48,7 +48,6 @@ impl Histogram {
 #[derive(Default)]
 pub struct Metrics {
     requests_total: AtomicU64,
-    tokens_generated: AtomicU64,
     active_requests: AtomicU64,
     inference_duration: Histogram,
 }
@@ -56,11 +55,6 @@ pub struct Metrics {
 impl Metrics {
     pub fn increment_requests(&self) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn add_tokens(&self, n: u64) {
-        self.tokens_generated.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn increment_active(&self) {
@@ -83,13 +77,6 @@ impl Metrics {
         out.push_str(&format!(
             "modelc_requests_total {}\n",
             self.requests_total.load(Ordering::Relaxed)
-        ));
-
-        out.push_str("# HELP modelc_tokens_generated_total Total number of generated tokens.\n");
-        out.push_str("# TYPE modelc_tokens_generated_total counter\n");
-        out.push_str(&format!(
-            "modelc_tokens_generated_total {}\n",
-            self.tokens_generated.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP modelc_active_requests Number of requests currently in flight.\n");
@@ -197,11 +184,9 @@ mod tests {
         let m = Metrics::default();
         m.increment_requests();
         m.increment_requests();
-        m.add_tokens(128);
         m.observe_inference_duration(0.05);
         let text = m.render();
         assert!(text.contains("modelc_requests_total 2"));
-        assert!(text.contains("modelc_tokens_generated_total 128"));
         assert!(text.contains("modelc_inference_duration_seconds_bucket{le=\"0.05\"} 1"));
         assert!(text.contains("modelc_inference_duration_seconds_count 1"));
     }

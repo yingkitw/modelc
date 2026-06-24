@@ -153,6 +153,7 @@ pub(super) async fn chat(
         req.top_p,
         req.grammar.clone(),
         req.stop.clone(),
+        req.seed,
     );
     let output = if let Some(ref schema) = req.json_schema {
         crate::json_schema::generate_with_schema(
@@ -185,6 +186,7 @@ pub(super) async fn complete(
         req.top_p,
         req.grammar.clone(),
         req.stop.clone(),
+        req.seed,
     );
     let output = if let Some(ref schema) = req.json_schema {
         crate::json_schema::generate_with_schema(
@@ -226,6 +228,7 @@ pub(super) async fn chat_stream(
         req.top_p,
         req.grammar.clone(),
         req.stop.clone(),
+        req.seed,
     );
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
@@ -277,6 +280,7 @@ fn make_generation_config(
     top_p: Option<f32>,
     grammar: Option<String>,
     stop: Vec<String>,
+    seed: Option<u64>,
 ) -> crate::generate::GenerationConfig {
     let constraint = grammar.and_then(|pat| {
         crate::constraint::RegexConstraint::new(&pat)
@@ -293,6 +297,7 @@ fn make_generation_config(
         max_context: base.max_context,
         anchor_tokens: base.anchor_tokens,
         stop: if stop.is_empty() { base.stop.clone() } else { stop },
+        seed: seed.or(base.seed),
     }
 }
 
