@@ -136,7 +136,14 @@ async fn run_server_serves_gpt2_inference() {
 
     // Boot the runtime server in the background.
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     let info = wait_for_server(&format!("{base}/info"));
@@ -157,7 +164,14 @@ async fn run_server_resizes_oversized_infer_input() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -176,7 +190,14 @@ async fn run_server_serves_health() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -194,7 +215,14 @@ async fn run_server_serves_openai_models() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -214,7 +242,14 @@ async fn run_server_serves_embeddings() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -233,13 +268,87 @@ async fn run_server_serves_embeddings() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_tokenize() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // Single input → flat `tokens` array.
+    let body = serde_json::json!({ "input": "hello world" });
+    let val = post_json(&format!("{base}/tokenize"), &body);
+    let tokens = val["tokens"].as_array().expect("tokens array");
+    assert!(!tokens.is_empty(), "should tokenize non-empty text");
+    assert_eq!(val["count"].as_u64().unwrap(), tokens.len() as u64);
+    assert!(val.get("tokens_batch").is_none() || val["tokens_batch"].is_null());
+
+    // Batch input → `tokens_batch` array of arrays, `count` is the total.
+    let body = serde_json::json!({ "inputs": ["hello", "world"] });
+    let val = post_json(&format!("{base}/tokenize"), &body);
+    let batch = val["tokens_batch"].as_array().expect("tokens_batch array");
+    assert_eq!(batch.len(), 2, "batch should have one token list per input");
+    let total: u64 = batch
+        .iter()
+        .map(|t| t.as_array().map(|a| a.len() as u64).unwrap_or(0))
+        .sum();
+    assert_eq!(val["count"].as_u64().unwrap(), total);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_system_info() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = wait_for_server(&format!("{base}/v1/system"));
+    assert_eq!(val["model"], "mini_gpt2");
+    assert_eq!(val["architecture"], "gpt2");
+    assert!(val["cpu_cores"].as_u64().unwrap() >= 1, "at least one core");
+    assert!(!val["os"].as_str().unwrap().is_empty(), "os string");
+    assert!(!val["cpu_arch"].as_str().unwrap().is_empty(), "arch string");
+    assert_eq!(val["pointer_width"].as_u64().unwrap(), 64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_server_serves_openai_chat_completions() {
     let model = common::create_gpt2_test_model();
     let addr = ephemeral_addr();
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -267,7 +376,14 @@ async fn run_server_serves_openai_chat_logprobs() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -330,7 +446,14 @@ async fn run_server_serves_openai_chat_logprobs_no_top() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -365,7 +488,14 @@ async fn run_server_lora_unload_restores_base() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -383,7 +513,14 @@ async fn run_server_lora_load_bad_path_returns_error() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -400,7 +537,14 @@ async fn run_server_metrics_returns_prometheus_text() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -418,9 +562,18 @@ async fn run_server_metrics_returns_prometheus_text() {
         .expect("metrics request");
     let text = resp.body_mut().read_to_string().expect("read metrics body");
 
-    assert!(text.contains("modelc_requests_total"), "should expose request counter");
-    assert!(text.contains("modelc_inference_duration_seconds_count"), "should expose histogram count");
-    assert!(text.contains("modelc_active_requests"), "should expose active request gauge");
+    assert!(
+        text.contains("modelc_requests_total"),
+        "should expose request counter"
+    );
+    assert!(
+        text.contains("modelc_inference_duration_seconds_count"),
+        "should expose histogram count"
+    );
+    assert!(
+        text.contains("modelc_active_requests"),
+        "should expose active request gauge"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -430,7 +583,14 @@ async fn run_server_chat_accepts_json_schema() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -444,7 +604,10 @@ async fn run_server_chat_accepts_json_schema() {
     });
     let val = post_json(&format!("{base}/chat"), &body);
     // Response should contain a message even if JSON validation ultimately fails.
-    assert!(val["message"].is_object(), "response should have message field");
+    assert!(
+        val["message"].is_object(),
+        "response should have message field"
+    );
     assert!(
         val["message"]["content"].as_str().is_some(),
         "response should have content string"
@@ -458,7 +621,14 @@ async fn run_server_serves_openai_chat_stream() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -477,8 +647,13 @@ async fn run_server_serves_openai_chat_stream() {
         .expect("request should succeed");
     assert_eq!(resp.status(), 200);
 
-    let text = read_body(resp).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-    assert!(text.contains("chat.completion.chunk"), "should emit OpenAI chunk objects");
+    let text = read_body(resp)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    assert!(
+        text.contains("chat.completion.chunk"),
+        "should emit OpenAI chunk objects"
+    );
     assert!(text.contains("[DONE]"), "should end with [DONE]");
 }
 
@@ -489,7 +664,14 @@ async fn run_server_serves_openai_completions() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -503,7 +685,10 @@ async fn run_server_serves_openai_completions() {
     assert_eq!(val["object"].as_str(), Some("text_completion"));
     assert!(val["choices"].is_array(), "should have choices array");
     assert_eq!(val["choices"][0]["index"].as_i64(), Some(0));
-    assert!(val["choices"][0]["text"].as_str().is_some(), "should have text");
+    assert!(
+        val["choices"][0]["text"].as_str().is_some(),
+        "should have text"
+    );
     assert_eq!(val["choices"][0]["finish_reason"].as_str(), Some("stop"));
     assert!(val["usage"]["prompt_tokens"].is_number());
     assert!(val["usage"]["completion_tokens"].is_number());
@@ -517,7 +702,14 @@ async fn run_server_api_key_rejects_unauthenticated() {
 
     let auth = modelc::serve::auth::AuthConfig::new(Some("secret".to_string()), None);
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), Some(auth)).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            Some(auth),
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -539,7 +731,14 @@ async fn run_server_api_key_accepts_authenticated() {
 
     let auth = modelc::serve::auth::AuthConfig::new(Some("secret".to_string()), None);
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), Some(auth)).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            Some(auth),
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -549,7 +748,11 @@ async fn run_server_api_key_accepts_authenticated() {
         .header("Authorization", "Bearer secret")
         .call()
         .expect("request should succeed");
-    assert_eq!(resp.status(), 200, "authenticated request should pass through");
+    assert_eq!(
+        resp.status(),
+        200,
+        "authenticated request should pass through"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -561,7 +764,14 @@ async fn run_server_rate_limit_rejects_over_limit() {
     // Allow only 1 request per minute.
     let auth = modelc::serve::auth::AuthConfig::new(None, Some(1));
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), Some(auth)).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            Some(auth),
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -588,7 +798,14 @@ async fn run_server_handles_concurrent_transformer_requests() {
     let base = format!("http://{addr}");
 
     tokio::spawn(async move {
-        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None).await;
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+        )
+        .await;
     });
 
     wait_for_server(&format!("{base}/info"));
@@ -623,12 +840,28 @@ async fn run_server_handles_concurrent_transformer_requests() {
     let resp_a = resp_a.expect("spawn A should not panic");
     let resp_b = resp_b.expect("spawn B should not panic");
 
-    assert_eq!(resp_a.status(), 200, "concurrent request A should return 200");
-    assert_eq!(resp_b.status(), 200, "concurrent request B should return 200");
+    assert_eq!(
+        resp_a.status(),
+        200,
+        "concurrent request A should return 200"
+    );
+    assert_eq!(
+        resp_b.status(),
+        200,
+        "concurrent request B should return 200"
+    );
 
-    let val_a: serde_json::Value = serde_json::from_reader(resp_a.into_body().as_reader()).expect("A should be JSON");
-    let val_b: serde_json::Value = serde_json::from_reader(resp_b.into_body().as_reader()).expect("B should be JSON");
+    let val_a: serde_json::Value =
+        serde_json::from_reader(resp_a.into_body().as_reader()).expect("A should be JSON");
+    let val_b: serde_json::Value =
+        serde_json::from_reader(resp_b.into_body().as_reader()).expect("B should be JSON");
 
-    assert!(val_a["message"]["content"].as_str().is_some(), "A should have content");
-    assert!(val_b["message"]["content"].as_str().is_some(), "B should have content");
+    assert!(
+        val_a["message"]["content"].as_str().is_some(),
+        "A should have content"
+    );
+    assert!(
+        val_b["message"]["content"].as_str().is_some(),
+        "B should have content"
+    );
 }

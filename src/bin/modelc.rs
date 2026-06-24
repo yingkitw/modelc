@@ -40,8 +40,11 @@ fn main() -> Result<()> {
             input,
             format,
             readme,
+            quant_sizes,
         } => {
-            if *readme {
+            if *quant_sizes {
+                modelc::compiler::print_quant_sizes(input, format.as_ref())?;
+            } else if *readme {
                 let mut model = modelc::compiler::inspect_model(input, format.as_ref())?;
                 model.dequantize_in_place();
                 println!("# {} Model Card\n", model.name);

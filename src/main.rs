@@ -34,8 +34,15 @@ fn main() -> Result<()> {
                 embedded_release,
             )?;
         }
-        modelc::cli::Commands::Inspect { input, format, readme } => {
-            if *readme {
+        modelc::cli::Commands::Inspect {
+            input,
+            format,
+            readme,
+            quant_sizes,
+        } => {
+            if *quant_sizes {
+                modelc::compiler::print_quant_sizes(input, format.as_ref())?;
+            } else if *readme {
                 let mut model = modelc::compiler::inspect_model(input, format.as_ref())?;
                 model.dequantize_in_place();
                 println!("# {} Model Card\n", model.name);
@@ -59,7 +66,10 @@ fn main() -> Result<()> {
                     let td = &model.tensors[name];
                     println!(
                         "- `{}`: shape={:?}, dtype={:?}, bytes={}",
-                        name, td.shape, td.dtype, td.byte_len()
+                        name,
+                        td.shape,
+                        td.dtype,
+                        td.byte_len()
                     );
                 }
             } else {
@@ -170,7 +180,9 @@ fn main() -> Result<()> {
             };
 
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(modelc::serve::run_server(model, addr, *profile, generation, auth_opt))?;
+            rt.block_on(modelc::serve::run_server(
+                model, addr, *profile, generation, auth_opt,
+            ))?;
         }
         modelc::cli::Commands::List => {
             let models = modelc::store::list_models()?;
@@ -185,7 +197,11 @@ fn main() -> Result<()> {
                 print_model_list(&models);
             }
         }
-        modelc::cli::Commands::Pull { source, name, version } => {
+        modelc::cli::Commands::Pull {
+            source,
+            name,
+            version,
+        } => {
             let is_url = source.starts_with("http://") || source.starts_with("https://");
 
             let model_name = name.clone().unwrap_or_else(|| {
@@ -216,8 +232,8 @@ fn main() -> Result<()> {
             };
 
             if let Some(ver) = version {
-                let versioned = modelc::store::store_dir()?
-                    .join(format!("{}.v{}.modelc", model_name, ver));
+                let versioned =
+                    modelc::store::store_dir()?.join(format!("{}.v{}.modelc", model_name, ver));
                 std::fs::copy(&dest, &versioned)
                     .with_context(|| format!("failed to create versioned copy {:?}", versioned))?;
                 println!("Installed '{}' v{} -> {:?}", model_name, ver, versioned);
@@ -275,7 +291,11 @@ fn main() -> Result<()> {
         modelc::cli::Commands::Completions { shell } => {
             modelc::cli::generate_completions(shell)?;
         }
-        modelc::cli::Commands::Containerize { input, output, base_image } => {
+        modelc::cli::Commands::Containerize {
+            input,
+            output,
+            base_image,
+        } => {
             let path = modelc::store::resolve_model_path(input)?;
             let out_dir = output.clone().unwrap_or_else(|| {
                 let mut p = std::env::current_dir().unwrap_or_default();
@@ -284,7 +304,12 @@ fn main() -> Result<()> {
             });
             modelc::containerize::containerize(&path, &out_dir, base_image)?;
         }
-        modelc::cli::Commands::Lora { model, adapter, alpha, output } => {
+        modelc::cli::Commands::Lora {
+            model,
+            adapter,
+            alpha,
+            output,
+        } => {
             let path = modelc::store::resolve_model_path(model)?;
             eprintln!("Loading model from {:?}...", path);
             let mut m = modelc::pack::unpack(&path)?;
@@ -293,7 +318,10 @@ fn main() -> Result<()> {
             modelc::lora::apply_lora(&mut m, adapter, *alpha)?;
             let out_path = output.clone().unwrap_or_else(|| {
                 let mut p = path.clone();
-                p.set_file_name(format!("{}.lora.modelc", p.file_stem().unwrap().to_string_lossy()));
+                p.set_file_name(format!(
+                    "{}.lora.modelc",
+                    p.file_stem().unwrap().to_string_lossy()
+                ));
                 p
             });
             modelc::pack::pack(&m, &out_path, false)?;
@@ -307,7 +335,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_benchmark(model: &modelc::model::Model, warmup: usize, iterations: usize) -> anyhow::Result<()> {
+fn run_benchmark(
+    model: &modelc::model::Model,
+    warmup: usize,
+    iterations: usize,
+) -> anyhow::Result<()> {
     use modelc::runtime::serve::Runtime;
     use std::time::Instant;
 
@@ -317,7 +349,8 @@ fn run_benchmark(model: &modelc::model::Model, warmup: usize, iterations: usize)
         if let Some(w) = runtime.get("weight") {
             w.shape.get(1).copied().unwrap_or(4)
         } else {
-            let mut sizes: Vec<usize> = model.tensors
+            let mut sizes: Vec<usize> = model
+                .tensors
                 .keys()
                 .filter(|k| k.starts_with("layer") && k.ends_with(".weight"))
                 .filter_map(|k| runtime.get(k).map(|t| t.shape.get(1).copied().unwrap_or(4)))
@@ -358,8 +391,8 @@ fn benchmark_inference(
     runtime: &modelc::runtime::serve::Runtime,
     input: &[f32],
 ) -> Vec<f32> {
-    use modelc::runtime::tensor::Tensor;
     use modelc::runtime::ops;
+    use modelc::runtime::tensor::Tensor;
 
     if model.architecture == "mlp" {
         if let (Some(w), Some(b)) = (runtime.get("weight"), runtime.get("bias")) {
@@ -374,7 +407,11 @@ fn benchmark_inference(
             .filter_map(|key| {
                 let tail = key.strip_prefix("layer")?;
                 let (idx, suf) = tail.split_once('.')?;
-                if suf == "weight" { idx.parse::<u32>().ok() } else { None }
+                if suf == "weight" {
+                    idx.parse::<u32>().ok()
+                } else {
+                    None
+                }
             })
             .collect();
         ids.sort_unstable();
@@ -421,7 +458,10 @@ fn print_model_list(models: &[modelc::store::InstalledModel]) {
     for m in models {
         let size_mb = m.size_bytes as f64 / (1024.0 * 1024.0);
         let arch = m.architecture.as_deref().unwrap_or("unknown");
-        let params = m.params.map(|p| format!("{} params", p)).unwrap_or_default();
+        let params = m
+            .params
+            .map(|p| format!("{} params", p))
+            .unwrap_or_default();
         let comp = if m.compressed { " [zstd]" } else { "" };
         println!(
             "  {:20} {:>8.2} MB  {:12} {:>14}{}",

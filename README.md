@@ -109,6 +109,7 @@ Inspect weights (tensor names, shapes, dtypes, sizes):
 ```bash
 modelc inspect path/to/model.safetensors
 modelc inspect path/to/file -f gguf
+modelc inspect path/to/model.safetensors --quant-sizes   # preview fp32/fp16/int8/int4/q4_0 sizes
 ```
 
 Compile to a standalone binary (default output: `<stem>_serve` next to the input):
@@ -183,6 +184,8 @@ Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GG
 | `POST` | `/chat/stream`          | SSE stream of `{ "delta": "...", "done": bool }` chunks. |
 | `POST` | `/complete`             | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
 | `POST` | `/embeddings`           | Request JSON: `{ "input": "..." }`. Response: `{ "embedding": [f32, ...], "model": "..." }`. |
+| `POST` | `/tokenize`            | Request JSON: `{ "input": "..." }` or `{ "inputs": [...] }`. Response: `{ "tokens": [id, ...], "count": N }` (batch: `tokens_batch`). |
+| `GET`  | `/v1/system`           | System/hardware info: CPU cores, OS, arch, Metal availability, total memory. |
 | `GET`  | `/v1/models`            | OpenAI-compatible model list. |
 | `POST` | `/v1/chat/completions`  | OpenAI-compatible chat completion (streaming + non-streaming). |
 | `POST` | `/v1/completions`       | OpenAI-compatible legacy text completion (streaming + non-streaming). |
@@ -250,6 +253,9 @@ Before the first (`modelc`) publish:
 - **Stop sequences** — `GenerationConfig.stop` holds a list of strings that halt generation when any appear in the decoded output. Checked after each token; output is truncated to just before the matched sequence. Wired through all text generation endpoints.
 - **Repetition / presence / frequency penalties** — three sampling penalties discourage token reuse. `repetition_penalty` (multiplicative, transformers-style) and OpenAI-standard `presence_penalty` (once per seen token) / `frequency_penalty` (scales with count) adjust logits before sampling. Wired through all text-generation endpoints (`/chat`, `/complete`, `/v1/chat/completions`, `/v1/completions`) as optional request fields and the CLI (`--repetition-penalty`, `--presence-penalty`, `--frequency-penalty`). They share a fast path that skips the per-token allocation when all are at their defaults.
 - **Min-p sampling** — `min_p` keeps only tokens whose probability is at least `min_p` fraction of the max probability, then renormalizes. The threshold scales with the model's confidence per step, making it simpler and often more effective than top-p (nucleus). Can combine with `top_p` (min-p runs after). Wired through all text-generation endpoints as `min_p` and the CLI (`--min-p`).
+- **Tokenize endpoint** — `POST /tokenize` returns token IDs and count for a prompt (single `input` or batch `inputs`), using the same byte-level BPE tokenizer as `/chat`. Standard in Ollama and llama.cpp server; useful for prompt budgeting and management.
+- **System info endpoint** — `GET /v1/system` exposes best-effort hardware info (CPU cores, OS, arch, pointer width, Metal availability, total memory) for orchestration and debugging. No added dependencies (stdlib + `/proc/meminfo`/`sysctl`).
+- **Quantization size preview** — `modelc inspect --quant-sizes` previews the artifact size under each format (fp32/fp16/int8/int4/q4_0) and the savings vs the current size, without actually quantizing. Computed from element counts, so it's accurate regardless of current dtype.
 
 ## Repository layout
 

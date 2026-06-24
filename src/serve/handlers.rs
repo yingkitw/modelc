@@ -16,6 +16,7 @@ use super::{
     AppState, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse, EmbeddingEntry,
     EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest, InferResponse,
     LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo, StreamChunk,
+    SystemInfo, TokenizeRequest, TokenizeResponse,
 };
 
 pub(super) async fn infer(
@@ -122,6 +123,88 @@ pub(super) async fn model_info(State(state): State<Arc<AppState>>) -> Json<Model
         total_bytes: state.total_bytes,
         tensors: state.tensor_names.clone(),
     })
+}
+
+/// `POST /tokenize` — encode text into token IDs using the model's tokenizer
+/// (byte-level BPE fallback, the same one used by `/chat` and `/complete`).
+/// Accepts `{ "input": "..." }` (single) or `{ "inputs": ["...", "..."] }` (batch).
+pub(super) async fn tokenize(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<TokenizeRequest>,
+) -> Json<TokenizeResponse> {
+    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+    if !req.inputs.is_empty() {
+        let batch: Vec<Vec<u32>> = req.inputs.iter().map(|s| tokenizer.encode(s)).collect();
+        let count = batch.iter().map(|t| t.len()).sum();
+        return Json(TokenizeResponse {
+            tokens: None,
+            tokens_batch: Some(batch),
+            count,
+        });
+    }
+    let tokens = tokenizer.encode(&req.input);
+    let count = tokens.len();
+    Json(TokenizeResponse {
+        tokens: Some(tokens),
+        tokens_batch: None,
+        count,
+    })
+}
+
+/// `GET /v1/system` — best-effort system/hardware info for orchestration and
+/// debugging (CPU cores, OS, architecture, Metal availability, total memory).
+pub(super) async fn system_info(State(state): State<Arc<AppState>>) -> Json<SystemInfo> {
+    Json(SystemInfo {
+        model: state.name.clone(),
+        architecture: state.architecture.clone(),
+        total_params: state.total_params,
+        total_bytes: state.total_bytes,
+        cpu_cores: cpu_core_count(),
+        os: std::env::consts::OS,
+        cpu_arch: std::env::consts::ARCH,
+        pointer_width: std::mem::size_of::<usize>() * 8,
+        metal_available: cfg!(target_os = "macos"),
+        memory_total_bytes: total_memory_bytes(),
+    })
+}
+
+/// Number of logical CPU cores available to the process.
+fn cpu_core_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Best-effort total physical memory in bytes. Reads `/proc/meminfo` on Linux,
+/// shells out to `sysctl hw.memsize` on macOS, and returns `None` elsewhere.
+fn total_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kb.saturating_mul(1024));
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl")
+            .arg("-n")
+            .arg("hw.memsize")
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 pub(super) async fn chat(

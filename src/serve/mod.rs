@@ -107,8 +107,10 @@ fn build_router(
         .route("/chat/stream", post(handlers::chat_stream))
         .route("/complete", post(handlers::complete))
         .route("/embeddings", post(handlers::embeddings))
+        .route("/tokenize", post(handlers::tokenize))
         .route("/metrics", get(handlers::metrics_handler))
         .route("/v1/models", get(openai::list_models))
+        .route("/v1/system", get(handlers::system_info))
         .route("/v1/chat/completions", post(openai::chat_completion))
         .route("/v1/completions", post(openai::completions))
         .route("/lora/load", post(handlers::lora_load))
@@ -207,6 +209,46 @@ struct ModelInfo {
     total_params: usize,
     total_bytes: usize,
     tensors: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TokenizeRequest {
+    #[serde(default)]
+    input: String,
+    #[serde(default)]
+    inputs: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TokenizeResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens_batch: Option<Vec<Vec<u32>>>,
+    /// Total number of tokens across all inputs.
+    count: usize,
+}
+
+/// System/hardware info exposed by `GET /v1/system`.
+#[derive(Serialize)]
+struct SystemInfo {
+    model: String,
+    architecture: String,
+    total_params: usize,
+    total_bytes: usize,
+    /// Logical CPU cores available to the process.
+    cpu_cores: usize,
+    /// Operating system name (e.g. "macos", "linux", "windows").
+    os: &'static str,
+    /// CPU architecture (e.g. "aarch64", "x86_64").
+    cpu_arch: &'static str,
+    /// Pointer width in bits (32 or 64).
+    pointer_width: usize,
+    /// Whether Apple Silicon Metal GPU acceleration is compiled in.
+    metal_available: bool,
+    /// Best-effort total physical memory in bytes (`null` if unavailable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_total_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]

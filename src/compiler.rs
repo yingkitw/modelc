@@ -356,3 +356,39 @@ pub fn inspect(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
 
     Ok(())
 }
+
+/// Print a table of the artifact size each quantization format would produce, **without**
+/// actually quantizing. Sizes are computed from element counts, so they are accurate
+/// regardless of the tensors' current dtype.
+pub fn print_quant_sizes(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
+    let model = inspect_model(input, format)?;
+    let params = model.total_params();
+    let current = model.total_bytes();
+
+    println!("Quantization size preview: {}", model.name);
+    println!("Parameters: {} ({:.2}M)", params, params as f64 / 1e6);
+    println!(
+        "Current stored size: {:.2} MB\n",
+        current as f64 / (1024.0 * 1024.0)
+    );
+    println!("{:<8} {:>12} {:>14}", "Format", "Size", "vs current");
+    println!("{:-<8} {:->12} {:->14}", "", "", "");
+
+    for q in crate::model::QuantPreview::all() {
+        let bytes = model.preview_size_bytes(q);
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        let pct = if current > 0 {
+            bytes as f64 / current as f64 * 100.0
+        } else {
+            0.0
+        };
+        let delta = if pct >= 100.0 {
+            format!("+{:.0}%", pct - 100.0)
+        } else {
+            format!("-{:.0}%", 100.0 - pct)
+        };
+        println!("{:<8} {:>9.2} MB {:>14}", q.label(), mb, delta);
+    }
+
+    Ok(())
+}

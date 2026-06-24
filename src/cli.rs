@@ -85,6 +85,12 @@ pub enum Commands {
 
         #[arg(long, help = "Generate a Markdown model card from metadata")]
         readme: bool,
+
+        #[arg(
+            long = "quant-sizes",
+            help = "Preview artifact size for fp32/fp16/int8/int4/q4_0 without quantizing"
+        )]
+        quant_sizes: bool,
     },
 
     #[command(about = "Pack model weights into a single .modelc artifact")]

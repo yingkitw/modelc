@@ -74,13 +74,73 @@ impl TensorData {
     }
 }
 
+/// A target quantization format for the `--quant-sizes` preview. Computes the byte
+/// size a model would occupy if all its tensors were stored in this format, without
+/// actually quantizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantPreview {
+    /// 32-bit float (4 bytes/element).
+    F32,
+    /// 16-bit float (2 bytes/element).
+    F16,
+    /// 8-bit integer (1 byte/element).
+    Int8,
+    /// 4-bit packed (0.5 bytes/element, two signed nibbles per byte).
+    Int4,
+    /// GGML Q4_0 block-quantized: 18 bytes per block of 32 elements
+    /// (one f16 scale + 32 × 4-bit weights).
+    Q4_0,
+}
+
+impl QuantPreview {
+    /// Bytes required to store `elements` values in this format. Block-quantized
+    /// formats round up to a whole block per tensor.
+    pub fn bytes_for(&self, elements: usize) -> usize {
+        match self {
+            Self::F32 => elements * 4,
+            Self::F16 => elements * 2,
+            Self::Int8 => elements,
+            Self::Int4 => elements.div_ceil(2),
+            Self::Q4_0 => elements.div_ceil(32) * 18,
+        }
+    }
+
+    /// Human-readable label for display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::F32 => "fp32",
+            Self::F16 => "fp16",
+            Self::Int8 => "int8",
+            Self::Int4 => "int4",
+            Self::Q4_0 => "q4_0",
+        }
+    }
+
+    /// All preview formats in display order.
+    pub fn all() -> [QuantPreview; 5] {
+        [Self::F32, Self::F16, Self::Int8, Self::Int4, Self::Q4_0]
+    }
+}
+
 impl Model {
     pub fn total_params(&self) -> usize {
         self.tensors.values().map(|t| t.element_count()).sum()
     }
 
+    /// Total size of all stored tensor bytes. For block-quantized GGUF tensors this is
+    /// the on-disk byte count, not the dequantized size.
     pub fn total_bytes(&self) -> usize {
         self.tensors.values().map(|t| t.byte_len()).sum()
+    }
+
+    /// Preview the total byte size of all tensors if quantized to `format`, **without**
+    /// actually quantizing. Computed from element counts (shape-based), so it is accurate
+    /// regardless of the tensors' current dtype.
+    pub fn preview_size_bytes(&self, format: QuantPreview) -> usize {
+        self.tensors
+            .values()
+            .map(|t| format.bytes_for(t.element_count()))
+            .sum()
     }
 
     /// Dequantize any I8 (or INT4-packed-as-I8) tensors that have `quant_scale.<name>` metadata
@@ -177,5 +237,82 @@ impl Model {
         }
 
         "generic".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_model(dtype: DataType, elements: usize) -> Model {
+        let data = vec![0u8; dtype.byte_size() * elements];
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "w".to_string(),
+            TensorData {
+                shape: vec![elements],
+                dtype,
+                data,
+            },
+        );
+        Model {
+            name: "test".to_string(),
+            architecture: "generic".to_string(),
+            tensors,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn quant_preview_bytes_per_format() {
+        let n = 256usize;
+        assert_eq!(QuantPreview::F32.bytes_for(n), 1024);
+        assert_eq!(QuantPreview::F16.bytes_for(n), 512);
+        assert_eq!(QuantPreview::Int8.bytes_for(n), 256);
+        assert_eq!(QuantPreview::Int4.bytes_for(n), 128);
+        // Q4_0: 256 elements = 8 blocks × 18 bytes = 144.
+        assert_eq!(QuantPreview::Q4_0.bytes_for(n), 144);
+    }
+
+    #[test]
+    fn quant_preview_q4_0_rounds_up_per_block() {
+        // 33 elements → 2 blocks (each holds up to 32) → 2 × 18 = 36 bytes.
+        assert_eq!(QuantPreview::Q4_0.bytes_for(33), 36);
+        assert_eq!(QuantPreview::Q4_0.bytes_for(32), 18);
+        assert_eq!(QuantPreview::Q4_0.bytes_for(1), 18);
+    }
+
+    #[test]
+    fn quant_preview_int4_rounds_up_odd() {
+        assert_eq!(QuantPreview::Int4.bytes_for(3), 2);
+        assert_eq!(QuantPreview::Int4.bytes_for(4), 2);
+    }
+
+    #[test]
+    fn preview_size_bytes_matches_dtype_scaling() {
+        // A 256-element F32 tensor (1024 bytes stored).
+        let model = make_model(DataType::F32, 256);
+        assert_eq!(model.preview_size_bytes(QuantPreview::F32), 1024);
+        assert_eq!(model.preview_size_bytes(QuantPreview::F16), 512);
+        assert_eq!(model.preview_size_bytes(QuantPreview::Int8), 256);
+        assert_eq!(model.preview_size_bytes(QuantPreview::Q4_0), 144);
+    }
+
+    #[test]
+    fn preview_size_bytes_is_shape_based_not_storage_based() {
+        // Store as I8 (256 bytes) but the F32 preview reflects 256 elements × 4 = 1024.
+        let model = make_model(DataType::I8, 256);
+        assert_eq!(model.preview_size_bytes(QuantPreview::F32), 1024);
+        assert_eq!(model.total_bytes(), 256, "stored bytes are the I8 size");
+    }
+
+    #[test]
+    fn all_formats_returns_expected_set() {
+        let all = QuantPreview::all();
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0], QuantPreview::F32);
+        assert_eq!(all[4], QuantPreview::Q4_0);
+        let labels: Vec<&str> = all.iter().map(|q| q.label()).collect();
+        assert_eq!(labels, vec!["fp32", "fp16", "int8", "int4", "q4_0"]);
     }
 }

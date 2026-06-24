@@ -15,3 +15,19 @@ fn inspect_safetensors_via_library() {
 
     compiler::inspect(&path, None).expect("inspect should print summary without error");
 }
+
+#[test]
+fn quant_sizes_preview_runs_without_error() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("model.safetensors");
+    // Two tensors: 2×2 (4 elements) and 3×1 (3 elements) → 7 elements total.
+    let t0 = common::f32_to_bytes(&[0.25, 0.5, 0.75, 1.0]);
+    let t1 = common::f32_to_bytes(&[0.25, 0.5, 0.75]);
+    common::create_safetensors_file(
+        &path,
+        vec![("a", "F32", vec![2, 2], t0), ("b", "F32", vec![3, 1], t1)],
+    );
+
+    compiler::print_quant_sizes(&path, None)
+        .expect("quant size preview should compute and print without error");
+}
