@@ -71,6 +71,7 @@ modelc run my-model.modelc --port 8080 --profile
 modelc run my-model.modelc --max-context 2048 --grammar "^\d+$"
 modelc run my-model.modelc --temperature 0.7 --max-tokens 512
 modelc run my-model.modelc --api-key sk-xxx --rate-limit 120
+modelc run my-model.modelc --max-concurrent 8
 ```
 
 **List** locally stored models:
@@ -140,6 +141,7 @@ From the built artifact in this repository (no install):
 - **`--bind`** — HTTP server bind address (default `0.0.0.0`).
 - **`--api-key <key>`** — Require `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`.
 - **`--rate-limit <N>`** — Max requests per minute per client IP (default: unlimited).
+- **`--max-concurrent <N>`** — Max concurrent inference requests. Excess requests receive `503 Service Unavailable`. Exempts `/health`, `/info`, and `/metrics`.
 - **`--max-context <N>`** — Hard context limit; triggers sliding-window KV eviction when exceeded.
 - **`--anchor-tokens <N>`** — Preserve the first N tokens during context shifting (StreamingLLM-style).
 - **`--temperature <T>`** — Sampling temperature (default `1.0`).
@@ -184,7 +186,9 @@ Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GG
 | `POST` | `/chat/stream`          | SSE stream of `{ "delta": "...", "done": bool }` chunks. |
 | `POST` | `/complete`             | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
 | `POST` | `/embeddings`           | Request JSON: `{ "input": "..." }`. Response: `{ "embedding": [f32, ...], "model": "..." }`. |
+| `POST` | `/v1/embeddings`        | OpenAI-compatible embeddings. Accepts `encoding_format: "float"` or `"base64"`. Returns `dimensions`, `index`, and `usage`. |
 | `POST` | `/tokenize`            | Request JSON: `{ "input": "..." }` or `{ "inputs": [...] }`. Response: `{ "tokens": [id, ...], "count": N }` (batch: `tokens_batch`). |
+| `GET`  | `/api/version`         | JSON: `version` (semver), `git_sha` — for orchestration/health checks. |
 | `GET`  | `/v1/system`           | System/hardware info: CPU cores, OS, arch, Metal availability, total memory. |
 | `GET`  | `/v1/models`            | OpenAI-compatible model list. |
 | `POST` | `/v1/chat/completions`  | OpenAI-compatible chat completion (streaming + non-streaming). |

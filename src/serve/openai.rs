@@ -10,7 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::AppState;
 use super::CancelOnDrop;
-use super::infer::{run_text_inference_with_config, run_text_inference_with_logprobs};
+use super::infer::{run_embeddings, run_text_inference_with_config, run_text_inference_with_logprobs};
 
 // ---------------------------------------------------------------------------
 // /v1/models
@@ -853,6 +853,110 @@ fn extract_json_object(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// /v1/embeddings
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(super) struct V1EmbeddingsRequest {
+    /// A string or array of strings to embed.
+    input: serde_json::Value,
+    #[serde(default)]
+    model: String,
+    /// `"float"` (default) or `"base64"`.
+    #[serde(default = "default_encoding_format")]
+    encoding_format: String,
+}
+
+fn default_encoding_format() -> String {
+    "float".to_string()
+}
+
+#[derive(Serialize)]
+pub(super) struct V1EmbeddingsResponse {
+    object: &'static str,
+    data: Vec<V1Embedding>,
+    model: String,
+    usage: Usage,
+}
+
+#[derive(Serialize)]
+pub(super) struct V1Embedding {
+    object: &'static str,
+    embedding: serde_json::Value,
+    index: usize,
+    dimensions: usize,
+}
+
+pub(super) async fn v1_embeddings(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<V1EmbeddingsRequest>,
+) -> Json<V1EmbeddingsResponse> {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+
+    let inputs = extract_embedding_inputs(&req.input);
+    let use_base64 = req.encoding_format == "base64";
+
+    let mut entries = Vec::with_capacity(inputs.len());
+    let mut total_tokens = 0usize;
+
+    for (idx, text) in inputs.iter().enumerate() {
+        let input_f32: Vec<f32> = text.bytes().map(|b| b as f32 / 255.0).collect();
+        total_tokens += text.len();
+        let embedding = run_embeddings(&state, &input_f32).unwrap_or_default();
+        let dimensions = embedding.len();
+
+        let embedding_value = if use_base64 {
+            let bytes: Vec<u8> = embedding
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            serde_json::Value::String(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &bytes,
+            ))
+        } else {
+            serde_json::to_value(embedding).unwrap_or(serde_json::Value::Null)
+        };
+
+        entries.push(V1Embedding {
+            object: "embedding",
+            embedding: embedding_value,
+            index: idx,
+            dimensions,
+        });
+    }
+
+    Json(V1EmbeddingsResponse {
+        object: "list",
+        data: entries,
+        model: if req.model.is_empty() {
+            state.name.clone()
+        } else {
+            req.model
+        },
+        usage: Usage {
+            prompt_tokens: total_tokens,
+            completion_tokens: 0,
+            total_tokens: total_tokens,
+        },
+    })
+}
+
+/// Flatten the `input` field (string or array of strings) into a Vec of texts.
+fn extract_embedding_inputs(input: &serde_json::Value) -> Vec<String> {
+    if let Some(arr) = input.as_array() {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    } else if let Some(s) = input.as_str() {
+        vec![s.to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

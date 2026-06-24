@@ -142,6 +142,7 @@ async fn run_server_serves_gpt2_inference() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -170,6 +171,7 @@ async fn run_server_resizes_oversized_infer_input() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -196,6 +198,7 @@ async fn run_server_serves_health() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -220,6 +223,7 @@ async fn run_server_serves_openai_models() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -247,6 +251,7 @@ async fn run_server_serves_embeddings() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -279,6 +284,7 @@ async fn run_server_serves_tokenize() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -319,6 +325,7 @@ async fn run_server_serves_system_info() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -346,6 +353,7 @@ async fn run_server_serves_openai_chat_completions() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -381,6 +389,7 @@ async fn run_server_serves_openai_chat_logprobs() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -452,6 +461,7 @@ async fn run_server_serves_openai_chat_logprobs_no_top() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -494,6 +504,7 @@ async fn run_server_lora_unload_restores_base() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -519,6 +530,7 @@ async fn run_server_lora_load_bad_path_returns_error() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -542,6 +554,7 @@ async fn run_server_metrics_returns_prometheus_text() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -589,6 +602,7 @@ async fn run_server_chat_accepts_json_schema() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -626,6 +640,7 @@ async fn run_server_serves_openai_chat_stream() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -670,6 +685,7 @@ async fn run_server_serves_openai_completions() {
             false,
             modelc::generate::GenerationConfig::default(),
             None,
+            None,
         )
         .await;
     });
@@ -708,6 +724,7 @@ async fn run_server_api_key_rejects_unauthenticated() {
             false,
             modelc::generate::GenerationConfig::default(),
             Some(auth),
+            None,
         )
         .await;
     });
@@ -737,6 +754,7 @@ async fn run_server_api_key_accepts_authenticated() {
             false,
             modelc::generate::GenerationConfig::default(),
             Some(auth),
+            None,
         )
         .await;
     });
@@ -770,6 +788,7 @@ async fn run_server_rate_limit_rejects_over_limit() {
             false,
             modelc::generate::GenerationConfig::default(),
             Some(auth),
+            None,
         )
         .await;
     });
@@ -803,6 +822,7 @@ async fn run_server_handles_concurrent_transformer_requests() {
             addr,
             false,
             modelc::generate::GenerationConfig::default(),
+            None,
             None,
         )
         .await;
@@ -863,5 +883,167 @@ async fn run_server_handles_concurrent_transformer_requests() {
     assert!(
         val_b["message"]["content"].as_str().is_some(),
         "B should have content"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_server_max_concurrent_rejects_with_503() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            Some(1),
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // Fire three concurrent chat requests with max_concurrent=1;
+    // at least one should be rejected with 503.
+    let body_str = serde_json::to_string(&serde_json::json!({
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 4
+    })).unwrap();
+
+    let (ra, rb, rc) = tokio::join!(
+        tokio::task::spawn_blocking({
+            let body = body_str.clone();
+            let url = format!("{base}/chat");
+            move || ureq::post(&url).content_type("application/json").send(&body)
+        }),
+        tokio::task::spawn_blocking({
+            let body = body_str.clone();
+            let url = format!("{base}/chat");
+            move || ureq::post(&url).content_type("application/json").send(&body)
+        }),
+        tokio::task::spawn_blocking({
+            let body = body_str.clone();
+            let url = format!("{base}/chat");
+            move || ureq::post(&url).content_type("application/json").send(&body)
+        }),
+    );
+
+    let statuses = [
+        match ra.expect("spawn should not panic") {
+            Ok(r) => r.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(_) => 0,
+        },
+        match rb.expect("spawn should not panic") {
+            Ok(r) => r.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(_) => 0,
+        },
+        match rc.expect("spawn should not panic") {
+            Ok(r) => r.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(_) => 0,
+        },
+    ];
+    let ok_count = statuses.iter().filter(|&&s| s == 200).count();
+    let rejected_count = statuses.iter().filter(|&&s| s == 503).count();
+
+    assert!(
+        ok_count >= 1,
+        "at least one request should succeed (200), got {:?}",
+        statuses
+    );
+    assert!(
+        rejected_count >= 1,
+        "at least one request should be rejected with 503, got {:?}",
+        statuses
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_openai_v1_embeddings() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // Single input, float format (default).
+    let body = serde_json::json!({
+        "input": "hello",
+        "encoding_format": "float"
+    });
+    let val = post_json(&format!("{base}/v1/embeddings"), &body);
+    assert_eq!(val["object"].as_str(), Some("list"));
+    let data = val["data"].as_array().expect("data array");
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["object"].as_str(), Some("embedding"));
+    assert!(data[0]["embedding"].is_array(), "float embedding should be array");
+    let dims = data[0]["dimensions"].as_u64().expect("dimensions present") as usize;
+    let emb = data[0]["embedding"].as_array().unwrap();
+    assert_eq!(emb.len(), dims, "dimensions should match embedding length");
+    assert!(val["usage"]["total_tokens"].is_number());
+
+    // Batch input, base64 format.
+    let body = serde_json::json!({
+        "input": ["hello", "world"],
+        "encoding_format": "base64"
+    });
+    let val = post_json(&format!("{base}/v1/embeddings"), &body);
+    let data = val["data"].as_array().expect("data array");
+    assert_eq!(data.len(), 2);
+    assert!(data[0]["embedding"].as_str().is_some(), "base64 embedding should be a string");
+    assert_eq!(data[0]["index"].as_u64(), Some(0));
+    assert_eq!(data[1]["index"].as_u64(), Some(1));
+    assert!(data[0]["dimensions"].as_u64().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_version() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = ureq::get(&format!("{base}/api/version"))
+        .call()
+        .expect("version request should succeed");
+    let bytes = read_body(resp).expect("read body");
+    let val: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+    assert!(
+        val["version"].as_str().is_some(),
+        "version should be present"
+    );
+    assert!(
+        val["git_sha"].as_str().is_some(),
+        "git_sha should be present"
     );
 }

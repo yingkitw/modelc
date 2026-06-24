@@ -16,7 +16,7 @@ use super::{
     AppState, CancelOnDrop, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse,
     EmbeddingEntry, EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest,
     InferResponse, LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo,
-    StreamChunk, SystemInfo, TokenizeRequest, TokenizeResponse,
+    StreamChunk, SystemInfo, TokenizeRequest, TokenizeResponse, VersionInfo,
 };
 
 pub(super) async fn infer(
@@ -122,6 +122,14 @@ pub(super) async fn model_info(State(state): State<Arc<AppState>>) -> Json<Model
         total_params: state.total_params,
         total_bytes: state.total_bytes,
         tensors: state.tensor_names.clone(),
+    })
+}
+
+/// `GET /api/version` — expose CLI version and git SHA for orchestration.
+pub(super) async fn version_info() -> Json<VersionInfo> {
+    Json(VersionInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: crate::GIT_SHA.to_string(),
     })
 }
 

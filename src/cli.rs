@@ -219,6 +219,13 @@ pub enum Commands {
             help = "Max requests per minute per client IP (0 = unlimited)"
         )]
         rate_limit: Option<u32>,
+
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Max concurrent inference requests (0 = unlimited)"
+        )]
+        max_concurrent: Option<usize>,
     },
 
     #[command(about = "List installed model packages")]

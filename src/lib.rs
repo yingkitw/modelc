@@ -28,3 +28,6 @@ pub const CLI_VERSION: &str = concat!(
     env!("MODELC_GIT_SHA"),
     ")"
 );
+
+/// Short git SHA from `build.rs`.
+pub const GIT_SHA: &str = env!("MODELC_GIT_SHA");

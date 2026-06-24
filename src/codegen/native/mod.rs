@@ -189,7 +189,14 @@ async fn main() {{
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}}
+
+async fn shutdown_signal() {{
+    let _ = tokio::signal::ctrl_c().await;
 }}
 
 async fn infer(

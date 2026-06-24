@@ -118,6 +118,7 @@ fn main() -> Result<()> {
             grammar,
             api_key,
             rate_limit,
+            max_concurrent,
         } => {
             let path = modelc::store::resolve_model_path(input)?;
             eprintln!("modelc run: loading {:?}...", path);
@@ -181,7 +182,7 @@ fn main() -> Result<()> {
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(modelc::serve::run_server(
-                model, addr, *profile, generation, auth_opt,
+                model, addr, *profile, generation, auth_opt, *max_concurrent,
             ))?;
         }
         modelc::cli::Commands::List => {

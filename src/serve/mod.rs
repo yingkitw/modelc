@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Router,
+    response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -60,12 +61,33 @@ pub async fn run_server(
     profile: bool,
     generation: crate::generate::GenerationConfig,
     auth: Option<auth::AuthConfig>,
+    max_concurrent: Option<usize>,
 ) -> anyhow::Result<()> {
-    let app = build_router(model, profile, generation);
+    run_server_with_shutdown(model, addr, profile, generation, auth, max_concurrent, shutdown_signal()).await
+}
+
+/// Like [`run_server`], but with a caller-supplied shutdown signal. When `shutdown`
+/// resolves, axum stops accepting new connections and drains in-flight requests
+/// before returning. Exposed publicly so embedders (and tests) can trigger a
+/// graceful shutdown programmatically instead of relying on OS signals.
+pub async fn run_server_with_shutdown<F>(
+    model: Model,
+    addr: SocketAddr,
+    profile: bool,
+    generation: crate::generate::GenerationConfig,
+    auth: Option<auth::AuthConfig>,
+    max_concurrent: Option<usize>,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let app = build_router(model, profile, generation, max_concurrent);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("modelc run: listening on http://{}", addr);
 
+    let mut shutdown = Some(shutdown);
     if let Some(auth_cfg) = auth {
         let svc = app
             .layer(axum::middleware::from_fn_with_state(
@@ -73,17 +95,50 @@ pub async fn run_server(
                 auth::middleware,
             ))
             .into_make_service_with_connect_info::<SocketAddr>();
-        axum::serve(listener, svc).await?;
+        axum::serve(listener, svc)
+            .with_graceful_shutdown(shutdown.take().expect("shutdown future"))
+            .await?;
     } else {
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown.take().expect("shutdown future"))
+            .await?;
     }
+    eprintln!("modelc run: server stopped");
     Ok(())
+}
+
+/// Resolves on `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM`. Used as the graceful-shutdown
+/// trigger for [`run_server`].
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    eprintln!("modelc run: shutdown signal received, draining in-flight requests...");
 }
 
 fn build_router(
     model: Model,
     profile: bool,
     generation: crate::generate::GenerationConfig,
+    max_concurrent: Option<usize>,
 ) -> Router {
     let onnx_plan = model
         .metadata
@@ -110,6 +165,14 @@ fn build_router(
         .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
     });
 
+    let max_concurrent = max_concurrent.and_then(|n| {
+        if n > 0 {
+            Some(Arc::new(tokio::sync::Semaphore::new(n)))
+        } else {
+            None
+        }
+    });
+
     let state = Arc::new(AppState {
         name: model.name.clone(),
         architecture: model.architecture.clone(),
@@ -133,11 +196,13 @@ fn build_router(
         )),
         metrics: metrics::Metrics::default(),
         draft_model,
+        max_concurrent,
     });
 
-    Router::new()
+    let router = Router::new()
         .route("/infer", post(handlers::infer))
         .route("/info", get(handlers::model_info))
+        .route("/api/version", get(handlers::version_info))
         .route("/health", get(handlers::health))
         .route("/chat", post(handlers::chat))
         .route("/chat/stream", post(handlers::chat_stream))
@@ -149,9 +214,15 @@ fn build_router(
         .route("/v1/system", get(handlers::system_info))
         .route("/v1/chat/completions", post(openai::chat_completion))
         .route("/v1/completions", post(openai::completions))
+        .route("/v1/embeddings", post(openai::v1_embeddings))
         .route("/lora/load", post(handlers::lora_load))
         .route("/lora/unload", post(handlers::lora_unload))
-        .with_state(state)
+        .with_state(state.clone());
+
+    router.layer(axum::middleware::from_fn_with_state(
+        state,
+        backpressure_middleware,
+    ))
 }
 
 struct AppState {
@@ -185,6 +256,32 @@ struct AppState {
     /// `draft.*` tensors in the runtime; falls back to n-gram drafting when
     /// absent.
     draft_model: Option<std::sync::Arc<dyn crate::draft::DraftModel>>,
+    /// Optional semaphore limiting concurrent inference requests.  When set and
+    /// saturated, new inference requests receive 503 Service Unavailable.
+    max_concurrent: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+/// Axum middleware that rejects inference requests with 503 when the concurrent
+/// request limit is reached.  Exempts `/health`, `/info`, and `/metrics` so
+/// probes and observability still work under load.
+async fn backpressure_middleware(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    if path == "/health" || path == "/info" || path == "/metrics" {
+        return next.run(req).await;
+    }
+
+    if let Some(ref sem) = state.max_concurrent {
+        match sem.try_acquire() {
+            Ok(_permit) => next.run(req).await,
+            Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        next.run(req).await
+    }
 }
 
 /// Maximum number of distinct prompt prefixes retained in the prefix cache.
@@ -245,6 +342,12 @@ struct ModelInfo {
     total_params: usize,
     total_bytes: usize,
     tensors: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct VersionInfo {
+    version: String,
+    git_sha: String,
 }
 
 #[derive(Deserialize)]
