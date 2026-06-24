@@ -58,11 +58,20 @@ fn build_router(
 
     let runtime = Runtime::from_raw(&model.tensors);
     let draft_model = transformer_hidden_dim(&model).and_then(|hidden| {
-        let vocab_size = model.metadata.get("tokenizer.vocab_size")
+        let vocab_size = model
+            .metadata
+            .get("tokenizer.vocab_size")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(0);
-        crate::draft::MlpDraftModel::from_runtime(&runtime, vocab_size, hidden, 64, generation.temperature, generation.top_p)
-            .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
+        crate::draft::MlpDraftModel::from_runtime(
+            &runtime,
+            vocab_size,
+            hidden,
+            64,
+            generation.temperature,
+            generation.top_p,
+        )
+        .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
     });
 
     let state = Arc::new(AppState {
@@ -232,6 +241,10 @@ struct ChatRequest {
     temperature: Option<f32>,
     #[serde(default)]
     top_p: Option<f32>,
+    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
+    /// least `min_p` fraction of the max probability.
+    #[serde(default)]
+    min_p: Option<f32>,
     /// Optional regex grammar constraint applied during sampling.
     #[serde(default)]
     grammar: Option<String>,
@@ -244,6 +257,15 @@ struct ChatRequest {
     /// Optional seed for reproducible sampling.
     #[serde(default)]
     seed: Option<u64>,
+    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
+    #[serde(default)]
+    repetition_penalty: Option<f32>,
+    /// OpenAI-style presence penalty. Positive values discourage token reuse.
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    /// OpenAI-style frequency penalty. Scales with token occurrence count.
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -266,6 +288,10 @@ struct CompleteRequest {
     temperature: Option<f32>,
     #[serde(default)]
     top_p: Option<f32>,
+    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
+    /// least `min_p` fraction of the max probability.
+    #[serde(default)]
+    min_p: Option<f32>,
     /// Optional regex grammar constraint applied during sampling.
     #[serde(default)]
     grammar: Option<String>,
@@ -278,6 +304,15 @@ struct CompleteRequest {
     /// Optional seed for reproducible sampling.
     #[serde(default)]
     seed: Option<u64>,
+    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
+    #[serde(default)]
+    repetition_penalty: Option<f32>,
+    /// OpenAI-style presence penalty. Positive values discourage token reuse.
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    /// OpenAI-style frequency penalty. Scales with token occurrence count.
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
 }
 
 #[derive(Serialize)]

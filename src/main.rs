@@ -99,6 +99,10 @@ fn main() -> Result<()> {
             max_tokens,
             temperature,
             seed,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            min_p,
             max_context,
             anchor_tokens,
             grammar,
@@ -133,6 +137,18 @@ fn main() -> Result<()> {
             }
             if let Some(s) = seed {
                 generation.seed = Some(*s);
+            }
+            if let Some(rp) = repetition_penalty {
+                generation.repetition_penalty = *rp;
+            }
+            if let Some(pp) = presence_penalty {
+                generation.presence_penalty = *pp;
+            }
+            if let Some(fp) = frequency_penalty {
+                generation.frequency_penalty = *fp;
+            }
+            if let Some(mp) = min_p {
+                generation.min_p = *mp;
             }
             if let Some(c) = max_context {
                 generation.max_context = Some(*c);

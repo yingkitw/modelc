@@ -6,6 +6,7 @@
 //! Also supports speculative decoding via an n-gram draft model that proposes candidate
 //! tokens from prompt context, which the target model verifies in a single forward pass loop.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::prefix_cache::{CachedPrefix, PrefixCache};
@@ -41,9 +42,9 @@ fn context_shift(
             kv.shift_anchored(overflow, anchor_tokens);
         }
         let suffix_start = anchor_tokens + overflow;
-        let suffix = token_ids[suffix_start..].to_vec();
-        token_ids.truncate(anchor_tokens);
-        token_ids.extend_from_slice(&suffix);
+        let suffix_len = len - suffix_start;
+        token_ids.copy_within(suffix_start.., anchor_tokens);
+        token_ids.truncate(anchor_tokens + suffix_len);
         if *prompt_len > anchor_tokens {
             let non_anchor = *prompt_len - anchor_tokens;
             let removed = overflow.min(non_anchor);
@@ -54,7 +55,9 @@ fn context_shift(
         if let Some(kv) = kv_cache_opt {
             kv.shift(overflow);
         }
-        *token_ids = token_ids.split_off(overflow);
+        let new_len = len - overflow;
+        token_ids.copy_within(overflow.., 0);
+        token_ids.truncate(new_len);
         *prompt_len = prompt_len.saturating_sub(overflow);
     }
 }
@@ -65,6 +68,10 @@ pub struct GenerationConfig {
     /// Nucleus sampling threshold (0.0 = disabled). Keeps the smallest set of tokens whose
     /// cumulative probability exceeds `top_p`, then renormalizes and samples.
     pub top_p: f32,
+    /// Min-p sampling threshold (0.0 = disabled). Keeps tokens whose probability is at
+    /// least `min_p` fraction of the max probability, then renormalizes and samples.
+    /// Simpler and often more effective than top-p (nucleus) sampling.
+    pub min_p: f32,
     /// Number of draft tokens to propose per speculative step (0 = disabled).
     pub gamma: usize,
     /// Use INT8 quantization for the KV cache (4x memory reduction).
@@ -86,6 +93,17 @@ pub struct GenerationConfig {
     /// Optional seed for reproducible sampling. When set, the same prompt + seed
     /// always produces the same output (greedy decoding ignores this).
     pub seed: Option<u64>,
+    /// Penalty for repeated tokens. Values > 1.0 reduce the probability of tokens
+    /// already present in the generated text. 1.0 = disabled (no penalty).
+    pub repetition_penalty: f32,
+    /// OpenAI-style presence penalty. Adds this value to the logit of any token
+    /// already present in the generated text. Positive values discourage repetition.
+    /// 0.0 = disabled.
+    pub presence_penalty: f32,
+    /// OpenAI-style frequency penalty. Scales with how many times a token has
+    /// already appeared: subtracts `count * penalty` from the logit.
+    /// Positive values strongly discourage repetition. 0.0 = disabled.
+    pub frequency_penalty: f32,
 }
 
 impl Clone for GenerationConfig {
@@ -94,6 +112,7 @@ impl Clone for GenerationConfig {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
+            min_p: self.min_p,
             gamma: self.gamma,
             use_int8_kv: self.use_int8_kv,
             use_mixed_kv: self.use_mixed_kv,
@@ -102,6 +121,9 @@ impl Clone for GenerationConfig {
             anchor_tokens: self.anchor_tokens,
             stop: self.stop.clone(),
             seed: self.seed,
+            repetition_penalty: self.repetition_penalty,
+            presence_penalty: self.presence_penalty,
+            frequency_penalty: self.frequency_penalty,
         }
     }
 }
@@ -112,6 +134,7 @@ impl Default for GenerationConfig {
             max_tokens: 128,
             temperature: 0.0, // 0.0 = greedy
             top_p: 0.0,
+            min_p: 0.0,
             gamma: 0,
             use_int8_kv: false,
             use_mixed_kv: false,
@@ -120,6 +143,9 @@ impl Default for GenerationConfig {
             anchor_tokens: 0,
             stop: Vec::new(),
             seed: None,
+            repetition_penalty: 1.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
         }
     }
 }
@@ -137,7 +163,15 @@ pub fn generate(
     config: &GenerationConfig,
     draft_model: Option<&dyn crate::draft::DraftModel>,
 ) -> String {
-    let generated = generate_token_ids(runtime, architecture, hidden, tokenizer, prompt, config, draft_model);
+    let generated = generate_token_ids(
+        runtime,
+        architecture,
+        hidden,
+        tokenizer,
+        prompt,
+        config,
+        draft_model,
+    );
     tokenizer.decode(&generated)
 }
 
@@ -156,7 +190,16 @@ pub fn generate_token_ids(
     config: &GenerationConfig,
     draft_model: Option<&dyn crate::draft::DraftModel>,
 ) -> Vec<u32> {
-    generate_token_ids_with_cache(runtime, architecture, hidden, tokenizer, prompt, config, None, draft_model)
+    generate_token_ids_with_cache(
+        runtime,
+        architecture,
+        hidden,
+        tokenizer,
+        prompt,
+        config,
+        None,
+        draft_model,
+    )
 }
 
 /// Like [`generate_token_ids`], but consults an optional [`PrefixCache`] to skip
@@ -179,7 +222,14 @@ pub fn generate_token_ids_with_cache(
     let lookup = cache.as_ref().and_then(|c| c.lookup(&prompt_ids));
     if config.gamma > 0 {
         let (text, maybe_kv) = speculative_generate(
-            runtime, architecture, hidden, tokenizer, prompt, config, lookup, draft_model,
+            runtime,
+            architecture,
+            hidden,
+            tokenizer,
+            prompt,
+            config,
+            lookup,
+            draft_model,
         );
         let all_ids = tokenizer.encode(&(prompt.to_string() + &text));
         let ids = if all_ids.len() > prompt_ids.len() {
@@ -368,8 +418,12 @@ pub(crate) fn generate_core(
         for &id in &token_ids[matched_len..] {
             let embedding = token_embedding(runtime, architecture, id, hidden);
             logits = match architecture {
-                "gpt2" => forward_gpt2_cached(runtime, &embedding, false, &mut kv_cache_opt),
-                "llama" => forward_llama_cached(runtime, &embedding, false, &mut kv_cache_opt),
+                "gpt2" => {
+                    forward_gpt2_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt)
+                }
+                "llama" => {
+                    forward_llama_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt)
+                }
                 _ => break,
             };
         }
@@ -423,7 +477,13 @@ pub(crate) fn generate_core(
         if let Some(max_ctx) = config.max_context
             && token_ids.len() > max_ctx
         {
-            context_shift(&mut token_ids, &mut prompt_len, &mut kv_cache_opt, max_ctx, config.anchor_tokens);
+            context_shift(
+                &mut token_ids,
+                &mut prompt_len,
+                &mut kv_cache_opt,
+                max_ctx,
+                config.anchor_tokens,
+            );
         }
 
         if tokenizer.vocab_size() > 0 && next_token as usize >= tokenizer.vocab_size() {
@@ -433,8 +493,8 @@ pub(crate) fn generate_core(
         // Compute logits for the just-appended token (drives the next sample).
         let embedding = token_embedding(runtime, architecture, next_token, hidden);
         let next_logits = match architecture {
-            "gpt2" => forward_gpt2_cached(runtime, &embedding, false, &mut kv_cache_opt),
-            "llama" => forward_llama_cached(runtime, &embedding, false, &mut kv_cache_opt),
+            "gpt2" => forward_gpt2_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt),
+            "llama" => forward_llama_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt),
             _ => break,
         };
         match next_logits {
@@ -559,7 +619,6 @@ pub(crate) fn speculative_generate(
         };
     }
 
-
     while token_ids.len() - prompt_len < config.max_tokens {
         let draft = if let Some(dm) = draft_model {
             dm.draft(&token_ids, config.gamma)
@@ -571,25 +630,43 @@ pub(crate) fn speculative_generate(
             let last_id = token_ids.last().copied().unwrap_or(0);
             let embedding = token_embedding(runtime, architecture, last_id, hidden);
             let logits = match architecture {
-                "gpt2" => forward_gpt2_cached(runtime, &embedding, false, &mut kv_cache_opt),
-                "llama" => forward_llama_cached(runtime, &embedding, false, &mut kv_cache_opt),
+                "gpt2" => {
+                    forward_gpt2_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt)
+                }
+                "llama" => {
+                    forward_llama_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt)
+                }
                 _ => break,
             };
             let step = token_ids.len() - prompt_len;
-            let next_token = sample_constrained(logits.as_deref(), config, tokenizer, &token_ids[prompt_len..], step);
+            let next_token = sample_constrained(
+                logits.as_deref(),
+                config,
+                tokenizer,
+                &token_ids[prompt_len..],
+                step,
+            );
             token_ids.push(next_token);
             ngram_index = update_ngram_index(&ngram_index, &token_ids, n);
 
             if let Some(max_ctx) = config.max_context
                 && token_ids.len() > max_ctx
             {
-                context_shift(&mut token_ids, &mut prompt_len, &mut kv_cache_opt, max_ctx, config.anchor_tokens);
+                context_shift(
+                    &mut token_ids,
+                    &mut prompt_len,
+                    &mut kv_cache_opt,
+                    max_ctx,
+                    config.anchor_tokens,
+                );
             }
 
             if tokenizer.vocab_size() > 0 && next_token as usize >= tokenizer.vocab_size() {
                 break;
             }
-            if let Some(truncated) = check_stop_sequences(tokenizer, &config.stop, &mut token_ids, prompt_len) {
+            if let Some(truncated) =
+                check_stop_sequences(tokenizer, &config.stop, &mut token_ids, prompt_len)
+            {
                 token_ids = truncated;
                 break;
             }
@@ -601,12 +678,22 @@ pub(crate) fn speculative_generate(
             let last_id = token_ids.last().copied().unwrap_or(0);
             let embedding = token_embedding(runtime, architecture, last_id, hidden);
             let logits = match architecture {
-                "gpt2" => forward_gpt2_cached(runtime, &embedding, false, &mut kv_cache_opt),
-                "llama" => forward_llama_cached(runtime, &embedding, false, &mut kv_cache_opt),
+                "gpt2" => {
+                    forward_gpt2_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt)
+                }
+                "llama" => {
+                    forward_llama_cached(runtime, embedding.as_ref(), false, &mut kv_cache_opt)
+                }
                 _ => break,
             };
             let step = token_ids.len() - prompt_len;
-            let next_token = sample_constrained(logits.as_deref(), config, tokenizer, &token_ids[prompt_len..], step);
+            let next_token = sample_constrained(
+                logits.as_deref(),
+                config,
+                tokenizer,
+                &token_ids[prompt_len..],
+                step,
+            );
             if next_token == draft_token {
                 token_ids.push(draft_token);
                 accepted += 1;
@@ -622,7 +709,9 @@ pub(crate) fn speculative_generate(
         // Update the n-gram index with newly accepted tokens.
         ngram_index = update_ngram_index(&ngram_index, &token_ids, n);
 
-        if let Some(truncated) = check_stop_sequences(tokenizer, &config.stop, &mut token_ids, prompt_len) {
+        if let Some(truncated) =
+            check_stop_sequences(tokenizer, &config.stop, &mut token_ids, prompt_len)
+        {
             token_ids = truncated;
             break;
         }
@@ -630,7 +719,13 @@ pub(crate) fn speculative_generate(
         if let Some(max_ctx) = config.max_context
             && token_ids.len() > max_ctx
         {
-            context_shift(&mut token_ids, &mut prompt_len, &mut kv_cache_opt, max_ctx, config.anchor_tokens);
+            context_shift(
+                &mut token_ids,
+                &mut prompt_len,
+                &mut kv_cache_opt,
+                max_ctx,
+                config.anchor_tokens,
+            );
         }
 
         // Stop if we've hit max tokens or an out-of-vocab token was emitted.
@@ -646,7 +741,10 @@ pub(crate) fn speculative_generate(
     }
 
     let final_kv = kv_cache_opt.clone();
-    (tokenizer.decode(&token_ids[prompt_len.min(token_ids.len())..]), final_kv)
+    (
+        tokenizer.decode(&token_ids[prompt_len.min(token_ids.len())..]),
+        final_kv,
+    )
 }
 
 /// Build an n-gram index from a token sequence.
@@ -723,21 +821,26 @@ fn most_frequent(xs: &[u32]) -> u32 {
         .unwrap_or(0)
 }
 
-fn token_embedding(runtime: &Runtime, arch: &str, token_id: u32, hidden: usize) -> Vec<f32> {
+fn token_embedding<'a>(
+    runtime: &'a Runtime,
+    arch: &str,
+    token_id: u32,
+    hidden: usize,
+) -> Cow<'a, [f32]> {
     let weight_name = match arch {
         "gpt2" => "transformer.wte.weight",
         "llama" => "model.embed_tokens.weight",
-        _ => return vec![0.0; hidden],
+        _ => return Cow::Owned(vec![0.0; hidden]),
     };
 
     if let Some(w) = runtime.get(weight_name) {
         let idx = (token_id as usize) * hidden;
         if idx + hidden <= w.data.len() {
-            return w.data[idx..idx + hidden].to_vec();
+            return Cow::Borrowed(&w.data[idx..idx + hidden]);
         }
     }
 
-    vec![0.0; hidden]
+    Cow::Owned(vec![0.0; hidden])
 }
 
 fn count_layers(runtime: &Runtime, arch: &str) -> usize {
@@ -758,6 +861,71 @@ fn count_layers(runtime: &Runtime, arch: &str) -> usize {
     max + 1
 }
 
+/// Apply repetition penalty to logits based on tokens already generated.
+/// Tokens present in `generated_tokens` have their logits adjusted:
+/// - positive logits are divided by `penalty`
+/// - negative logits are multiplied by `penalty`
+///
+/// This pushes repeated-token probabilities down when penalty > 1.0.
+fn apply_repetition_penalty(logits: &mut [f32], generated_tokens: &[u32], penalty: f32) {
+    if penalty <= 1.0 || generated_tokens.is_empty() {
+        return;
+    }
+    // Track which token IDs have appeared so we only penalize each once.
+    let mut seen = [0u64; 1024]; // bitmap for IDs 0..65535 (covers most vocabs)
+    for &id in generated_tokens {
+        let idx = id as usize / 64;
+        let bit = id as u64 % 64;
+        if idx < seen.len() {
+            seen[idx] |= 1u64 << bit;
+        }
+    }
+    for (i, logit) in logits.iter_mut().enumerate() {
+        let idx = i / 64;
+        let bit = i as u64 % 64;
+        if idx < seen.len() && (seen[idx] & (1u64 << bit)) != 0 {
+            if *logit > 0.0 {
+                *logit /= penalty;
+            } else {
+                *logit *= penalty;
+            }
+        }
+    }
+}
+
+/// Apply OpenAI-style presence and frequency penalties to logits.
+///
+/// * `presence_penalty` is added once to any token already seen in `generated_tokens`.
+/// * `frequency_penalty` is subtracted `count * penalty` for each seen token.
+///
+/// Both are additive adjustments on logits (not multiplicative like repetition_penalty).
+fn apply_presence_frequency_penalty(
+    logits: &mut [f32],
+    generated_tokens: &[u32],
+    presence_penalty: f32,
+    frequency_penalty: f32,
+) {
+    if (presence_penalty == 0.0 && frequency_penalty == 0.0) || generated_tokens.is_empty() {
+        return;
+    }
+    // Count occurrences of each token ID. Most vocabs are < 65536 entries.
+    let mut counts = [0u16; 65536];
+    for &id in generated_tokens {
+        let idx = id as usize;
+        if idx < counts.len() {
+            // Cap at u16::MAX to avoid overflow on very long sequences.
+            counts[idx] = counts[idx].saturating_add(1);
+        }
+    }
+    for (i, logit) in logits.iter_mut().enumerate() {
+        let count = counts.get(i).copied().unwrap_or(0) as f32;
+        if count > 0.0 {
+            *logit -= presence_penalty;
+            *logit -= count * frequency_penalty;
+        }
+    }
+}
+
 fn sample(logits: Option<&[f32]>, config: &GenerationConfig, step: usize) -> u32 {
     let logits = logits.unwrap_or(&[]);
     if logits.is_empty() {
@@ -774,15 +942,24 @@ fn sample(logits: Option<&[f32]>, config: &GenerationConfig, step: usize) -> u32
     if config.top_p > 0.0 && config.top_p < 1.0 {
         apply_top_p(&mut probs, config.top_p);
     }
+    if config.min_p > 0.0 && config.min_p < 1.0 {
+        apply_min_p(&mut probs, config.min_p);
+    }
 
     multinomial(&probs, step, config.seed)
 }
 
-/// Sample with an optional grammar constraint applied to the logits.
+/// Sample with optional repetition / presence / frequency penalties and grammar
+/// constraint applied to the logits.
 ///
 /// If `config.constraint` is set, only tokens whose decoded text keeps the partial
 /// output compatible with the regex are allowed. Invalid tokens are masked to
-/// `-inf` before sampling.
+/// `-inf` before sampling. Penalties (`repetition_penalty`, `presence_penalty`,
+/// `frequency_penalty`) adjust the logits of tokens already present in
+/// `generated_tokens` before the constraint mask is applied.
+///
+/// When neither penalties nor a constraint are active, this samples directly
+/// without allocating a working copy (fast path).
 fn sample_constrained(
     logits: Option<&[f32]>,
     config: &GenerationConfig,
@@ -795,23 +972,39 @@ fn sample_constrained(
         return 0;
     }
 
-    if let Some(constraint) = &config.constraint {
-        let prefix = tokenizer.decode(generated_tokens);
-        let vocab_size = tokenizer.vocab_size();
-        let token_bytes: Vec<Option<Vec<u8>>> = (0..vocab_size as u32)
-            .map(|id| tokenizer.token_bytes(id).map(|b| b.to_vec()))
-            .collect();
-        let mask = constraint.valid_mask(&prefix, vocab_size, &token_bytes);
-        let mut masked = logits.to_vec();
-        for (i, valid) in mask.iter().enumerate() {
-            if !valid && i < masked.len() {
-                masked[i] = f32::NEG_INFINITY;
-            }
-        }
-        return sample(Some(&masked), config, step);
+    let has_penalty = config.repetition_penalty > 1.0
+        || config.presence_penalty != 0.0
+        || config.frequency_penalty != 0.0;
+    let constraint = config.constraint.as_deref();
+
+    // Fast path: nothing to adjust — sample directly over the original logits.
+    if !has_penalty && constraint.is_none() {
+        return sample(Some(logits), config, step);
     }
 
-    sample(Some(logits), config, step)
+    let mut working = logits.to_vec();
+    if has_penalty {
+        apply_repetition_penalty(&mut working, generated_tokens, config.repetition_penalty);
+        apply_presence_frequency_penalty(
+            &mut working,
+            generated_tokens,
+            config.presence_penalty,
+            config.frequency_penalty,
+        );
+    }
+
+    if let Some(constraint) = constraint {
+        let prefix = tokenizer.decode(generated_tokens);
+        let vocab_size = tokenizer.vocab_size();
+        let mask = constraint.valid_mask(&prefix, vocab_size, tokenizer.cached_token_bytes());
+        for (i, valid) in mask.iter().enumerate() {
+            if !valid && i < working.len() {
+                working[i] = f32::NEG_INFINITY;
+            }
+        }
+    }
+
+    sample(Some(&working), config, step)
 }
 
 /// In-place nucleus (top-p) filtering.
@@ -836,6 +1029,30 @@ pub(crate) fn apply_top_p(probs: &mut [f32], top_p: f32) {
         indexed[..keep].iter().map(|(i, _)| *i).collect();
     for (i, p) in probs.iter_mut().enumerate() {
         if !keep_set.contains(&i) {
+            *p = 0.0;
+        }
+    }
+
+    // Renormalize.
+    let sum: f32 = probs.iter().sum();
+    if sum > 0.0 {
+        for p in probs.iter_mut() {
+            *p /= sum;
+        }
+    }
+}
+
+/// In-place min-p filtering.
+///
+/// Keeps tokens whose probability is at least `min_p` times the maximum
+/// probability, zeros the rest, then renormalizes. Simpler and often more
+/// effective than top-p (nucleus) sampling: the threshold scales with the
+/// model's confidence, so it adapts per step.
+pub(crate) fn apply_min_p(probs: &mut [f32], min_p: f32) {
+    let max = probs.iter().copied().fold(0.0f32, f32::max);
+    let threshold = max * min_p;
+    for p in probs.iter_mut() {
+        if *p < threshold {
             *p = 0.0;
         }
     }
@@ -908,15 +1125,7 @@ mod tests {
         let config = GenerationConfig {
             max_tokens: 1,
             temperature: 0.0,
-            top_p: 0.0,
-            gamma: 0,
-            use_int8_kv: false,
-            use_mixed_kv: false,
-            constraint: None,
-            max_context: None,
-            anchor_tokens: 0,
-            stop: vec![],
-            seed: None,
+            ..GenerationConfig::default()
         };
         assert_eq!(sample(Some(&[1.0, 5.0, 2.0]), &config, 0), 1);
     }
@@ -939,6 +1148,63 @@ mod tests {
         let sum: f32 = probs.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5, "should still sum to 1.0");
         assert!(probs.iter().all(|&p| p > 0.0), "all tokens should be kept");
+    }
+
+    #[test]
+    fn apply_min_p_drops_low_probability_tokens() {
+        // Max prob is 0.5; min_p = 0.5 => threshold 0.25 keeps only [0] (0.5)
+        // and zeros the rest, then renormalizes to 1.0.
+        let mut probs = vec![0.5f32, 0.2, 0.15, 0.15];
+        apply_min_p(&mut probs, 0.5);
+        assert!(
+            (probs[1]).abs() < 1e-6,
+            "token 1 below threshold should be zeroed"
+        );
+        assert!(
+            (probs[2]).abs() < 1e-6,
+            "token 2 below threshold should be zeroed"
+        );
+        assert!(
+            (probs[3]).abs() < 1e-6,
+            "token 3 below threshold should be zeroed"
+        );
+        let sum: f32 = probs.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "kept tokens should renormalize to 1.0"
+        );
+    }
+
+    #[test]
+    fn apply_min_p_keeps_tokens_above_threshold() {
+        // Max 0.4; min_p 0.5 => threshold 0.2. Tokens with p >= 0.2 are kept
+        // (0.4, 0.3, 0.2); only token 3 (0.1 < 0.2) is dropped.
+        let mut probs = vec![0.4f32, 0.3, 0.2, 0.1];
+        apply_min_p(&mut probs, 0.5);
+        assert!(probs[0] > 0.0, "token 0 (0.4 >= 0.2) should be kept");
+        assert!(probs[1] > 0.0, "token 1 (0.3 >= 0.2) should be kept");
+        assert!(
+            probs[2] > 0.0,
+            "token 2 (0.2 >= threshold boundary) should be kept"
+        );
+        assert!(
+            (probs[3]).abs() < 1e-6,
+            "token 3 (0.1 < 0.2) should be dropped"
+        );
+        let sum: f32 = probs.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "kept tokens should renormalize to 1.0"
+        );
+    }
+
+    #[test]
+    fn apply_min_p_with_zero_is_noop() {
+        let mut probs = vec![0.5f32, 0.3, 0.2];
+        let original = probs.clone();
+        apply_min_p(&mut probs, 0.0);
+        // min_p = 0 => threshold 0; nothing is below 0, so all kept and unchanged.
+        assert_eq!(probs, original);
     }
 
     #[test]
@@ -986,15 +1252,7 @@ mod tests {
         let config = GenerationConfig {
             max_tokens: 10,
             temperature: 0.0,
-            top_p: 0.0,
-            gamma: 0,
-            use_int8_kv: false,
-            use_mixed_kv: false,
-            constraint: None,
-            max_context: None,
-            anchor_tokens: 0,
-            stop: vec![],
-            seed: None,
+            ..GenerationConfig::default()
         };
         let ids = generate_token_ids(&runtime, "unknown", 4, &tokenizer, "hello", &config, None);
         assert!(
@@ -1063,7 +1321,10 @@ mod tests {
         let b = multinomial(&probs, 1, Some(seed));
         // With a non-trivial distribution, different steps should usually differ.
         // (The probability of collision is tiny for 4 categories.)
-        assert_ne!(a, b, "same seed but different step should produce different sample");
+        assert_ne!(
+            a, b,
+            "same seed but different step should produce different sample"
+        );
     }
 
     #[test]
@@ -1071,19 +1332,119 @@ mod tests {
         let config = GenerationConfig {
             max_tokens: 1,
             temperature: 1.0,
-            top_p: 0.0,
-            gamma: 0,
-            use_int8_kv: false,
-            use_mixed_kv: false,
-            constraint: None,
-            max_context: None,
-            anchor_tokens: 0,
-            stop: vec![],
             seed: Some(123),
+            ..GenerationConfig::default()
         };
         let logits = vec![1.0f32, 2.0, 3.0];
         let a = sample(Some(&logits), &config, 0);
         let b = sample(Some(&logits), &config, 0);
-        assert_eq!(a, b, "sample with same seed and step should be deterministic");
+        assert_eq!(
+            a, b,
+            "sample with same seed and step should be deterministic"
+        );
+    }
+
+    #[test]
+    fn repetition_penalty_disabled_leaves_logits_unchanged() {
+        let mut logits = vec![1.0f32, 2.0, -1.0, -2.0];
+        let original = logits.clone();
+        apply_repetition_penalty(&mut logits, &[0, 1], 1.0);
+        assert_eq!(logits, original, "penalty=1.0 should be a no-op");
+    }
+
+    #[test]
+    fn repetition_penalty_reduces_seen_token_logits() {
+        let mut logits = vec![2.0f32, 1.0, -1.0, -2.0];
+        apply_repetition_penalty(&mut logits, &[0], 2.0);
+        // Token 0 was seen: positive logit halved, others untouched.
+        assert!(
+            (logits[0] - 1.0).abs() < 1e-6,
+            "positive seen logit should be divided by penalty"
+        );
+        assert!(
+            (logits[1] - 1.0).abs() < 1e-6,
+            "unseen logit should be unchanged"
+        );
+    }
+
+    #[test]
+    fn repetition_penalty_amplifies_negative_logits() {
+        let mut logits = vec![-2.0f32];
+        apply_repetition_penalty(&mut logits, &[0], 2.0);
+        // Negative seen logit is multiplied by penalty: -2.0 * 2.0 = -4.0.
+        // Both positive (divide) and negative (multiply) adjustments reduce probability.
+        assert!(
+            (logits[0] - (-4.0)).abs() < 1e-6,
+            "negative seen logit should be amplified"
+        );
+    }
+
+    #[test]
+    fn repetition_penalty_penalizes_each_seen_token_once() {
+        let mut logits = vec![4.0f32, 3.0, 2.0];
+        // Token 0 appears three times in generated_tokens — penalty applies once.
+        apply_repetition_penalty(&mut logits, &[0, 0, 0], 2.0);
+        assert!(
+            (logits[0] - 2.0).abs() < 1e-6,
+            "duplicate seen tokens should be penalized once"
+        );
+        assert!((logits[1] - 3.0).abs() < 1e-6, "unseen token 1 unchanged");
+        assert!((logits[2] - 2.0).abs() < 1e-6, "unseen token 2 unchanged");
+    }
+
+    #[test]
+    fn presence_frequency_penalty_disabled_is_noop() {
+        let mut logits = vec![1.0f32, 2.0, 3.0];
+        let original = logits.clone();
+        apply_presence_frequency_penalty(&mut logits, &[0, 1, 2], 0.0, 0.0);
+        assert_eq!(logits, original, "zero penalties should be a no-op");
+    }
+
+    #[test]
+    fn presence_penalty_subtracts_once_per_seen_token() {
+        let mut logits = vec![1.0f32, 2.0, 3.0];
+        // Token 0 appears twice; presence penalty applies once regardless of count.
+        apply_presence_frequency_penalty(&mut logits, &[0, 0], 0.5, 0.0);
+        assert!(
+            (logits[0] - 0.5).abs() < 1e-6,
+            "seen token 0 reduced by presence penalty"
+        );
+        assert!((logits[1] - 2.0).abs() < 1e-6, "unseen token 1 unchanged");
+        assert!((logits[2] - 3.0).abs() < 1e-6, "unseen token 2 unchanged");
+    }
+
+    #[test]
+    fn frequency_penalty_scales_with_count() {
+        let mut logits = vec![2.0f32, 1.0];
+        // Token 0 appears 3 times: frequency penalty subtracts 3 * 0.2 = 0.6.
+        apply_presence_frequency_penalty(&mut logits, &[0, 0, 0], 0.0, 0.2);
+        assert!(
+            (logits[0] - 1.4).abs() < 1e-6,
+            "seen token 0 reduced by count * frequency penalty"
+        );
+        assert!((logits[1] - 1.0).abs() < 1e-6, "unseen token 1 unchanged");
+    }
+
+    #[test]
+    fn presence_and_frequency_combine() {
+        let mut logits = vec![5.0f32];
+        // Token 0 twice: presence -0.5 once, frequency -2 * 0.3 = -0.6 => 5.0 - 1.1 = 3.9.
+        apply_presence_frequency_penalty(&mut logits, &[0, 0], 0.5, 0.3);
+        assert!(
+            (logits[0] - 3.9).abs() < 1e-6,
+            "presence + frequency should both apply: got {}",
+            logits[0]
+        );
+    }
+
+    #[test]
+    fn presence_frequency_penalty_empty_tokens_is_noop() {
+        let mut logits = vec![1.0f32, 2.0];
+        let original = logits.clone();
+        apply_presence_frequency_penalty(&mut logits, &[], 1.0, 1.0);
+        assert_eq!(
+            logits, original,
+            "no generated tokens => no penalty applied"
+        );
     }
 }

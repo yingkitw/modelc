@@ -9,15 +9,7 @@ fn config(max_tokens: usize) -> GenerationConfig {
     GenerationConfig {
         max_tokens,
         temperature: 0.0,
-        top_p: 0.0,
-        gamma: 0,
-        use_int8_kv: false,
-        use_mixed_kv: false,
-        constraint: None,
-        max_context: None,
-        anchor_tokens: 0,
-        stop: vec![],
-        seed: None,
+        ..GenerationConfig::default()
     }
 }
 
@@ -52,7 +44,10 @@ fn cache_is_transparent_for_identical_prompt() {
         Some(&mut cache),
         None,
     );
-    assert_eq!(cold, baseline, "cold (miss) output must match the no-cache baseline");
+    assert_eq!(
+        cold, baseline,
+        "cold (miss) output must match the no-cache baseline"
+    );
     assert_eq!(cache.len(), 1, "cold call should populate the cache");
 
     // With a warm cache (exact hit → reuses KV + stored logits).
@@ -66,7 +61,10 @@ fn cache_is_transparent_for_identical_prompt() {
         Some(&mut cache),
         None,
     );
-    assert_eq!(warm, baseline, "warm (hit) output must match the no-cache baseline");
+    assert_eq!(
+        warm, baseline,
+        "warm (hit) output must match the no-cache baseline"
+    );
     assert_eq!(cache.len(), 1, "exact repeat should not grow the cache");
 }
 
@@ -160,7 +158,10 @@ fn cache_ignores_non_prefix_entries() {
         Some(&mut cache),
         None,
     );
-    assert_eq!(got, baseline, "unrelated prompt must produce its cold baseline");
+    assert_eq!(
+        got, baseline,
+        "unrelated prompt must produce its cold baseline"
+    );
     assert_eq!(cache.len(), 2);
 }
 
@@ -179,7 +180,15 @@ fn neural_draft_model_speculative_matches_non_speculative() {
 
     // Non-speculative baseline.
     let baseline_cfg = config(6);
-    let baseline = generate_token_ids(&runtime, "gpt2", hidden, &tokenizer, "hello", &baseline_cfg, None);
+    let baseline = generate_token_ids(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        "hello",
+        &baseline_cfg,
+        None,
+    );
 
     // Build a tiny draft model that always proposes token 0 (the most common
     // fallback).  Because the draft will almost always be rejected, the
@@ -211,5 +220,8 @@ fn neural_draft_model_speculative_matches_non_speculative() {
         draft.as_ref().map(|d| d as &dyn modelc::draft::DraftModel),
     );
 
-    assert_eq!(spec, baseline, "speculative with draft must match non-speculative baseline");
+    assert_eq!(
+        spec, baseline,
+        "speculative with draft must match non-speculative baseline"
+    );
 }

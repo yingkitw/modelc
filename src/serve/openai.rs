@@ -3,8 +3,8 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::{Json, extract::State, response::sse::Event};
 use axum::response::{IntoResponse, Sse};
+use axum::{Json, extract::State, response::sse::Event};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -62,6 +62,10 @@ pub(super) struct ChatCompletionRequest {
     temperature: Option<f32>,
     #[serde(default)]
     top_p: Option<f32>,
+    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
+    /// least `min_p` fraction of the max probability.
+    #[serde(default)]
+    min_p: Option<f32>,
     /// Whether to return log probabilities of the output tokens.
     #[serde(default)]
     logprobs: Option<bool>,
@@ -80,6 +84,15 @@ pub(super) struct ChatCompletionRequest {
     /// Optional seed for reproducible sampling.
     #[serde(default)]
     seed: Option<u64>,
+    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
+    #[serde(default)]
+    repetition_penalty: Option<f32>,
+    /// OpenAI-style presence penalty. Positive values discourage token reuse.
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    /// OpenAI-style frequency penalty. Scales with token occurrence count.
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -247,22 +260,40 @@ pub(super) async fn chat_completion(
                     .unwrap_or_default()
             });
 
-    let constraint = req.grammar.and_then(|pat| {
-        crate::constraint::RegexConstraint::new(&pat)
-            .map(|c| std::sync::Arc::new(c) as std::sync::Arc<dyn crate::constraint::Constraint>)
-    }).or_else(|| state.generation.constraint.clone());
+    let constraint = req
+        .grammar
+        .and_then(|pat| {
+            crate::constraint::RegexConstraint::new(&pat).map(|c| {
+                std::sync::Arc::new(c) as std::sync::Arc<dyn crate::constraint::Constraint>
+            })
+        })
+        .or_else(|| state.generation.constraint.clone());
     let gen_cfg = crate::generate::GenerationConfig {
         max_tokens: req.max_tokens.unwrap_or(state.generation.max_tokens),
         temperature: req.temperature.unwrap_or(state.generation.temperature),
         top_p: req.top_p.unwrap_or(state.generation.top_p),
+        min_p: req.min_p.unwrap_or(state.generation.min_p),
         gamma: state.generation.gamma,
         use_int8_kv: state.generation.use_int8_kv,
         use_mixed_kv: state.generation.use_mixed_kv,
         constraint,
         max_context: state.generation.max_context,
         anchor_tokens: state.generation.anchor_tokens,
-        stop: if req.stop.is_empty() { state.generation.stop.clone() } else { req.stop },
+        stop: if req.stop.is_empty() {
+            state.generation.stop.clone()
+        } else {
+            req.stop
+        },
         seed: req.seed.or(state.generation.seed),
+        repetition_penalty: req
+            .repetition_penalty
+            .unwrap_or(state.generation.repetition_penalty),
+        presence_penalty: req
+            .presence_penalty
+            .unwrap_or(state.generation.presence_penalty),
+        frequency_penalty: req
+            .frequency_penalty
+            .unwrap_or(state.generation.frequency_penalty),
     };
 
     let model_name = if req.model.is_empty() {
@@ -279,7 +310,8 @@ pub(super) async fn chat_completion(
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
         let state_clone = Arc::clone(&state);
         tokio::spawn(async move {
-            let token_ids = super::infer::run_text_inference_token_ids(&state_clone, &prompt, &gen_cfg);
+            let token_ids =
+                super::infer::run_text_inference_token_ids(&state_clone, &prompt, &gen_cfg);
             let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
             let prompt_ids = tokenizer.encode(&prompt);
             let mut prev_text = String::new();
@@ -298,15 +330,21 @@ pub(super) async fn chat_completion(
                             choices: vec![ChunkChoice {
                                 index: 0,
                                 delta: ChunkDelta {
-                                    role: if first { Some("assistant".to_string()) } else { None },
+                                    role: if first {
+                                        Some("assistant".to_string())
+                                    } else {
+                                        None
+                                    },
                                     content: Some(delta.to_string()),
                                 },
                                 finish_reason: None,
                             }],
                         };
-                        let _ = tx.send(Ok(Event::default().data(
-                            serde_json::to_string(&chunk).unwrap()
-                        ))).await;
+                        let _ = tx
+                            .send(Ok(
+                                Event::default().data(serde_json::to_string(&chunk).unwrap())
+                            ))
+                            .await;
                         first = false;
                     }
                     prev_text = text;
@@ -325,9 +363,11 @@ pub(super) async fn chat_completion(
                     finish_reason: Some("stop"),
                 }],
             };
-            let _ = tx.send(Ok(Event::default().data(
-                serde_json::to_string(&final_chunk).unwrap()
-            ))).await;
+            let _ = tx
+                .send(Ok(
+                    Event::default().data(serde_json::to_string(&final_chunk).unwrap())
+                ))
+                .await;
             // OpenAI streams end with [DONE].
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
         });
@@ -426,7 +466,8 @@ pub(super) async fn chat_completion(
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
         },
-    }).into_response()
+    })
+    .into_response()
 }
 
 fn extract_content(raw: &str, is_json_mode: bool) -> String {
@@ -492,6 +533,10 @@ pub(super) struct CompletionRequest {
     temperature: Option<f32>,
     #[serde(default)]
     top_p: Option<f32>,
+    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
+    /// least `min_p` fraction of the max probability.
+    #[serde(default)]
+    min_p: Option<f32>,
     /// Whether to return log probabilities of the output tokens.
     #[serde(default)]
     logprobs: Option<bool>,
@@ -507,6 +552,15 @@ pub(super) struct CompletionRequest {
     /// Optional seed for reproducible sampling.
     #[serde(default)]
     seed: Option<u64>,
+    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
+    #[serde(default)]
+    repetition_penalty: Option<f32>,
+    /// OpenAI-style presence penalty. Positive values discourage token reuse.
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    /// OpenAI-style frequency penalty. Scales with token occurrence count.
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
     #[serde(default)]
     stream: bool,
 }
@@ -553,22 +607,40 @@ pub(super) async fn completions(
     let _timer = super::metrics::InferenceTimer::new(&state.metrics);
     let stream = req.stream;
 
-    let constraint = req.grammar.and_then(|pat| {
-        crate::constraint::RegexConstraint::new(&pat)
-            .map(|c| std::sync::Arc::new(c) as std::sync::Arc<dyn crate::constraint::Constraint>)
-    }).or_else(|| state.generation.constraint.clone());
+    let constraint = req
+        .grammar
+        .and_then(|pat| {
+            crate::constraint::RegexConstraint::new(&pat).map(|c| {
+                std::sync::Arc::new(c) as std::sync::Arc<dyn crate::constraint::Constraint>
+            })
+        })
+        .or_else(|| state.generation.constraint.clone());
     let gen_cfg = crate::generate::GenerationConfig {
         max_tokens: req.max_tokens.unwrap_or(state.generation.max_tokens),
         temperature: req.temperature.unwrap_or(state.generation.temperature),
         top_p: req.top_p.unwrap_or(state.generation.top_p),
+        min_p: req.min_p.unwrap_or(state.generation.min_p),
         gamma: state.generation.gamma,
         use_int8_kv: state.generation.use_int8_kv,
         use_mixed_kv: state.generation.use_mixed_kv,
         constraint,
         max_context: state.generation.max_context,
         anchor_tokens: state.generation.anchor_tokens,
-        stop: if req.stop.is_empty() { state.generation.stop.clone() } else { req.stop },
+        stop: if req.stop.is_empty() {
+            state.generation.stop.clone()
+        } else {
+            req.stop
+        },
         seed: req.seed.or(state.generation.seed),
+        repetition_penalty: req
+            .repetition_penalty
+            .unwrap_or(state.generation.repetition_penalty),
+        presence_penalty: req
+            .presence_penalty
+            .unwrap_or(state.generation.presence_penalty),
+        frequency_penalty: req
+            .frequency_penalty
+            .unwrap_or(state.generation.frequency_penalty),
     };
 
     let model_name = if req.model.is_empty() {
@@ -586,7 +658,8 @@ pub(super) async fn completions(
         let state_clone = Arc::clone(&state);
         let prompt_clone = req.prompt.clone();
         tokio::spawn(async move {
-            let token_ids = super::infer::run_text_inference_token_ids(&state_clone, &prompt_clone, &gen_cfg);
+            let token_ids =
+                super::infer::run_text_inference_token_ids(&state_clone, &prompt_clone, &gen_cfg);
             let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
             let prompt_ids = tokenizer.encode(&prompt_clone);
             let mut prev_text = String::new();
@@ -607,9 +680,11 @@ pub(super) async fn completions(
                                 finish_reason: None,
                             }],
                         };
-                        let _ = tx.send(Ok(Event::default().data(
-                            serde_json::to_string(&chunk).unwrap()
-                        ))).await;
+                        let _ = tx
+                            .send(Ok(
+                                Event::default().data(serde_json::to_string(&chunk).unwrap())
+                            ))
+                            .await;
                     }
                     prev_text = text;
                 }
@@ -626,9 +701,11 @@ pub(super) async fn completions(
                     finish_reason: Some("stop"),
                 }],
             };
-            let _ = tx.send(Ok(Event::default().data(
-                serde_json::to_string(&final_chunk).unwrap()
-            ))).await;
+            let _ = tx
+                .send(Ok(
+                    Event::default().data(serde_json::to_string(&final_chunk).unwrap())
+                ))
+                .await;
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
         });
 
@@ -651,7 +728,12 @@ pub(super) async fn completions(
             }
             None => {
                 let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
-                (text, Some(Logprobs { content: Vec::new() }))
+                (
+                    text,
+                    Some(Logprobs {
+                        content: Vec::new(),
+                    }),
+                )
             }
         }
     } else {
@@ -679,7 +761,8 @@ pub(super) async fn completions(
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
         },
-    }).into_response()
+    })
+    .into_response()
 }
 
 /// Build a system prompt that describes available tools to the model.

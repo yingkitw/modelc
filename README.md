@@ -144,6 +144,10 @@ From the built artifact in this repository (no install):
 - **`--temperature <T>`** — Sampling temperature (default `1.0`).
 - **`--max-tokens <N>`** — Max tokens to generate (default `256`).
 - **`--top-p <P>`** — Nucleus sampling threshold (default `0.0`, disabled).
+- **`--min-p <P>`** — Min-p sampling threshold (default `0.0`, disabled).
+- **`--repetition-penalty <F>`** — Multiplicative repetition penalty (default `1.0`, disabled).
+- **`--presence-penalty <F>`** — OpenAI-style presence penalty (default `0.0`, disabled).
+- **`--frequency-penalty <F>`** — OpenAI-style frequency penalty (default `0.0`, disabled).
 - **`--grammar <pattern>`** — Regex grammar constraint applied during sampling.
 - **`--profile`** — Print per-step inference timing.
 
@@ -244,6 +248,8 @@ Before the first (`modelc`) publish:
 - **EAGLE3 / neural speculative decoding** — `src/draft.rs` introduces a `DraftModel` trait and an `MlpDraftModel`: a tiny 2-layer MLP (embedding → FC1 + ReLU → FC2 → logits) that is orders of magnitude faster than the full transformer. Falls back to n-gram draft when no neural draft tensors are present. Wired into all serve endpoints automatically.
 - **API key authentication + rate limiting** — `modelc run` accepts `--api-key <key>` (requires `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`) and `--rate-limit <N>` (max requests per minute per client IP). Returns standard HTTP status codes (`401 Unauthorized`, `429 Too Many Requests`).
 - **Stop sequences** — `GenerationConfig.stop` holds a list of strings that halt generation when any appear in the decoded output. Checked after each token; output is truncated to just before the matched sequence. Wired through all text generation endpoints.
+- **Repetition / presence / frequency penalties** — three sampling penalties discourage token reuse. `repetition_penalty` (multiplicative, transformers-style) and OpenAI-standard `presence_penalty` (once per seen token) / `frequency_penalty` (scales with count) adjust logits before sampling. Wired through all text-generation endpoints (`/chat`, `/complete`, `/v1/chat/completions`, `/v1/completions`) as optional request fields and the CLI (`--repetition-penalty`, `--presence-penalty`, `--frequency-penalty`). They share a fast path that skips the per-token allocation when all are at their defaults.
+- **Min-p sampling** — `min_p` keeps only tokens whose probability is at least `min_p` fraction of the max probability, then renormalizes. The threshold scales with the model's confidence per step, making it simpler and often more effective than top-p (nucleus). Can combine with `top_p` (min-p runs after). Wired through all text-generation endpoints as `min_p` and the CLI (`--min-p`).
 
 ## Repository layout
 

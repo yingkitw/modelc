@@ -16,6 +16,9 @@ pub struct BpeTokenizer {
     merge_map: HashMap<(u32, u32), u32>,
     /// single-byte → token_id (for initial encoding)
     byte_to_id: HashMap<u8, u32>,
+    /// Pre-computed token bytes for every vocab entry. Avoids rebuilding this
+    /// Vec (50K small allocations) on every constrained sampling step.
+    token_bytes_cache: Vec<Option<Vec<u8>>>,
 }
 
 impl BpeTokenizer {
@@ -26,16 +29,19 @@ impl BpeTokenizer {
     pub fn new(vocab: Vec<Vec<u8>>, merges: Vec<(u32, u32, u32)>) -> Self {
         let merge_map = merges.iter().map(|(a, b, m)| ((*a, *b), *m)).collect();
         let mut byte_to_id = HashMap::new();
+        let mut token_bytes_cache = Vec::with_capacity(vocab.len());
         for (id, seq) in vocab.iter().enumerate() {
             if seq.len() == 1 {
                 byte_to_id.insert(seq[0], id as u32);
             }
+            token_bytes_cache.push(Some(seq.clone()));
         }
         Self {
             vocab,
             merges,
             merge_map,
             byte_to_id,
+            token_bytes_cache,
         }
     }
 
@@ -109,6 +115,12 @@ impl BpeTokenizer {
     /// Useful for emitting per-token `bytes` fields (e.g. OpenAI logprobs payloads).
     pub fn token_bytes(&self, id: u32) -> Option<&[u8]> {
         self.vocab.get(id as usize).map(Vec::as_slice)
+    }
+
+    /// Pre-computed `Option<Vec<u8>>` for every vocab entry.
+    /// Eliminates rebuilding this on every constrained sampling step.
+    pub fn cached_token_bytes(&self) -> &[Option<Vec<u8>>] {
+        &self.token_bytes_cache
     }
 
     /// Vocabulary size (number of distinct tokens).

@@ -141,22 +141,70 @@ pub enum Commands {
         #[arg(long, value_name = "N", help = "Default maximum tokens to generate")]
         max_tokens: Option<usize>,
 
-        #[arg(long, value_name = "FLOAT", help = "Default sampling temperature (0.0 = greedy)")]
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            help = "Default sampling temperature (0.0 = greedy)"
+        )]
         temperature: Option<f32>,
 
         #[arg(long, value_name = "N", help = "Random seed for reproducible sampling")]
         seed: Option<u64>,
 
-        #[arg(long, value_name = "N", help = "Maximum context length before KV cache shifting")]
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            help = "Repetition penalty. Values > 1.0 discourage token repetition"
+        )]
+        repetition_penalty: Option<f32>,
+
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            help = "OpenAI-style presence penalty (0.0 = disabled)"
+        )]
+        presence_penalty: Option<f32>,
+
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            help = "OpenAI-style frequency penalty (0.0 = disabled)"
+        )]
+        frequency_penalty: Option<f32>,
+
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            help = "Min-p sampling threshold (0.0 = disabled)"
+        )]
+        min_p: Option<f32>,
+
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Maximum context length before KV cache shifting"
+        )]
         max_context: Option<usize>,
 
-        #[arg(long, value_name = "N", help = "Number of initial anchor tokens to preserve during context shifting")]
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Number of initial anchor tokens to preserve during context shifting"
+        )]
         anchor_tokens: Option<usize>,
 
-        #[arg(long, value_name = "REGEX", help = "Default regex grammar constraint for all requests")]
+        #[arg(
+            long,
+            value_name = "REGEX",
+            help = "Default regex grammar constraint for all requests"
+        )]
         grammar: Option<String>,
 
-        #[arg(long, value_name = "KEY", help = "Require Bearer token authentication on all endpoints")]
+        #[arg(
+            long,
+            value_name = "KEY",
+            help = "Require Bearer token authentication on all endpoints"
+        )]
         api_key: Option<String>,
 
         #[arg(

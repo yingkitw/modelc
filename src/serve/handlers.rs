@@ -151,9 +151,13 @@ pub(super) async fn chat(
         req.max_tokens,
         req.temperature,
         req.top_p,
+        req.min_p,
         req.grammar.clone(),
         req.stop.clone(),
         req.seed,
+        req.repetition_penalty,
+        req.presence_penalty,
+        req.frequency_penalty,
     );
     let output = if let Some(ref schema) = req.json_schema {
         crate::json_schema::generate_with_schema(
@@ -184,9 +188,13 @@ pub(super) async fn complete(
         req.max_tokens,
         req.temperature,
         req.top_p,
+        req.min_p,
         req.grammar.clone(),
         req.stop.clone(),
         req.seed,
+        req.repetition_penalty,
+        req.presence_penalty,
+        req.frequency_penalty,
     );
     let output = if let Some(ref schema) = req.json_schema {
         crate::json_schema::generate_with_schema(
@@ -226,9 +234,13 @@ pub(super) async fn chat_stream(
         req.max_tokens,
         req.temperature,
         req.top_p,
+        req.min_p,
         req.grammar.clone(),
         req.stop.clone(),
         req.seed,
+        req.repetition_penalty,
+        req.presence_penalty,
+        req.frequency_penalty,
     );
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
@@ -273,14 +285,19 @@ pub(super) async fn chat_stream(
 }
 
 /// Build a generation config, applying per-request overrides on top of server defaults.
+#[allow(clippy::too_many_arguments)]
 fn make_generation_config(
     base: &crate::generate::GenerationConfig,
     max_tokens: Option<usize>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    min_p: Option<f32>,
     grammar: Option<String>,
     stop: Vec<String>,
     seed: Option<u64>,
+    repetition_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
+    frequency_penalty: Option<f32>,
 ) -> crate::generate::GenerationConfig {
     let constraint = grammar.and_then(|pat| {
         crate::constraint::RegexConstraint::new(&pat)
@@ -290,14 +307,22 @@ fn make_generation_config(
         max_tokens: max_tokens.unwrap_or(base.max_tokens),
         temperature: temperature.unwrap_or(base.temperature),
         top_p: top_p.unwrap_or(base.top_p),
+        min_p: min_p.unwrap_or(base.min_p),
         gamma: base.gamma,
         use_int8_kv: base.use_int8_kv,
         use_mixed_kv: base.use_mixed_kv,
         constraint: constraint.or_else(|| base.constraint.clone()),
         max_context: base.max_context,
         anchor_tokens: base.anchor_tokens,
-        stop: if stop.is_empty() { base.stop.clone() } else { stop },
+        stop: if stop.is_empty() {
+            base.stop.clone()
+        } else {
+            stop
+        },
         seed: seed.or(base.seed),
+        repetition_penalty: repetition_penalty.unwrap_or(base.repetition_penalty),
+        presence_penalty: presence_penalty.unwrap_or(base.presence_penalty),
+        frequency_penalty: frequency_penalty.unwrap_or(base.frequency_penalty),
     }
 }
 
@@ -331,9 +356,7 @@ pub(super) async fn lora_load(
     }
 }
 
-pub(super) async fn lora_unload(
-    State(state): State<Arc<AppState>>,
-) -> Json<LoraUnloadResponse> {
+pub(super) async fn lora_unload(State(state): State<Arc<AppState>>) -> Json<LoraUnloadResponse> {
     let mut runtime = state.runtime.write().expect("runtime lock poisoned");
     *runtime = crate::runtime::serve::Runtime::from_raw(&state.base_tensors);
     Json(LoraUnloadResponse {
@@ -341,7 +364,9 @@ pub(super) async fn lora_unload(
     })
 }
 
-pub(super) async fn metrics_handler(State(state): State<Arc<AppState>>) -> axum::response::Response<String> {
+pub(super) async fn metrics_handler(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response<String> {
     let body = state.metrics.render();
     axum::response::Response::builder()
         .header("Content-Type", "text/plain; version=0.0.4")
