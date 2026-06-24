@@ -2,12 +2,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Router,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tokio_stream::Stream;
 
 use crate::model::Model;
 use crate::runtime::serve::Runtime;
@@ -17,6 +19,40 @@ mod handlers;
 mod infer;
 mod metrics;
 mod openai;
+
+/// A `Stream` wrapper that sets a cancellation flag when dropped.
+///
+/// Used by the SSE streaming endpoints: when the client disconnects, axum drops
+/// the response body (and thus this stream), which trips the flag. The spawned
+/// generation task checks the flag once per token via `GenerationConfig.cancel`
+/// and stops early instead of running to completion.
+pub(super) struct CancelOnDrop<S> {
+    inner: S,
+    cancel: Arc<AtomicBool>,
+}
+
+impl<S> CancelOnDrop<S> {
+    pub(super) fn new(inner: S, cancel: Arc<AtomicBool>) -> Self {
+        Self { inner, cancel }
+    }
+}
+
+impl<S: Stream + Unpin> Stream for CancelOnDrop<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl<S> Drop for CancelOnDrop<S> {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
 
 pub async fn run_server(
     model: Model,
@@ -471,4 +507,32 @@ fn transformer_hidden_dim(model: &Model) -> Option<usize> {
         _ => return None,
     };
     (hidden > 0).then_some(hidden)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::sse::Event;
+
+    /// Dropping the wrapped stream must trip the cancellation flag so the spawned
+    /// generation task stops early.
+    #[test]
+    fn cancel_on_drop_sets_flag() {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(4);
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let _wrapped = CancelOnDrop::new(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+                cancel.clone(),
+            );
+            assert!(
+                !cancel.load(Ordering::Relaxed),
+                "flag clear while stream alive"
+            );
+        }
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "flag must be set after the stream is dropped"
+        );
+    }
 }

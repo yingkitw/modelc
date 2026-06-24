@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::AppState;
+use super::CancelOnDrop;
 use super::infer::{run_text_inference_with_config, run_text_inference_with_logprobs};
 
 // ---------------------------------------------------------------------------
@@ -294,6 +295,7 @@ pub(super) async fn chat_completion(
         frequency_penalty: req
             .frequency_penalty
             .unwrap_or(state.generation.frequency_penalty),
+        cancel: None,
     };
 
     let model_name = if req.model.is_empty() {
@@ -309,6 +311,10 @@ pub(super) async fn chat_completion(
     if stream {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
         let state_clone = Arc::clone(&state);
+        // Cancellation flag: set when the SSE client disconnects (stream dropped).
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut gen_cfg = gen_cfg;
+        gen_cfg.cancel = Some(cancel.clone());
         tokio::spawn(async move {
             let token_ids =
                 super::infer::run_text_inference_token_ids(&state_clone, &prompt, &gen_cfg);
@@ -340,11 +346,17 @@ pub(super) async fn chat_completion(
                                 finish_reason: None,
                             }],
                         };
-                        let _ = tx
+                        // If the client is gone, stop dripping (generation has already
+                        // been cancelled via the flag).
+                        if tx
                             .send(Ok(
                                 Event::default().data(serde_json::to_string(&chunk).unwrap())
                             ))
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                         first = false;
                     }
                     prev_text = text;
@@ -372,7 +384,7 @@ pub(super) async fn chat_completion(
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
         });
 
-        return Sse::new(ReceiverStream::new(rx)).into_response();
+        return Sse::new(CancelOnDrop::new(ReceiverStream::new(rx), cancel)).into_response();
     }
 
     // ------------------------------------------------------------------
@@ -641,6 +653,7 @@ pub(super) async fn completions(
         frequency_penalty: req
             .frequency_penalty
             .unwrap_or(state.generation.frequency_penalty),
+        cancel: None,
     };
 
     let model_name = if req.model.is_empty() {
@@ -657,6 +670,10 @@ pub(super) async fn completions(
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
         let state_clone = Arc::clone(&state);
         let prompt_clone = req.prompt.clone();
+        // Cancellation flag: set when the SSE client disconnects (stream dropped).
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut gen_cfg = gen_cfg;
+        gen_cfg.cancel = Some(cancel.clone());
         tokio::spawn(async move {
             let token_ids =
                 super::infer::run_text_inference_token_ids(&state_clone, &prompt_clone, &gen_cfg);
@@ -680,11 +697,15 @@ pub(super) async fn completions(
                                 finish_reason: None,
                             }],
                         };
-                        let _ = tx
+                        if tx
                             .send(Ok(
                                 Event::default().data(serde_json::to_string(&chunk).unwrap())
                             ))
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     prev_text = text;
                 }
@@ -709,7 +730,7 @@ pub(super) async fn completions(
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
         });
 
-        return Sse::new(ReceiverStream::new(rx)).into_response();
+        return Sse::new(CancelOnDrop::new(ReceiverStream::new(rx), cancel)).into_response();
     }
 
     // ------------------------------------------------------------------

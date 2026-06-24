@@ -13,10 +13,10 @@ use super::infer::{
     run_text_inference_with_config,
 };
 use super::{
-    AppState, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse, EmbeddingEntry,
-    EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest, InferResponse,
-    LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo, StreamChunk,
-    SystemInfo, TokenizeRequest, TokenizeResponse,
+    AppState, CancelOnDrop, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse,
+    EmbeddingEntry, EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest,
+    InferResponse, LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo,
+    StreamChunk, SystemInfo, TokenizeRequest, TokenizeResponse,
 };
 
 pub(super) async fn infer(
@@ -295,7 +295,7 @@ pub(super) async fn complete(
 pub(super) async fn chat_stream(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
-) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+) -> Sse<CancelOnDrop<ReceiverStream<Result<Event, Infallible>>>> {
     let messages: Vec<crate::chat_template::ChatMessage> = req
         .messages
         .iter()
@@ -312,7 +312,7 @@ pub(super) async fn chat_stream(
                     .map(|m| m.content.clone())
                     .unwrap_or_default()
             });
-    let gen_cfg = make_generation_config(
+    let mut gen_cfg = make_generation_config(
         &state.generation,
         req.max_tokens,
         req.temperature,
@@ -325,6 +325,10 @@ pub(super) async fn chat_stream(
         req.presence_penalty,
         req.frequency_penalty,
     );
+
+    // Cancellation flag: set when the SSE client disconnects (stream dropped).
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    gen_cfg.cancel = Some(cancel.clone());
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
 
@@ -339,15 +343,15 @@ pub(super) async fn chat_stream(
             let text = tokenizer.decode(&cumulative);
             if let Some(delta) = text.strip_prefix(&prev_text) {
                 if !delta.is_empty() {
-                    let _ = tx
-                        .send(Ok(Event::default().data(
-                            serde_json::to_string(&StreamChunk {
-                                delta: delta.to_string(),
-                                done: false,
-                            })
-                            .unwrap(),
-                        )))
-                        .await;
+                    let chunk = serde_json::to_string(&StreamChunk {
+                        delta: delta.to_string(),
+                        done: false,
+                    })
+                    .unwrap();
+                    // Stop dripping once the client is gone.
+                    if tx.send(Ok(Event::default().data(chunk))).await.is_err() {
+                        break;
+                    }
                 }
                 prev_text = text;
             }
@@ -364,7 +368,7 @@ pub(super) async fn chat_stream(
             .await;
     });
 
-    Sse::new(ReceiverStream::new(rx))
+    Sse::new(CancelOnDrop::new(ReceiverStream::new(rx), cancel))
 }
 
 /// Build a generation config, applying per-request overrides on top of server defaults.
@@ -406,6 +410,7 @@ fn make_generation_config(
         repetition_penalty: repetition_penalty.unwrap_or(base.repetition_penalty),
         presence_penalty: presence_penalty.unwrap_or(base.presence_penalty),
         frequency_penalty: frequency_penalty.unwrap_or(base.frequency_penalty),
+        cancel: None,
     }
 }
 

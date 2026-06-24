@@ -104,6 +104,20 @@ pub struct GenerationConfig {
     /// already appeared: subtracts `count * penalty` from the logit.
     /// Positive values strongly discourage repetition. 0.0 = disabled.
     pub frequency_penalty: f32,
+    /// Cooperative cancellation flag. When set, the generation loop stops after
+    /// the current token and returns what has been produced so far. Used to abort
+    /// generation when an HTTP/SSE client disconnects. `None` = never cancelled.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl GenerationConfig {
+    /// True when the generation loop should stop early. Checked once per token.
+    pub fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+    }
 }
 
 impl Clone for GenerationConfig {
@@ -124,6 +138,7 @@ impl Clone for GenerationConfig {
             repetition_penalty: self.repetition_penalty,
             presence_penalty: self.presence_penalty,
             frequency_penalty: self.frequency_penalty,
+            cancel: self.cancel.clone(),
         }
     }
 }
@@ -146,6 +161,7 @@ impl Default for GenerationConfig {
             repetition_penalty: 1.0,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
+            cancel: None,
         }
     }
 }
@@ -438,7 +454,7 @@ pub(crate) fn generate_core(
     let mut generated = 0usize;
     let mut logprobs: Vec<TokenLogprob> = Vec::new();
     loop {
-        if generated >= config.max_tokens {
+        if generated >= config.max_tokens || config.cancelled() {
             break;
         }
         let next_token = sample_constrained(
@@ -620,6 +636,9 @@ pub(crate) fn speculative_generate(
     }
 
     while token_ids.len() - prompt_len < config.max_tokens {
+        if config.cancelled() {
+            break;
+        }
         let draft = if let Some(dm) = draft_model {
             dm.draft(&token_ids, config.gamma)
         } else {
@@ -1236,6 +1255,24 @@ mod tests {
     fn most_frequent_picks_mode() {
         assert_eq!(most_frequent(&[1, 2, 2, 3, 2]), 2);
         assert_eq!(most_frequent(&[5]), 5);
+    }
+
+    #[test]
+    fn cancel_flag_defaults_to_not_cancelled() {
+        let config = GenerationConfig::default();
+        assert!(!config.cancelled(), "no cancel flag => not cancelled");
+    }
+
+    #[test]
+    fn cancel_flag_set_is_cancelled() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let config = GenerationConfig {
+            cancel: Some(flag.clone()),
+            ..GenerationConfig::default()
+        };
+        assert!(!config.cancelled(), "flag false => not cancelled");
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(config.cancelled(), "flag true => cancelled");
     }
 
     #[test]

@@ -256,6 +256,7 @@ Before the first (`modelc`) publish:
 - **Tokenize endpoint** — `POST /tokenize` returns token IDs and count for a prompt (single `input` or batch `inputs`), using the same byte-level BPE tokenizer as `/chat`. Standard in Ollama and llama.cpp server; useful for prompt budgeting and management.
 - **System info endpoint** — `GET /v1/system` exposes best-effort hardware info (CPU cores, OS, arch, pointer width, Metal availability, total memory) for orchestration and debugging. No added dependencies (stdlib + `/proc/meminfo`/`sysctl`).
 - **Quantization size preview** — `modelc inspect --quant-sizes` previews the artifact size under each format (fp32/fp16/int8/int4/q4_0) and the savings vs the current size, without actually quantizing. Computed from element counts, so it's accurate regardless of current dtype.
+- **Request cancellation on disconnect** — when an SSE streaming client (`/chat/stream`, `/v1/chat/completions`, `/v1/completions` with `stream: true`) disconnects, the server trips a cooperative cancel flag checked once per token, aborting the generation loop instead of running to completion. Saves CPU when users stop a response mid-stream.
 
 ## Repository layout
 

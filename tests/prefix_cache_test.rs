@@ -225,3 +225,47 @@ fn neural_draft_model_speculative_matches_non_speculative() {
         "speculative with draft must match non-speculative baseline"
     );
 }
+
+/// A pre-tripped cancellation flag must stop generation before the first token,
+/// proving the loop honors the flag each iteration.
+#[test]
+fn cancellation_flag_stops_generation() {
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+    let prompt = "system: you are helpful. user: hello";
+
+    // Baseline: uncancelled generation produces tokens up to max_tokens.
+    let cfg = config(8);
+    let baseline = generate_token_ids(&runtime, "gpt2", hidden, &tokenizer, prompt, &cfg, None);
+    assert!(
+        !baseline.is_empty(),
+        "uncancelled generation should produce tokens"
+    );
+
+    // With the cancel flag pre-set, the loop bails immediately → no tokens.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let cancelled_cfg = GenerationConfig {
+        cancel: Some(cancel),
+        ..config(8)
+    };
+    let ids = generate_token_ids(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        prompt,
+        &cancelled_cfg,
+        None,
+    );
+    assert!(
+        ids.is_empty(),
+        "cancelled generation should produce no tokens, got {}",
+        ids.len()
+    );
+}
