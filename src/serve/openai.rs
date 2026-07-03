@@ -583,6 +583,15 @@ pub(super) struct CompletionRequest {
     /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
     #[serde(default)]
     logit_bias: Option<HashMap<u32, f32>>,
+    /// Echo back the prompt in addition to the completion.
+    #[serde(default)]
+    echo: Option<bool>,
+    /// How many completions to generate. Defaults to 1.
+    #[serde(default)]
+    n: Option<u32>,
+    /// Optional suffix — text to append after the generated completion.
+    #[serde(default)]
+    suffix: Option<String>,
     #[serde(default)]
     stream: bool,
 }
@@ -687,12 +696,41 @@ pub(super) async fn completions(
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut gen_cfg = gen_cfg;
         gen_cfg.cancel = Some(cancel.clone());
+        let echo_prompt = req.echo.unwrap_or(false);
         tokio::spawn(async move {
+            // When echo is true, emit the prompt as the first chunk.
+            if echo_prompt && !prompt_clone.is_empty() {
+                let chunk = CompletionChunk {
+                    id: id.clone(),
+                    object: "text_completion",
+                    created: 0,
+                    model: model_name.clone(),
+                    choices: vec![CompletionChunkChoice {
+                        index: 0,
+                        text: prompt_clone.clone(),
+                        finish_reason: None,
+                    }],
+                };
+                if tx
+                    .send(Ok(
+                        Event::default().data(serde_json::to_string(&chunk).unwrap())
+                    ))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
             let token_ids =
                 super::infer::run_text_inference_token_ids(&state_clone, &prompt_clone, &gen_cfg);
             let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
             let prompt_ids = tokenizer.encode(&prompt_clone);
-            let mut prev_text = String::new();
+            let mut prev_text = if echo_prompt {
+                prompt_clone.clone()
+            } else {
+                String::new()
+            };
 
             for (idx, &_token_id) in token_ids.iter().enumerate() {
                 let cumulative = [prompt_ids.as_slice(), &token_ids[..=idx]].concat();
@@ -751,49 +789,58 @@ pub(super) async fn completions(
     // ------------------------------------------------------------------
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_n = req.top_logprobs.unwrap_or(0).min(20) as usize;
+    let n = req.n.unwrap_or(1).max(1).min(20) as usize;
+    let echo_prompt = req.echo.unwrap_or(false);
+    let suffix = req.suffix.as_deref().unwrap_or("");
 
-    let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
-        match run_text_inference_with_logprobs(&state, &req.prompt, &gen_cfg, top_n) {
-            Some((ids, lps)) => {
-                let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
-                let text = tokenizer.decode(&ids);
-                let content = build_logprobs_content(&tokenizer, &lps);
-                (text, Some(Logprobs { content }))
-            }
-            None => {
-                let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
-                (
-                    text,
-                    Some(Logprobs {
-                        content: Vec::new(),
-                    }),
-                )
-            }
-        }
-    } else {
-        let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
-        (text, None)
-    };
-
+    let mut choices: Vec<CompletionChoice> = Vec::with_capacity(n);
+    let mut total_completion_tokens = 0usize;
     let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
     let prompt_tokens = tokenizer.encode(&req.prompt).len();
-    let completion_tokens = tokenizer.encode(&raw_output).len();
+
+    for i in 0..n {
+        let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
+            match run_text_inference_with_logprobs(&state, &req.prompt, &gen_cfg, top_n) {
+                Some((ids, lps)) => {
+                    let text = tokenizer.decode(&ids);
+                    let content = build_logprobs_content(&tokenizer, &lps);
+                    (text, Some(Logprobs { content }))
+                }
+                None => {
+                    let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
+                    (text, Some(Logprobs { content: Vec::new() }))
+                }
+            }
+        } else {
+            let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
+            (text, None)
+        };
+
+        let display_text = if echo_prompt {
+            format!("{}{}{}", req.prompt, raw_output, suffix)
+        } else {
+            format!("{}{}", raw_output, suffix)
+        };
+        total_completion_tokens += tokenizer.encode(&display_text).len();
+
+        choices.push(CompletionChoice {
+            index: i,
+            text: display_text,
+            finish_reason: "stop",
+            logprobs: logprobs_field,
+        });
+    }
 
     Json(CompletionResponse {
         id,
         object: "text_completion",
         created: 0,
         model: model_name,
-        choices: vec![CompletionChoice {
-            index: 0,
-            text: raw_output,
-            finish_reason: "stop",
-            logprobs: logprobs_field,
-        }],
+        choices,
         usage: Usage {
             prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens: total_completion_tokens,
+            total_tokens: prompt_tokens + total_completion_tokens,
         },
     })
     .into_response()

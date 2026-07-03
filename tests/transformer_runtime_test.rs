@@ -711,6 +711,82 @@ async fn run_server_serves_openai_completions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_echo() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "prompt": "hello",
+        "max_tokens": 4,
+        "echo": true
+    });
+    let val = post_json(&format!("{base}/v1/completions"), &body);
+    let text = val["choices"][0]["text"].as_str().expect("should have text");
+    assert!(
+        text.starts_with("hello"),
+        "echo=true should prepend prompt to completion, got: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_n() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "prompt": "hello",
+        "max_tokens": 4,
+        "n": 3
+    });
+    let val = post_json(&format!("{base}/v1/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(choices.len(), 3, "n=3 should produce 3 choices");
+    for (i, choice) in choices.iter().enumerate() {
+        assert_eq!(
+            choice["index"].as_i64(),
+            Some(i as i64),
+            "choice index should match"
+        );
+        assert!(
+            choice["text"].as_str().is_some(),
+            "each choice should have text"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_server_api_key_rejects_unauthenticated() {
     let model = common::create_gpt2_test_model();
     let addr = ephemeral_addr();
@@ -1045,5 +1121,121 @@ async fn run_server_serves_api_version() {
     assert!(
         val["git_sha"].as_str().is_some(),
         "git_sha should be present"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_props() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = ureq::get(&format!("{base}/props"))
+        .call()
+        .expect("props request should succeed");
+    let bytes = read_body(resp).expect("read body");
+    let val: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+    assert!(
+        val["model"].as_str().is_some(),
+        "model should be present"
+    );
+    assert!(
+        val["architecture"].as_str().is_some(),
+        "architecture should be present"
+    );
+    assert!(
+        val["total_params"].is_number(),
+        "total_params should be present"
+    );
+    assert!(
+        val["default_generation"]["max_tokens"].is_number(),
+        "default_generation.max_tokens should be present"
+    );
+    assert!(
+        val["default_generation"]["temperature"].is_number(),
+        "default_generation.temperature should be present"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_detokenize() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // First tokenize to get valid token IDs, then detokenize to verify round-trip.
+    let tok_body = serde_json::json!({ "input": "hello" });
+    let tok_val = post_json(&format!("{base}/tokenize"), &tok_body);
+    let tokens = tok_val["tokens"].as_array().expect("tokens should be array");
+    assert!(!tokens.is_empty(), "should have at least one token");
+
+    let detok_body = serde_json::json!({ "tokens": tokens });
+    let detok_val = post_json(&format!("{base}/detokenize"), &detok_body);
+    let text = detok_val["text"].as_str().expect("text should be present");
+    assert!(
+        text.contains("hello"),
+        "detokenized text should contain original input, got: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_suffix() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "prompt": "hello",
+        "max_tokens": 4,
+        "suffix": " END"
+    });
+    let val = post_json(&format!("{base}/v1/completions"), &body);
+    let text = val["choices"][0]["text"].as_str().expect("should have text");
+    assert!(
+        text.ends_with(" END"),
+        "suffix should be appended to completion, got: {text}"
     );
 }

@@ -70,14 +70,14 @@ impl TokenBucket {
 }
 
 /// Axum middleware that checks API key and rate limit.
-/// /health and /info are exempt so load-balancer probes work without auth.
+/// /health, /info, and /props are exempt so load-balancer probes work without auth.
 pub async fn middleware(
     axum::extract::State(config): axum::extract::State<AuthConfig>,
     req: Request,
     next: Next,
 ) -> Response {
     let path = req.uri().path();
-    if path == "/health" || path == "/info" {
+    if path == "/health" || path == "/info" || path == "/props" {
         return next.run(req).await;
     }
 

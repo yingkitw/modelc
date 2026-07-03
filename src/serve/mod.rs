@@ -210,6 +210,7 @@ fn build_router(
     let router = Router::new()
         .route("/infer", post(handlers::infer))
         .route("/info", get(handlers::model_info))
+        .route("/props", get(handlers::server_props))
         .route("/api/version", get(handlers::version_info))
         .route("/health", get(handlers::health))
         .route("/chat", post(handlers::chat))
@@ -217,6 +218,7 @@ fn build_router(
         .route("/complete", post(handlers::complete))
         .route("/embeddings", post(handlers::embeddings))
         .route("/tokenize", post(handlers::tokenize))
+        .route("/detokenize", post(handlers::detokenize))
         .route("/metrics", get(handlers::metrics_handler))
         .route("/v1/models", get(openai::list_models))
         .route("/v1/system", get(handlers::system_info))
@@ -278,7 +280,7 @@ async fn backpressure_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = req.uri().path();
-    if path == "/health" || path == "/info" || path == "/metrics" {
+    if path == "/health" || path == "/info" || path == "/props" || path == "/metrics" {
         return next.run(req).await;
     }
 
@@ -353,6 +355,28 @@ struct ModelInfo {
 }
 
 #[derive(Serialize)]
+struct ServerProps {
+    model: String,
+    architecture: String,
+    total_params: usize,
+    total_bytes: usize,
+    chat_template: Option<String>,
+    default_generation: DefaultGenerationProps,
+}
+
+#[derive(Serialize)]
+struct DefaultGenerationProps {
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    min_p: f32,
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    gamma: usize,
+}
+
+#[derive(Serialize)]
 struct VersionInfo {
     version: String,
     git_sha: String,
@@ -374,6 +398,17 @@ struct TokenizeResponse {
     tokens_batch: Option<Vec<Vec<u32>>>,
     /// Total number of tokens across all inputs.
     count: usize,
+}
+
+#[derive(Deserialize)]
+struct DetokenizeRequest {
+    #[serde(default)]
+    tokens: Vec<u32>,
+}
+
+#[derive(Serialize)]
+struct DetokenizeResponse {
+    text: String,
 }
 
 /// System/hardware info exposed by `GET /v1/system`.

@@ -15,8 +15,9 @@ use super::infer::{
 };
 use super::{
     AppState, CancelOnDrop, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse,
-    EmbeddingEntry, EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest,
-    InferResponse, LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo,
+    DefaultGenerationProps, DetokenizeRequest, DetokenizeResponse, EmbeddingEntry,
+    EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest, InferResponse,
+    LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo, ServerProps,
     StreamChunk, SystemInfo, TokenizeRequest, TokenizeResponse, VersionInfo,
 };
 
@@ -126,6 +127,30 @@ pub(super) async fn model_info(State(state): State<Arc<AppState>>) -> Json<Model
     })
 }
 
+/// `GET /props` — llama.cpp-compatible server properties endpoint.
+/// Exposes the chat template, default generation parameters, and model metadata
+/// so clients can auto-configure without trial-and-error.
+pub(super) async fn server_props(State(state): State<Arc<AppState>>) -> Json<ServerProps> {
+    let g = &state.generation;
+    Json(ServerProps {
+        model: state.name.clone(),
+        architecture: state.architecture.clone(),
+        total_params: state.total_params,
+        total_bytes: state.total_bytes,
+        chat_template: state.chat_template.clone(),
+        default_generation: DefaultGenerationProps {
+            max_tokens: g.max_tokens,
+            temperature: g.temperature,
+            top_p: g.top_p,
+            min_p: g.min_p,
+            repetition_penalty: g.repetition_penalty,
+            presence_penalty: g.presence_penalty,
+            frequency_penalty: g.frequency_penalty,
+            gamma: g.gamma,
+        },
+    })
+}
+
 /// `GET /api/version` — expose CLI version and git SHA for orchestration.
 pub(super) async fn version_info() -> Json<VersionInfo> {
     Json(VersionInfo {
@@ -158,6 +183,17 @@ pub(super) async fn tokenize(
         tokens_batch: None,
         count,
     })
+}
+
+/// `POST /detokenize` — decode token IDs back to text using the model's tokenizer
+/// (byte-level BPE fallback). Accepts `{ "tokens": [id, ...] }`.
+pub(super) async fn detokenize(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<DetokenizeRequest>,
+) -> Json<DetokenizeResponse> {
+    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+    let text = tokenizer.decode(&req.tokens);
+    Json(DetokenizeResponse { text })
 }
 
 /// `GET /v1/system` — best-effort system/hardware info for orchestration and
