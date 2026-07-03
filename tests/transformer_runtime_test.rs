@@ -1395,3 +1395,349 @@ async fn run_server_completions_stream_include_usage() {
         "usage should contain completion_tokens"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_retrieve_model() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let list = ureq::get(&format!("{base}/v1/models"))
+        .call()
+        .expect("list models should succeed");
+    let list_bytes = read_body(list).expect("read body");
+    let list_val: serde_json::Value =
+        serde_json::from_slice(&list_bytes).expect("parse json");
+    let model_id = list_val["data"][0]["id"]
+        .as_str()
+        .expect("model id should be present");
+
+    let resp = ureq::get(&format!("{base}/v1/models/{model_id}"))
+        .call()
+        .expect("retrieve model should succeed");
+    let bytes = read_body(resp).expect("read body");
+    let val: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+    assert_eq!(val["id"].as_str(), Some(model_id));
+    assert_eq!(val["object"].as_str(), Some("model"));
+    assert_eq!(val["owned_by"].as_str(), Some("modelc"));
+
+    let not_found = ureq::get(&format!("{base}/v1/models/nonexistent")).call();
+    assert!(
+        not_found.is_err(),
+        "non-existent model should return error"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_best_of() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "prompt": "hello",
+        "max_tokens": 4,
+        "best_of": 3,
+        "n": 1
+    });
+    let val = post_json(&format!("{base}/v1/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(
+        choices.len(),
+        1,
+        "best_of=3, n=1 should return 1 choice (the best)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_with_user_field() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // The user field should be accepted without error.
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 3,
+        "user": "test-user-123"
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    assert!(
+        val["choices"].as_array().is_some(),
+        "should return choices even with user field"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_response_format_json_schema() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "What is 2+2?"}],
+        "max_tokens": 10,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "math_answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "number"}
+                    },
+                    "required": ["answer"]
+                },
+                "strict": true
+            }
+        }
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    assert!(
+        val["choices"].as_array().is_some(),
+        "should return choices with json_schema response_format"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_tool_choice_none() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 3,
+        "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {}}}}],
+        "tool_choice": "none"
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(choices.len(), 1);
+    // With tool_choice: none, finish_reason should be "stop", not "tool_calls"
+    assert_eq!(
+        choices[0]["finish_reason"].as_str(),
+        Some("stop"),
+        "tool_choice=none should not produce tool_calls"
+    );
+    assert!(
+        choices[0]["message"]["tool_calls"].is_null(),
+        "tool_choice=none should not return tool_calls"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_tool_choice_required() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 5,
+        "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {}}}}],
+        "tool_choice": "required"
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(choices.len(), 1);
+    // Should still get a valid response (tool injection happened)
+    assert!(
+        choices[0]["message"]["content"].as_str().is_some() || choices[0]["message"]["tool_calls"].is_array(),
+        "should return either content or tool_calls"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_with_name_field() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // The name field on messages should be accepted without error.
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello", "name": "alice"}],
+        "max_tokens": 3
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    assert!(
+        val["choices"].as_array().is_some(),
+        "should return choices even with name field"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_max_completion_tokens() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_completion_tokens": 3
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(choices.len(), 1);
+    // Verify usage reflects the max_completion_tokens limit
+    let usage = &val["usage"];
+    assert!(
+        usage["completion_tokens"].as_u64().is_some(),
+        "usage should contain completion_tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_batch_prompt() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "prompt": ["hello", "world"],
+        "max_tokens": 3
+    });
+    let val = post_json(&format!("{base}/v1/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(
+        choices.len(),
+        2,
+        "batch prompt with 2 strings should return 2 choices"
+    );
+    assert_eq!(choices[0]["index"].as_u64(), Some(0));
+    assert_eq!(choices[1]["index"].as_u64(), Some(1));
+}

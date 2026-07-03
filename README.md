@@ -268,6 +268,14 @@ Before the first (`modelc`) publish:
 - **`/detokenize` endpoint** — `POST /detokenize` (llama.cpp-compatible) decodes token IDs back to text, complementing `/tokenize` for round-trip token management.
 - **`suffix` for `/v1/completions`** — OpenAI-standard `suffix` parameter appends text after the generated completion. With `echo: true`, output is `prompt + completion + suffix`.
 - **`stream_options.include_usage`** — OpenAI-standard streaming option for `/v1/chat/completions` and `/v1/completions`. When `stream_options: { include_usage: true }` is set, the SSE stream emits a final chunk with empty `choices` and a `usage` object before `[DONE]`.
+- **`GET /v1/models/:id`** — OpenAI-standard model retrieval endpoint. Returns a single model object by ID, or `404 model_not_found` for unknown IDs.
+- **`best_of` for `/v1/completions`** — OpenAI-standard `best_of` generates N completions server-side (clamped 1–20), picks the best by token count, and returns the top `n`.
+- **`user` field** — OpenAI-standard `user` parameter accepted on both `/v1/chat/completions` and `/v1/completions` for abuse tracking. Accepted but ignored.
+- **`response_format: { type: "json_schema" }`** — OpenAI-standard Structured Outputs for `/v1/chat/completions`. Injects the schema as a system prompt and validates/retries generated output against it.
+- **`tool_choice` for `/v1/chat/completions`** — OpenAI-standard tool choice control: `"auto"` (default), `"none"` (no tools), `"required"` (must call a tool), or `{"type": "function", "function": {"name": "..."}}` (must call named tool).
+- **`name` field on messages** — OpenAI-standard `name` field on chat message objects, accepted and serialized in responses.
+- **`max_completion_tokens`** — OpenAI's newer parameter name for `max_tokens` (o1+ models). Accepted on both endpoints; takes precedence over `max_tokens` when both are provided.
+- **Batch `prompt` for `/v1/completions`** — OpenAI-standard batch mode. When `prompt` is an array of strings, generates completions for each prompt with incrementing `index`.
 - **Min-p sampling** — `min_p` keeps only tokens whose probability is at least `min_p` fraction of the max probability, then renormalizes. The threshold scales with the model's confidence per step, making it simpler and often more effective than top-p (nucleus). Can combine with `top_p` (min-p runs after). Wired through all text-generation endpoints as `min_p` and the CLI (`--min-p`).
 - **Tokenize endpoint** — `POST /tokenize` returns token IDs and count for a prompt (single `input` or batch `inputs`), using the same byte-level BPE tokenizer as `/chat`. Standard in Ollama and llama.cpp server; useful for prompt budgeting and management.
 - **System info endpoint** — `GET /v1/system` exposes best-effort hardware info (CPU cores, OS, arch, pointer width, Metal availability, total memory) for orchestration and debugging. No added dependencies (stdlib + `/proc/meminfo`/`sysctl`).

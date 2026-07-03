@@ -84,8 +84,14 @@ pub(super) struct ChatCompletionRequest {
     response_format: Option<ResponseFormat>,
     #[serde(default)]
     tools: Vec<Tool>,
+    /// Optional tool choice: "auto", "none", or {"type":"function","function":{"name":"..."}}
+    #[serde(default)]
+    tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     max_tokens: Option<usize>,
+    /// Newer OpenAI parameter name for max_tokens (preferred if both given).
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
@@ -130,6 +136,9 @@ pub(super) struct ChatCompletionRequest {
     /// Optional streaming options (OpenAI-standard).
     #[serde(default)]
     stream_options: Option<StreamOptions>,
+    /// Optional user identifier (OpenAI-standard, accepted but ignored).
+    #[serde(default)]
+    user: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +151,19 @@ pub(super) struct StreamOptions {
 pub(super) struct ResponseFormat {
     #[serde(rename = "type")]
     format_type: String,
+    /// Optional json_schema definition (for type = "json_schema").
+    #[serde(default)]
+    json_schema: Option<JsonSchemaDef>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct JsonSchemaDef {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    schema: Option<serde_json::Value>,
+    #[serde(default)]
+    strict: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -161,6 +183,8 @@ pub(super) struct ChatMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ToolCall>>,
 }
@@ -269,7 +293,34 @@ pub(super) async fn chat_completion(
         .response_format
         .as_ref()
         .is_some_and(|rf| rf.format_type == "json_object");
+    let is_json_schema_mode = req
+        .response_format
+        .as_ref()
+        .is_some_and(|rf| rf.format_type == "json_schema");
+    let response_schema = req
+        .response_format
+        .as_ref()
+        .and_then(|rf| rf.json_schema.as_ref())
+        .and_then(|js| js.schema.clone());
     let has_tools = !req.tools.is_empty();
+    let tool_choice_none = req
+        .tool_choice
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "none");
+    let tool_choice_required = req
+        .tool_choice
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "required");
+    let tool_choice_specific = req
+        .tool_choice
+        .as_ref()
+        .and_then(|v| v.get("function"))
+        .and_then(|f| f.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string());
+    let effective_has_tools = has_tools && !tool_choice_none;
     let stream = req.stream;
 
     let mut messages: Vec<crate::chat_template::ChatMessage> = req
@@ -288,11 +339,35 @@ pub(super) async fn chat_completion(
         });
     }
 
-    if has_tools {
-        let tool_desc = build_tool_description(&req.tools);
+    if is_json_schema_mode {
+        let schema_str = response_schema
+            .as_ref()
+            .map(|s| serde_json::to_string_pretty(s).unwrap_or_default())
+            .unwrap_or_default();
         messages.push(crate::chat_template::ChatMessage {
             role: "system".to_string(),
-            content: tool_desc,
+            content: format!(
+                "Respond with valid JSON that conforms to the following JSON Schema. Do not include any explanatory text before or after the JSON.\n\n{}",
+                schema_str
+            ),
+        });
+    }
+
+    if effective_has_tools {
+        let tool_desc = build_tool_description(&req.tools);
+        let mut content = tool_desc;
+        if tool_choice_required {
+            content.push_str("\nYou must call one of the available tools. Do not respond with text only.");
+        }
+        if let Some(ref name) = tool_choice_specific {
+            content.push_str(&format!(
+                "\nYou must call the tool named \"{}\". Do not call any other tool.",
+                name
+            ));
+        }
+        messages.push(crate::chat_template::ChatMessage {
+            role: "system".to_string(),
+            content,
         });
     }
 
@@ -314,7 +389,7 @@ pub(super) async fn chat_completion(
         })
         .or_else(|| state.generation.constraint.clone());
     let gen_cfg = crate::generate::GenerationConfig {
-        max_tokens: req.max_tokens.unwrap_or(state.generation.max_tokens),
+        max_tokens: req.max_completion_tokens.or(req.max_tokens).unwrap_or(state.generation.max_tokens),
         temperature: req.temperature.unwrap_or(state.generation.temperature),
         top_p: req.top_p.unwrap_or(state.generation.top_p),
         min_p: req.min_p.unwrap_or(state.generation.min_p),
@@ -496,18 +571,30 @@ pub(super) async fn chat_completion(
                     &gen_cfg,
                     3,
                 )
+            } else if is_json_schema_mode {
+                if let Some(ref schema) = response_schema {
+                    crate::json_schema::generate_with_schema(
+                        |cfg| run_text_inference_with_config(&state, &prompt, cfg),
+                        schema,
+                        &gen_cfg,
+                        3,
+                    )
+                } else {
+                    run_text_inference_with_config(&state, &prompt, &gen_cfg)
+                }
             } else {
                 run_text_inference_with_config(&state, &prompt, &gen_cfg)
             };
             (text, None)
         };
 
-        let (message, finish_reason) = if has_tools {
+        let (message, finish_reason) = if effective_has_tools {
             if let Some(tool_calls) = parse_tool_calls(&raw_output) {
                 (
                     ChatMessage {
                         role: "assistant".to_string(),
                         content: None,
+                        name: None,
                         tool_calls: Some(tool_calls),
                     },
                     "tool_calls",
@@ -518,6 +605,7 @@ pub(super) async fn chat_completion(
                     ChatMessage {
                         role: "assistant".to_string(),
                         content: Some(content),
+                        name: None,
                         tool_calls: None,
                     },
                     "stop",
@@ -529,6 +617,7 @@ pub(super) async fn chat_completion(
                 ChatMessage {
                     role: "assistant".to_string(),
                     content: Some(content),
+                    name: None,
                     tool_calls: None,
                 },
                 "stop",
@@ -612,13 +701,41 @@ fn build_logprobs_content(
 // /v1/completions (legacy non-chat completions API)
 // ---------------------------------------------------------------------------
 
+/// Accepts prompt as either a single string or an array of strings (batch mode).
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum PromptInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+impl PromptInput {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            PromptInput::Single(s) => vec![s],
+            PromptInput::Batch(v) => v,
+        }
+    }
+}
+
+impl Default for PromptInput {
+    fn default() -> Self {
+        PromptInput::Single(String::new())
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct CompletionRequest {
     #[serde(default)]
     model: String,
-    prompt: String,
+    /// Prompt can be a single string or an array of strings (batch mode).
+    #[serde(default)]
+    prompt: PromptInput,
     #[serde(default)]
     max_tokens: Option<usize>,
+    /// Newer OpenAI parameter name for max_tokens (preferred if both given).
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
@@ -670,6 +787,9 @@ pub(super) struct CompletionRequest {
     /// Optional streaming options (OpenAI-standard).
     #[serde(default)]
     stream_options: Option<StreamOptions>,
+    /// Optional user identifier (OpenAI-standard, accepted but ignored).
+    #[serde(default)]
+    user: Option<String>,
     #[serde(default)]
     stream: bool,
 }
@@ -727,7 +847,7 @@ pub(super) async fn completions(
         })
         .or_else(|| state.generation.constraint.clone());
     let gen_cfg = crate::generate::GenerationConfig {
-        max_tokens: req.max_tokens.unwrap_or(state.generation.max_tokens),
+        max_tokens: req.max_completion_tokens.or(req.max_tokens).unwrap_or(state.generation.max_tokens),
         temperature: req.temperature.unwrap_or(state.generation.temperature),
         top_p: req.top_p.unwrap_or(state.generation.top_p),
         min_p: req.min_p.unwrap_or(state.generation.min_p),
@@ -765,6 +885,9 @@ pub(super) async fn completions(
     };
     let id = format!("cmpl-{}-0", state.name);
 
+    let prompts = req.prompt.into_vec();
+    let prompt = prompts[0].clone();
+
     // ------------------------------------------------------------------
     // Streaming path
     // ------------------------------------------------------------------
@@ -775,7 +898,7 @@ pub(super) async fn completions(
     if stream {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
         let state_clone = Arc::clone(&state);
-        let prompt_clone = req.prompt.clone();
+        let prompt_clone = prompt.clone();
         // Cancellation flag: set when the SSE client disconnects (stream dropped).
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut gen_cfg = gen_cfg;
@@ -905,51 +1028,58 @@ pub(super) async fn completions(
     let suffix = req.suffix.as_deref().unwrap_or("");
 
     let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
-    let prompt_tokens = tokenizer.encode(&req.prompt).len();
+    let mut total_prompt_tokens = 0usize;
 
-    // Generate best_of completions, then pick the top n by token count.
-    let mut all: Vec<(String, Option<Logprobs>, usize)> = Vec::with_capacity(best_of);
-    for _ in 0..best_of {
-        let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
-            match run_text_inference_with_logprobs(&state, &req.prompt, &gen_cfg, top_n) {
-                Some((ids, lps)) => {
-                    let text = tokenizer.decode(&ids);
-                    let content = build_logprobs_content(&tokenizer, &lps);
-                    (text, Some(Logprobs { content }))
-                }
-                None => {
-                    let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
-                    (text, Some(Logprobs { content: Vec::new() }))
-                }
-            }
-        } else {
-            let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
-            (text, None)
-        };
-        let tok_count = tokenizer.encode(&raw_output).len();
-        all.push((raw_output, logprobs_field, tok_count));
-    }
-
-    // Sort by token count descending (proxy for highest logprob) and take top n.
-    all.sort_by(|a, b| b.2.cmp(&a.2));
-    all.truncate(n);
-
-    let mut choices: Vec<CompletionChoice> = Vec::with_capacity(n);
+    let mut choices: Vec<CompletionChoice> = Vec::with_capacity(n * prompts.len());
     let mut total_completion_tokens = 0usize;
-    for (i, (raw_output, logprobs_field, _)) in all.into_iter().enumerate() {
-        let display_text = if echo_prompt {
-            format!("{}{}{}", req.prompt, raw_output, suffix)
-        } else {
-            format!("{}{}", raw_output, suffix)
-        };
-        total_completion_tokens += tokenizer.encode(&display_text).len();
+    let mut choice_index = 0usize;
 
-        choices.push(CompletionChoice {
-            index: i,
-            text: display_text,
-            finish_reason: "stop",
-            logprobs: logprobs_field,
-        });
+    for p in &prompts {
+        total_prompt_tokens += tokenizer.encode(p).len();
+
+        // Generate best_of completions, then pick the top n by token count.
+        let mut all: Vec<(String, Option<Logprobs>, usize)> = Vec::with_capacity(best_of);
+        for _ in 0..best_of {
+            let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
+                match run_text_inference_with_logprobs(&state, p, &gen_cfg, top_n) {
+                    Some((ids, lps)) => {
+                        let text = tokenizer.decode(&ids);
+                        let content = build_logprobs_content(&tokenizer, &lps);
+                        (text, Some(Logprobs { content }))
+                    }
+                    None => {
+                        let text = run_text_inference_with_config(&state, p, &gen_cfg);
+                        (text, Some(Logprobs { content: Vec::new() }))
+                    }
+                }
+            } else {
+                let text = run_text_inference_with_config(&state, p, &gen_cfg);
+                (text, None)
+            };
+            let tok_count = tokenizer.encode(&raw_output).len();
+            all.push((raw_output, logprobs_field, tok_count));
+        }
+
+        // Sort by token count descending (proxy for highest logprob) and take top n.
+        all.sort_by(|a, b| b.2.cmp(&a.2));
+        all.truncate(n);
+
+        for (raw_output, logprobs_field, _) in all.into_iter() {
+            let display_text = if echo_prompt {
+                format!("{}{}{}", p, raw_output, suffix)
+            } else {
+                format!("{}{}", raw_output, suffix)
+            };
+            total_completion_tokens += tokenizer.encode(&display_text).len();
+
+            choices.push(CompletionChoice {
+                index: choice_index,
+                text: display_text,
+                finish_reason: "stop",
+                logprobs: logprobs_field,
+            });
+            choice_index += 1;
+        }
     }
 
     Json(CompletionResponse {
@@ -959,9 +1089,9 @@ pub(super) async fn completions(
         model: model_name,
         choices,
         usage: Usage {
-            prompt_tokens,
+            prompt_tokens: total_prompt_tokens,
             completion_tokens: total_completion_tokens,
-            total_tokens: prompt_tokens + total_completion_tokens,
+            total_tokens: total_prompt_tokens + total_completion_tokens,
         },
     })
     .into_response()
