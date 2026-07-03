@@ -203,7 +203,7 @@ Created by `pack`, consumed by `run`.
   - **`echo`** — optional, default `false` (`/v1/completions` only). When `true`, the response `choices[].text` includes the prompt followed by the completion. In streaming mode, the prompt is emitted as the first SSE chunk.
   - **`n`** — optional, default 1, range 1–20 (clamped) (`/v1/completions` and `/v1/chat/completions`). Generates N independent completions. The response includes N `choices` entries with incrementing `index`. `completion_tokens` in `usage` is the sum across all choices.
   - **`suffix`** — optional, default `""` (`/v1/completions` only). Text appended after the generated completion in the response. When combined with `echo: true`, the output format is `prompt + completion + suffix`.
-  - **`stream_options`** — optional (`/v1/chat/completions` only, streaming mode). JSON object `{ "include_usage": true }`. When set, the SSE stream emits a final chunk with empty `choices` and a `usage` object (`prompt_tokens`, `completion_tokens`, `total_tokens`) before `[DONE]`. Matches the OpenAI streaming protocol.
+  - **`stream_options`** — optional (`/v1/chat/completions` and `/v1/completions`, streaming mode). JSON object `{ "include_usage": true }`. When set, the SSE stream emits a final chunk with empty `choices` and a `usage` object (`prompt_tokens`, `completion_tokens`, `total_tokens`) before `[DONE]`. Matches the OpenAI streaming protocol.
 
 **Inference pipeline** (in order of preference):
 1. **ONNX execution plan** — if `onnx.execution_plan` metadata exists, ops are executed via the tensor runtime.

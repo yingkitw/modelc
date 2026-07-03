@@ -221,6 +221,7 @@ fn build_router(
         .route("/detokenize", post(handlers::detokenize))
         .route("/metrics", get(handlers::metrics_handler))
         .route("/v1/models", get(openai::list_models))
+        .route("/v1/models/{id}", get(openai::retrieve_model))
         .route("/v1/system", get(handlers::system_info))
         .route("/v1/chat/completions", post(openai::chat_completion))
         .route("/v1/completions", post(openai::completions))

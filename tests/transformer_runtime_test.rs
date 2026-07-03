@@ -1338,3 +1338,60 @@ async fn run_server_chat_stream_include_usage() {
         "usage should contain completion_tokens"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_stream_include_usage() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "prompt": "hello",
+        "max_tokens": 3,
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    let body_str = serde_json::to_string(&body).unwrap();
+
+    let resp = ureq::post(&format!("{base}/v1/completions"))
+        .content_type("application/json")
+        .send(&body_str)
+        .expect("request should succeed");
+    assert_eq!(resp.status(), 200);
+
+    let text = read_body(resp)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    assert!(
+        text.contains("text_completion"),
+        "should emit text_completion chunk objects"
+    );
+    assert!(text.contains("[DONE]"), "should end with [DONE]");
+    assert!(
+        text.contains("\"usage\""),
+        "should include usage object when stream_options.include_usage is true"
+    );
+    assert!(
+        text.contains("\"prompt_tokens\""),
+        "usage should contain prompt_tokens"
+    );
+    assert!(
+        text.contains("\"completion_tokens\""),
+        "usage should contain completion_tokens"
+    );
+}

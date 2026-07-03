@@ -43,6 +43,32 @@ pub(super) async fn list_models(State(state): State<Arc<AppState>>) -> Json<Mode
     })
 }
 
+pub(super) async fn retrieve_model(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if id != state.name {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("The model '{}' does not exist", id),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            })),
+        )
+            .into_response();
+    }
+    Json(ModelEntry {
+        id: state.name.clone(),
+        object: "model",
+        created: 0,
+        owned_by: "modelc",
+    })
+    .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // /v1/chat/completions
 // ---------------------------------------------------------------------------
@@ -634,9 +660,16 @@ pub(super) struct CompletionRequest {
     /// How many completions to generate. Defaults to 1.
     #[serde(default)]
     n: Option<u32>,
+    /// Generate best_of completions server-side and return the top n by length.
+    /// Defaults to n (or 1). Cannot be used with stream.
+    #[serde(default)]
+    best_of: Option<u32>,
     /// Optional suffix — text to append after the generated completion.
     #[serde(default)]
     suffix: Option<String>,
+    /// Optional streaming options (OpenAI-standard).
+    #[serde(default)]
+    stream_options: Option<StreamOptions>,
     #[serde(default)]
     stream: bool,
 }
@@ -666,6 +699,8 @@ pub(super) struct CompletionChunk {
     created: u64,
     model: String,
     choices: Vec<CompletionChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
 }
 
 #[derive(Serialize)]
@@ -733,6 +768,10 @@ pub(super) async fn completions(
     // ------------------------------------------------------------------
     // Streaming path
     // ------------------------------------------------------------------
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .is_some_and(|so| so.include_usage);
     if stream {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
         let state_clone = Arc::clone(&state);
@@ -755,6 +794,7 @@ pub(super) async fn completions(
                         text: prompt_clone.clone(),
                         finish_reason: None,
                     }],
+                    usage: None,
                 };
                 if tx
                     .send(Ok(
@@ -792,6 +832,7 @@ pub(super) async fn completions(
                                 text: delta.to_string(),
                                 finish_reason: None,
                             }],
+                            usage: None,
                         };
                         if tx
                             .send(Ok(
@@ -817,12 +858,36 @@ pub(super) async fn completions(
                     text: String::new(),
                     finish_reason: Some("stop"),
                 }],
+                usage: None,
             };
             let _ = tx
                 .send(Ok(
                     Event::default().data(serde_json::to_string(&final_chunk).unwrap())
                 ))
                 .await;
+
+            // When stream_options.include_usage is true, emit a separate
+            // chunk with empty choices and the usage object (OpenAI protocol).
+            if include_usage {
+                let usage_chunk = CompletionChunk {
+                    id: id.clone(),
+                    object: "text_completion",
+                    created: 0,
+                    model: model_name.clone(),
+                    choices: vec![],
+                    usage: Some(Usage {
+                        prompt_tokens: prompt_ids.len(),
+                        completion_tokens: token_ids.len(),
+                        total_tokens: prompt_ids.len() + token_ids.len(),
+                    }),
+                };
+                let _ = tx
+                    .send(Ok(
+                        Event::default().data(serde_json::to_string(&usage_chunk).unwrap())
+                    ))
+                    .await;
+            }
+
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
         });
 
@@ -835,15 +900,16 @@ pub(super) async fn completions(
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_n = req.top_logprobs.unwrap_or(0).min(20) as usize;
     let n = req.n.unwrap_or(1).max(1).min(20) as usize;
+    let best_of = req.best_of.unwrap_or(n as u32).max(n as u32).min(20) as usize;
     let echo_prompt = req.echo.unwrap_or(false);
     let suffix = req.suffix.as_deref().unwrap_or("");
 
-    let mut choices: Vec<CompletionChoice> = Vec::with_capacity(n);
-    let mut total_completion_tokens = 0usize;
     let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
     let prompt_tokens = tokenizer.encode(&req.prompt).len();
 
-    for i in 0..n {
+    // Generate best_of completions, then pick the top n by token count.
+    let mut all: Vec<(String, Option<Logprobs>, usize)> = Vec::with_capacity(best_of);
+    for _ in 0..best_of {
         let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
             match run_text_inference_with_logprobs(&state, &req.prompt, &gen_cfg, top_n) {
                 Some((ids, lps)) => {
@@ -860,7 +926,17 @@ pub(super) async fn completions(
             let text = run_text_inference_with_config(&state, &req.prompt, &gen_cfg);
             (text, None)
         };
+        let tok_count = tokenizer.encode(&raw_output).len();
+        all.push((raw_output, logprobs_field, tok_count));
+    }
 
+    // Sort by token count descending (proxy for highest logprob) and take top n.
+    all.sort_by(|a, b| b.2.cmp(&a.2));
+    all.truncate(n);
+
+    let mut choices: Vec<CompletionChoice> = Vec::with_capacity(n);
+    let mut total_completion_tokens = 0usize;
+    for (i, (raw_output, logprobs_field, _)) in all.into_iter().enumerate() {
         let display_text = if echo_prompt {
             format!("{}{}{}", req.prompt, raw_output, suffix)
         } else {
