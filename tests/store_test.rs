@@ -87,3 +87,55 @@ fn test_remove_model_guard_rejects_without_force_or_all() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_copy_model_creates_copy() -> Result<()> {
+    let model = common::create_test_model();
+    let tmp = tempfile::NamedTempFile::new()?;
+    modelc::pack::pack(&model, tmp.path(), false)?;
+
+    let src_name = "__modelc_test_cp_src__";
+    let dest_name = "__modelc_test_cp_dest__";
+    modelc::store::install(tmp.path(), src_name)?;
+
+    let dest_path = modelc::store::copy_model(src_name, dest_name)?;
+    assert!(dest_path.is_file());
+
+    // Verify the copy is identical to the source.
+    let src_path = modelc::store::resolve_model_path(src_name)?;
+    let src_bytes = std::fs::read(&src_path)?;
+    let dest_bytes = std::fs::read(&dest_path)?;
+    assert_eq!(src_bytes, dest_bytes);
+
+    // Clean up.
+    modelc::store::remove_model(src_name, false, true)?;
+    modelc::store::remove_model(dest_name, false, true)?;
+
+    Ok(())
+}
+
+#[test]
+fn test_copy_model_rejects_existing_dest() -> Result<()> {
+    let model = common::create_test_model();
+    let tmp = tempfile::NamedTempFile::new()?;
+    modelc::pack::pack(&model, tmp.path(), false)?;
+
+    let name = "__modelc_test_cp_exists__";
+    modelc::store::install(tmp.path(), name)?;
+
+    // Copying to the same name should fail.
+    let result = modelc::store::copy_model(name, name);
+    assert!(result.is_err());
+
+    // Clean up.
+    modelc::store::remove_model(name, false, true)?;
+
+    Ok(())
+}
+
+#[test]
+fn test_copy_model_rejects_missing_source() -> Result<()> {
+    let result = modelc::store::copy_model("__nonexistent_model__", "__dest__");
+    assert!(result.is_err());
+    Ok(())
+}

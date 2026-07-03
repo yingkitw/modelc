@@ -23,11 +23,11 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/constraint.rs` | Grammar-based constrained decoding (`Constraint` trait, `RegexConstraint` token masking). |
 | `src/json_schema.rs` | JSON-Schema-constrained generation with retry (validates output against `jsonschema`). |
 | `src/prefix_cache.rs` | LRU `PrefixCache` of KV snapshots keyed by token sequence (longest-prefix reuse across requests). |
-| `src/draft.rs` | `DraftModel` trait + `MlpDraftModel` neural draft for EAGLE3-style speculative decoding (n-gram fallback). |
+| `src/draft.rs` | `DraftModel` trait + `MlpDraftModel` neural draft for EAGLE3-style speculative decoding + `PromptLookupDraftModel` weight-free draft (context substring matching fallback). |
 | `src/containerize.rs` | `containerize` command — emits Dockerfile + entrypoint for an artifact. |
 | `src/compiler.rs` | Parser selection, `apply_arch_hint`, `compile`, `inspect`, `pack`; `print_quant_sizes` (`--quant-sizes`). |
 | `src/pack.rs` | `.modelc` artifact writer: JSON header + raw tensor blob, optional zstd compression, quantization, pruning. |
-| `src/store.rs` | Local model store management; platform-specific paths via `dirs` crate; search, versioning, pull, `rm`. |
+| `src/store.rs` | Local model store management; platform-specific paths via `dirs` crate; search, versioning, pull, `rm`, `cp`. |
 | `src/lora.rs` | LoRA adapter loading and application on top of base model weights at runtime. |
 | `src/config.rs` | `~/.modelc/config.toml` loading and saving (bind, port, store path, compression). |
 | `src/parsers/` | Format parsers (`WeightParser` trait). Modularized by format. |

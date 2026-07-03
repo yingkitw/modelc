@@ -88,6 +88,12 @@ modelc rm my-model --all          # also delete versioned copies
 modelc rm my-model --force        # delete even if versioned copies exist
 ```
 
+**Copy** a model in the local store:
+
+```bash
+modelc cp my-model my-model-copy
+```
+
 **Pull** models from remote sources:
 
 ```bash
@@ -252,7 +258,7 @@ Before the first (`modelc`) publish:
 - **Concurrent transformer generation** — The prefix cache was a `Mutex` that serialized all transformer requests. Refactored to `RwLock` with brief lock hold times: read-lock for lookup, release during generation, write-lock for insertion. Multiple transformer requests now run in parallel, limited only by CPU cores. Covered by `run_server_handles_concurrent_transformer_requests` test.
 - **Attention allocation optimization** — `attention_kv` previously allocated ~3×n_heads buffers per attention call (e.g., ~432 allocations per token for a 12-layer, 12-head model). Rewrote to use a single pre-allocated scratch buffer reused across heads, plus `softmax_inplace` with zero allocations. Eliminates the dominant allocation hotspot in the transformer forward pass.
 - **OpenAI `/v1/completions` endpoint** — Legacy (non-chat) completions API: `POST /v1/completions { model, prompt, max_tokens, temperature, top_p, stop, stream }`. Returns `text_completion` objects with `choices[].text`. Supports streaming SSE, `logprobs`, `top_logprobs`, `grammar`, and `json_schema`.
-- **EAGLE3 / neural speculative decoding** — `src/draft.rs` introduces a `DraftModel` trait and an `MlpDraftModel`: a tiny 2-layer MLP (embedding → FC1 + ReLU → FC2 → logits) that is orders of magnitude faster than the full transformer. Falls back to n-gram draft when no neural draft tensors are present. Wired into all serve endpoints automatically.
+- **EAGLE3 / neural speculative decoding** — `src/draft.rs` introduces a `DraftModel` trait and an `MlpDraftModel`: a tiny 2-layer MLP (embedding → FC1 + ReLU → FC2 → logits) that is orders of magnitude faster than the full transformer. Falls back to `PromptLookupDraftModel` (weight-free, searches the token context for repeated substrings) when no neural draft tensors are present. Wired into all serve endpoints automatically.
 - **API key authentication + rate limiting** — `modelc run` accepts `--api-key <key>` (requires `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`) and `--rate-limit <N>` (max requests per minute per client IP). Returns standard HTTP status codes (`401 Unauthorized`, `429 Too Many Requests`).
 - **Stop sequences** — `GenerationConfig.stop` holds a list of strings that halt generation when any appear in the decoded output. Checked after each token; output is truncated to just before the matched sequence. Wired through all text generation endpoints.
 - **Repetition / presence / frequency penalties** — three sampling penalties discourage token reuse. `repetition_penalty` (multiplicative, transformers-style) and OpenAI-standard `presence_penalty` (once per seen token) / `frequency_penalty` (scales with count) adjust logits before sampling. Wired through all text-generation endpoints (`/chat`, `/complete`, `/v1/chat/completions`, `/v1/completions`) as optional request fields and the CLI (`--repetition-penalty`, `--presence-penalty`, `--frequency-penalty`). They share a fast path that skips the per-token allocation when all are at their defaults.

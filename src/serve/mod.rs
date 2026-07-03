@@ -148,21 +148,28 @@ fn build_router(
     let chat_template = model.metadata.get("tokenizer.chat_template").cloned();
 
     let runtime = Runtime::from_raw(&model.tensors);
-    let draft_model = transformer_hidden_dim(&model).and_then(|hidden| {
-        let vocab_size = model
-            .metadata
-            .get("tokenizer.vocab_size")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
-        crate::draft::MlpDraftModel::from_runtime(
-            &runtime,
-            vocab_size,
-            hidden,
-            64,
-            generation.temperature,
-            generation.top_p,
-        )
-        .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
+    let draft_model: Option<std::sync::Arc<dyn crate::draft::DraftModel>> =
+        transformer_hidden_dim(&model).and_then(|hidden| {
+            let vocab_size = model
+                .metadata
+                .get("tokenizer.vocab_size")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            crate::draft::MlpDraftModel::from_runtime(
+                &runtime,
+                vocab_size,
+                hidden,
+                64,
+                generation.temperature,
+                generation.top_p,
+            )
+            .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
+        });
+
+    // Fall back to prompt lookup decoding when no neural draft weights are present.
+    let draft_model = draft_model.or_else(|| {
+        Some(std::sync::Arc::new(crate::draft::PromptLookupDraftModel::new(3))
+            as std::sync::Arc<dyn crate::draft::DraftModel>)
     });
 
     let max_concurrent = max_concurrent.and_then(|n| {

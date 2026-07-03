@@ -101,3 +101,9 @@
 - [x] **`/v1/embeddings` OpenAI parity** — `POST /v1/embeddings` returns OpenAI-compatible embeddings with `dimensions` (embedding length) and honors `encoding_format` (`"float"` / `"base64"`). Float arrays and base64-encoded little-endian bytes are both supported. Includes `usage` with `prompt_tokens` and `total_tokens`. Covered by `run_server_serves_openai_v1_embeddings` test.
 - [x] **`/api/version` / server version endpoint** — `GET /api/version` exposes `{ version, git_sha }` from `build.rs` (`MODELC_GIT_SHA`) for orchestration and health checks. Covered by `run_server_serves_api_version` test.
 
+
+## Brainstorming (competitive intelligence — July 2026)
+
+- [x] **`modelc cp <source> <dest>`** — Duplicate a model in the local store. Ollama, Docker, and every model manager supports copying. `copy_model` (`src/store.rs`) resolves the source (name or path), refuses to overwrite an existing destination, and copies the `.modelc` artifact. Covered by `test_copy_model_creates_copy`, `test_copy_model_rejects_existing_dest`, and `test_copy_model_rejects_missing_source` tests.
+- [x] **Prompt lookup decoding** — `PromptLookupDraftModel` (`src/draft.rs`) implements a weight-free draft model for speculative decoding. Instead of a separate neural network, it searches the current token context for the most recent occurrence of the last N tokens and proposes the continuation that followed. Particularly effective for code completion, document Q&A, and any task where output tends to repeat substrings from the prompt. Used as the default draft model when no neural draft weights (`draft.*`) are present, so all serve endpoints automatically benefit. Covered by `prompt_lookup_finds_continuation`, `prompt_lookup_returns_empty_when_no_match`, `prompt_lookup_returns_empty_for_short_context`, `prompt_lookup_caps_at_gamma`, `prompt_lookup_finds_most_recent_match`, and `prompt_lookup_zero_gamma_returns_empty` tests.
+

@@ -334,6 +334,15 @@ pub enum Commands {
         output: Option<PathBuf>,
     },
 
+    #[command(about = "Copy a model in the local store to a new name")]
+    Cp {
+        #[arg(help = "Source model name or path")]
+        source: String,
+
+        #[arg(help = "Destination model name")]
+        dest: String,
+    },
+
     #[command(about = "Remove a model from the local store")]
     Rm {
         #[arg(help = "Model name to remove")]

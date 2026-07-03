@@ -57,6 +57,16 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 **Errors:** model not found in store; versioned copies exist (without `--all` or `--force`); filesystem failure.
 
+### `cp`
+
+**Input:** source model name or path; destination model name.
+
+**Output:** confirmation of copied file path.
+
+**Side effects:** copies `<source>.modelc` to `<dest>.modelc` in the local store.
+
+**Errors:** source not found; destination already exists; filesystem failure.
+
 ### `pull`
 
 **Input:** model identifier (e.g., `username/model-name`); optional `--version`.
@@ -200,7 +210,9 @@ Created by `pack`, consumed by `run`.
    - **Grammar-based constrained decoding** — `GenerationConfig.constraint` holds an optional `Arc<dyn Constraint>`. `RegexConstraint` (`src/constraint.rs`) wraps a regex pattern and, before each sampling step, decodes the partial output, builds a per-token validity mask, and masks invalid tokens to `-inf`. The heuristic tries common suffixes to avoid false negatives, making it permissive rather than exact. HTTP endpoints accept an optional `grammar` regex per request. This is a minimal implementation; a full FSM-based approach (like Outlines) would provide exact constraints.
    - **Context shifting (sliding window KV cache)** — `GenerationConfig.max_context` sets a hard context limit. When total tokens exceed it during generation, `generate_core` shifts both the `KvCache` (`KvLayer::shift` removes oldest K/V vectors from every layer, keeping roughly the newest 75%) and `token_ids` left. `prompt_len` is adjusted so generation continues seamlessly. Enables effectively infinite context length at the cost of losing distant history. Covered by `kv_layer_fp32_shift_discards_oldest`, `kv_layer_int8_shift_discards_oldest`, and `kv_cache_shift_syncs_all_layers` tests.
    - **Anchor token preservation (StreamingLLM-style)** — `GenerationConfig.anchor_tokens` (default 0) sets how many initial tokens to preserve during context shifting. Inspired by StreamingLLM, the first few tokens act as "attention sinks" — they accumulate disproportionate attention scores and evicting them degrades generation quality. When `anchor_tokens > 0` and `max_context` is exceeded, `context_shift` calls `KvLayer::shift_anchored` and `KvCache::shift_anchored` to remove tokens from the middle (after the anchors) rather than from the beginning. This preserves the first N prompt tokens (e.g., system prompt, few-shot examples) while still evicting older non-anchor context to make room for new tokens. Works with all KV cache variants (FP32, INT8, Mixed). Covered by `kv_layer_fp32_shift_anchored_preserves_first`, `kv_layer_int8_shift_anchored_preserves_first`, `kv_layer_mixed_shift_anchored_preserves_first`, and `kv_layer_shift_anchored_falls_back_when_not_enough_tokens` tests. Set via `--anchor-tokens N` on `modelc run`.
-   - **Speculative decoding** — `GenerationConfig.gamma > 0` enables speculative decoding with an n-gram draft model. The draft model builds a trigram index from the prompt and proposes `gamma` candidate tokens by looking up historical continuations. The target model verifies each candidate in a forward-pass loop using the KV cache; accepted tokens skip the sampling step. On mismatch, the model's sampled token is used and drafting restarts. Now supports prefix caching (restores cached K/V before priming), context shifting (`max_context`), and grammar constraints (`sample_constrained`). Disabled by default (`gamma: 0`).
+   - **Speculative decoding** — `GenerationConfig.gamma > 0` enables speculative decoding with a draft model. The draft model proposes `gamma` candidate tokens; the target model verifies each candidate in a forward-pass loop using the KV cache; accepted tokens skip the sampling step. On mismatch, the model's sampled token is used and drafting restarts. Now supports prefix caching (restores cached K/V before priming), context shifting (`max_context`), and grammar constraints (`sample_constrained`). Disabled by default (`gamma: 0`). Two draft models are available:
+     - **Neural draft (`MlpDraftModel`)** — a tiny 2-layer MLP loaded from `draft.*` tensors in the runtime. Orders of magnitude faster than the full transformer. Falls back to borrowing the target model's embedding weights when `draft.embed.weight` is absent.
+     - **Prompt lookup draft (`PromptLookupDraftModel`)** — a weight-free draft model that searches the current token context for the most recent occurrence of the last N tokens and proposes the continuation that followed. No weights required; used as the default when no neural draft weights are present. Particularly effective for code completion and document Q&A where output tends to repeat prompt substrings.
 3. **MLP GEMV** — when `architecture == "mlp"`, runs stacked GEMV + bias (+ ReLU between hidden layers) using `layerN.weight`/`layerN.bias` or a single `weight`/`bias`.
 4. **Echo fallback** — returns input unchanged.
 

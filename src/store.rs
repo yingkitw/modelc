@@ -160,6 +160,22 @@ pub fn list_versions(name: &str) -> Result<Vec<(u32, PathBuf)>> {
     Ok(versions)
 }
 
+/// Copy a model in the store to a new name.
+///
+/// Resolves `source` as a model name or file path, then copies the `.modelc`
+/// artifact to `<dest>.modelc` in the store.
+pub fn copy_model(source: &str, dest: &str) -> Result<PathBuf> {
+    let src_path = resolve_model_path(source)?;
+    let dir = store_dir()?;
+    let dest_path = dir.join(format!("{}.modelc", dest));
+    if dest_path.is_file() {
+        anyhow::bail!("destination '{}' already exists in store", dest);
+    }
+    std::fs::copy(&src_path, &dest_path)
+        .with_context(|| format!("failed to copy {:?} to {:?}", src_path, dest_path))?;
+    Ok(dest_path)
+}
+
 /// Remove a model from the store.
 ///
 /// Deletes `<name>.modelc`. If `all` is true, also deletes all `<name>.v<N>.modelc` versioned copies.
