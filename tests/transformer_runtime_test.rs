@@ -1239,3 +1239,102 @@ async fn run_server_completions_suffix() {
         "suffix should be appended to completion, got: {text}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_completions_n() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 4,
+        "n": 3
+    });
+    let val = post_json(&format!("{base}/v1/chat/completions"), &body);
+    let choices = val["choices"].as_array().expect("choices should be array");
+    assert_eq!(choices.len(), 3, "n=3 should produce 3 choices");
+    for (i, choice) in choices.iter().enumerate() {
+        assert_eq!(
+            choice["index"].as_i64(),
+            Some(i as i64),
+            "choice index should match"
+        );
+        assert!(
+            choice["message"]["content"].as_str().is_some(),
+            "each choice should have message content"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_stream_include_usage() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "model": "mini_gpt2",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 3,
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    let body_str = serde_json::to_string(&body).unwrap();
+
+    let resp = ureq::post(&format!("{base}/v1/chat/completions"))
+        .content_type("application/json")
+        .send(&body_str)
+        .expect("request should succeed");
+    assert_eq!(resp.status(), 200);
+
+    let text = read_body(resp)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    assert!(
+        text.contains("chat.completion.chunk"),
+        "should emit OpenAI chunk objects"
+    );
+    assert!(text.contains("[DONE]"), "should end with [DONE]");
+    assert!(
+        text.contains("\"usage\""),
+        "should include usage object when stream_options.include_usage is true"
+    );
+    assert!(
+        text.contains("\"prompt_tokens\""),
+        "usage should contain prompt_tokens"
+    );
+    assert!(
+        text.contains("\"completion_tokens\""),
+        "usage should contain completion_tokens"
+    );
+}

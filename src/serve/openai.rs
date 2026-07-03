@@ -98,6 +98,18 @@ pub(super) struct ChatCompletionRequest {
     /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
     #[serde(default)]
     logit_bias: Option<HashMap<u32, f32>>,
+    /// How many chat completions to generate. Defaults to 1.
+    #[serde(default)]
+    n: Option<u32>,
+    /// Optional streaming options (OpenAI-standard).
+    #[serde(default)]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct StreamOptions {
+    #[serde(default)]
+    include_usage: bool,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +214,8 @@ pub(super) struct ChatCompletionChunk {
     created: u64,
     model: String,
     choices: Vec<ChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
 }
 
 #[derive(Serialize)]
@@ -315,6 +329,10 @@ pub(super) async fn chat_completion(
     // ------------------------------------------------------------------
     // Streaming path
     // ------------------------------------------------------------------
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .is_some_and(|so| so.include_usage);
     if stream {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
         let state_clone = Arc::clone(&state);
@@ -352,6 +370,7 @@ pub(super) async fn chat_completion(
                                 },
                                 finish_reason: None,
                             }],
+                            usage: None,
                         };
                         // If the client is gone, stop dripping (generation has already
                         // been cancelled via the flag).
@@ -381,12 +400,36 @@ pub(super) async fn chat_completion(
                     delta: ChunkDelta::default(),
                     finish_reason: Some("stop"),
                 }],
+                usage: None,
             };
             let _ = tx
                 .send(Ok(
                     Event::default().data(serde_json::to_string(&final_chunk).unwrap())
                 ))
                 .await;
+
+            // When stream_options.include_usage is true, emit a separate
+            // chunk with empty choices and the usage object (OpenAI protocol).
+            if include_usage {
+                let usage_chunk = ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created: 0,
+                    model: model_name.clone(),
+                    choices: vec![],
+                    usage: Some(Usage {
+                        prompt_tokens: prompt_ids.len(),
+                        completion_tokens: token_ids.len(),
+                        total_tokens: prompt_ids.len() + token_ids.len(),
+                    }),
+                };
+                let _ = tx
+                    .send(Ok(
+                        Event::default().data(serde_json::to_string(&usage_chunk).unwrap())
+                    ))
+                    .await;
+            }
+
             // OpenAI streams end with [DONE].
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
         });
@@ -395,53 +438,65 @@ pub(super) async fn chat_completion(
     }
 
     // ------------------------------------------------------------------
-    // Non-streaming path (existing logic)
+    // Non-streaming path
     // ------------------------------------------------------------------
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_n = req.top_logprobs.unwrap_or(0).min(20) as usize;
+    let n = req.n.unwrap_or(1).max(1).min(20) as usize;
 
-    let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
-        match run_text_inference_with_logprobs(&state, &prompt, &gen_cfg, top_n) {
-            Some((ids, lps)) => {
-                let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
-                let text = tokenizer.decode(&ids);
-                let content = build_logprobs_content(&tokenizer, &lps);
-                (text, Some(Logprobs { content }))
+    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+    let prompt_tokens = tokenizer.encode(&prompt).len();
+    let mut choices: Vec<Choice> = Vec::with_capacity(n);
+    let mut total_completion_tokens = 0usize;
+
+    for i in 0..n {
+        let (raw_output, logprobs_field): (String, Option<Logprobs>) = if want_logprobs {
+            match run_text_inference_with_logprobs(&state, &prompt, &gen_cfg, top_n) {
+                Some((ids, lps)) => {
+                    let text = tokenizer.decode(&ids);
+                    let content = build_logprobs_content(&tokenizer, &lps);
+                    (text, Some(Logprobs { content }))
+                }
+                None => {
+                    let text = run_text_inference_with_config(&state, &prompt, &gen_cfg);
+                    (text, Some(Logprobs { content: Vec::new() }))
+                }
             }
-            None => {
-                let text = run_text_inference_with_config(&state, &prompt, &gen_cfg);
+        } else {
+            let text = if let Some(ref schema) = req.json_schema {
+                crate::json_schema::generate_with_schema(
+                    |cfg| run_text_inference_with_config(&state, &prompt, cfg),
+                    schema,
+                    &gen_cfg,
+                    3,
+                )
+            } else {
+                run_text_inference_with_config(&state, &prompt, &gen_cfg)
+            };
+            (text, None)
+        };
+
+        let (message, finish_reason) = if has_tools {
+            if let Some(tool_calls) = parse_tool_calls(&raw_output) {
                 (
-                    text,
-                    Some(Logprobs {
-                        content: Vec::new(),
-                    }),
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: Some(tool_calls),
+                    },
+                    "tool_calls",
+                )
+            } else {
+                let content = extract_content(&raw_output, is_json_mode);
+                (
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    "stop",
                 )
             }
-        }
-    } else {
-        let text = if let Some(ref schema) = req.json_schema {
-            crate::json_schema::generate_with_schema(
-                |cfg| run_text_inference_with_config(&state, &prompt, cfg),
-                schema,
-                &gen_cfg,
-                3,
-            )
-        } else {
-            run_text_inference_with_config(&state, &prompt, &gen_cfg)
-        };
-        (text, None)
-    };
-
-    let (message, finish_reason) = if has_tools {
-        if let Some(tool_calls) = parse_tool_calls(&raw_output) {
-            (
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: None,
-                    tool_calls: Some(tool_calls),
-                },
-                "tool_calls",
-            )
         } else {
             let content = extract_content(&raw_output, is_json_mode);
             (
@@ -452,38 +507,28 @@ pub(super) async fn chat_completion(
                 },
                 "stop",
             )
-        }
-    } else {
-        let content = extract_content(&raw_output, is_json_mode);
-        (
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: Some(content),
-                tool_calls: None,
-            },
-            "stop",
-        )
-    };
+        };
 
-    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
-    let prompt_tokens = tokenizer.encode(&prompt).len();
-    let completion_tokens = tokenizer.encode(&raw_output).len();
+        total_completion_tokens += tokenizer.encode(&raw_output).len();
+
+        choices.push(Choice {
+            index: i,
+            message,
+            finish_reason,
+            logprobs: logprobs_field,
+        });
+    }
 
     Json(ChatCompletionResponse {
         id,
         object: "chat.completion",
         created: 0,
         model: model_name,
-        choices: vec![Choice {
-            index: 0,
-            message,
-            finish_reason,
-            logprobs: logprobs_field,
-        }],
+        choices,
         usage: Usage {
             prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens: total_completion_tokens,
+            total_tokens: prompt_tokens + total_completion_tokens,
         },
     })
     .into_response()
