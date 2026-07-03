@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -249,6 +250,7 @@ pub(super) async fn chat(
         req.repetition_penalty,
         req.presence_penalty,
         req.frequency_penalty,
+        req.logit_bias.clone(),
     );
     let output = if let Some(ref schema) = req.json_schema {
         crate::json_schema::generate_with_schema(
@@ -286,6 +288,7 @@ pub(super) async fn complete(
         req.repetition_penalty,
         req.presence_penalty,
         req.frequency_penalty,
+        req.logit_bias.clone(),
     );
     let output = if let Some(ref schema) = req.json_schema {
         crate::json_schema::generate_with_schema(
@@ -332,6 +335,7 @@ pub(super) async fn chat_stream(
         req.repetition_penalty,
         req.presence_penalty,
         req.frequency_penalty,
+        req.logit_bias.clone(),
     );
 
     // Cancellation flag: set when the SSE client disconnects (stream dropped).
@@ -393,6 +397,7 @@ fn make_generation_config(
     repetition_penalty: Option<f32>,
     presence_penalty: Option<f32>,
     frequency_penalty: Option<f32>,
+    logit_bias: Option<HashMap<u32, f32>>,
 ) -> crate::generate::GenerationConfig {
     let constraint = grammar.and_then(|pat| {
         crate::constraint::RegexConstraint::new(&pat)
@@ -418,6 +423,7 @@ fn make_generation_config(
         repetition_penalty: repetition_penalty.unwrap_or(base.repetition_penalty),
         presence_penalty: presence_penalty.unwrap_or(base.presence_penalty),
         frequency_penalty: frequency_penalty.unwrap_or(base.frequency_penalty),
+        logit_bias: logit_bias.unwrap_or_else(|| base.logit_bias.clone()),
         cancel: None,
     }
 }

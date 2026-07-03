@@ -104,6 +104,11 @@ pub struct GenerationConfig {
     /// already appeared: subtracts `count * penalty` from the logit.
     /// Positive values strongly discourage repetition. 0.0 = disabled.
     pub frequency_penalty: f32,
+    /// OpenAI-style logit biases: a map from token ID to additive bias.
+    /// Positive values increase the likelihood of a token; negative values
+    /// suppress it. Applied after penalties but before the grammar constraint.
+    /// Empty = no bias (fast path skips allocation).
+    pub logit_bias: HashMap<u32, f32>,
     /// Cooperative cancellation flag. When set, the generation loop stops after
     /// the current token and returns what has been produced so far. Used to abort
     /// generation when an HTTP/SSE client disconnects. `None` = never cancelled.
@@ -138,6 +143,7 @@ impl Clone for GenerationConfig {
             repetition_penalty: self.repetition_penalty,
             presence_penalty: self.presence_penalty,
             frequency_penalty: self.frequency_penalty,
+            logit_bias: self.logit_bias.clone(),
             cancel: self.cancel.clone(),
         }
     }
@@ -161,6 +167,7 @@ impl Default for GenerationConfig {
             repetition_penalty: 1.0,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
+            logit_bias: HashMap::new(),
             cancel: None,
         }
     }
@@ -994,10 +1001,11 @@ fn sample_constrained(
     let has_penalty = config.repetition_penalty > 1.0
         || config.presence_penalty != 0.0
         || config.frequency_penalty != 0.0;
+    let has_bias = !config.logit_bias.is_empty();
     let constraint = config.constraint.as_deref();
 
     // Fast path: nothing to adjust — sample directly over the original logits.
-    if !has_penalty && constraint.is_none() {
+    if !has_penalty && !has_bias && constraint.is_none() {
         return sample(Some(logits), config, step);
     }
 
@@ -1010,6 +1018,15 @@ fn sample_constrained(
             config.presence_penalty,
             config.frequency_penalty,
         );
+    }
+
+    if has_bias {
+        for (&token_id, &bias) in &config.logit_bias {
+            let idx = token_id as usize;
+            if idx < working.len() {
+                working[idx] += bias;
+            }
+        }
     }
 
     if let Some(constraint) = constraint {
@@ -1483,5 +1500,67 @@ mod tests {
             logits, original,
             "no generated tokens => no penalty applied"
         );
+    }
+
+    #[test]
+    fn logit_bias_boosts_token_in_greedy() {
+        let mut bias = HashMap::new();
+        bias.insert(0u32, 10.0f32);
+        let config = GenerationConfig {
+            max_tokens: 1,
+            temperature: 0.0,
+            logit_bias: bias,
+            ..GenerationConfig::default()
+        };
+        // Token 1 has the highest logit, but bias on token 0 should override.
+        let token = sample_constrained(
+            Some(&[1.0f32, 5.0, 2.0]),
+            &config,
+            &BpeTokenizer::byte_fallback(),
+            &[],
+            0,
+        );
+        assert_eq!(token, 0, "positive bias should boost token 0 above token 1");
+    }
+
+    #[test]
+    fn logit_bias_suppresses_token_in_greedy() {
+        let mut bias = HashMap::new();
+        bias.insert(1u32, -100.0f32);
+        let config = GenerationConfig {
+            max_tokens: 1,
+            temperature: 0.0,
+            logit_bias: bias,
+            ..GenerationConfig::default()
+        };
+        // Token 1 has the highest logit (5.0), but -100 bias should suppress it.
+        let token = sample_constrained(
+            Some(&[1.0f32, 5.0, 2.0]),
+            &config,
+            &BpeTokenizer::byte_fallback(),
+            &[],
+            0,
+        );
+        assert_ne!(token, 1, "negative bias should suppress token 1");
+        assert_eq!(token, 2, "token 2 should be picked instead");
+    }
+
+    #[test]
+    fn logit_bias_empty_is_fast_path() {
+        let config = GenerationConfig {
+            max_tokens: 1,
+            temperature: 0.0,
+            ..GenerationConfig::default()
+        };
+        assert!(config.logit_bias.is_empty());
+        // Should behave identically to no bias — argmax wins.
+        let token = sample_constrained(
+            Some(&[1.0f32, 5.0, 2.0]),
+            &config,
+            &BpeTokenizer::byte_fallback(),
+            &[],
+            0,
+        );
+        assert_eq!(token, 1);
     }
 }

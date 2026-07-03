@@ -1,5 +1,6 @@
 //! HTTP server for `modelc run` — loads a `.modelc` artifact and serves /info + /infer + /chat + /complete.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -454,6 +455,9 @@ struct ChatRequest {
     /// OpenAI-style frequency penalty. Scales with token occurrence count.
     #[serde(default)]
     frequency_penalty: Option<f32>,
+    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
+    #[serde(default)]
+    logit_bias: Option<HashMap<u32, f32>>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -501,6 +505,9 @@ struct CompleteRequest {
     /// OpenAI-style frequency penalty. Scales with token occurrence count.
     #[serde(default)]
     frequency_penalty: Option<f32>,
+    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
+    #[serde(default)]
+    logit_bias: Option<HashMap<u32, f32>>,
 }
 
 #[derive(Serialize)]

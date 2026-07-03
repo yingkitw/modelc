@@ -17,7 +17,7 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/cli.rs` | `Cli`, `Commands`, `WeightFormat`, `ModelArch`, format detection + magic sniffing, `compile_listen`, shell completions. |
 | `src/lib.rs` | Re-exports modules; `CLI_VERSION` (`CARGO_PKG_VERSION` + `MODELC_GIT_SHA` from `build.rs`). |
 | `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers; auto architecture inference from tensor names; `QuantPreview` for `--quant-sizes`. |
-| `src/generate.rs` | Autoregressive text generation (`generate`, `generate_core`, `speculative_generate`), samplers (greedy/temperature/top-p/min-p), penalties (repetition/presence/frequency), grammar constraint application, and cooperative cancellation (`GenerationConfig.cancel`). |
+| `src/generate.rs` | Autoregressive text generation (`generate`, `generate_core`, `speculative_generate`), samplers (greedy/temperature/top-p/min-p), penalties (repetition/presence/frequency), logit bias, grammar constraint application, and cooperative cancellation (`GenerationConfig.cancel`). |
 | `src/tokenizer.rs` | Byte-level BPE tokenizer (encode/decode, greedy merge; `from_gguf`, `byte_fallback`). |
 | `src/chat_template.rs` | Jinja2 (`minijinja`) chat-template rendering for message formatting before tokenization. |
 | `src/constraint.rs` | Grammar-based constrained decoding (`Constraint` trait, `RegexConstraint` token masking). |

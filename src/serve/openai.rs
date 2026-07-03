@@ -1,5 +1,6 @@
 //! OpenAI-compatible API endpoints (`/v1/models`, `/v1/chat/completions`, `/v1/completions`).
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -94,6 +95,9 @@ pub(super) struct ChatCompletionRequest {
     /// OpenAI-style frequency penalty. Scales with token occurrence count.
     #[serde(default)]
     frequency_penalty: Option<f32>,
+    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
+    #[serde(default)]
+    logit_bias: Option<HashMap<u32, f32>>,
 }
 
 #[derive(Deserialize)]
@@ -295,6 +299,9 @@ pub(super) async fn chat_completion(
         frequency_penalty: req
             .frequency_penalty
             .unwrap_or(state.generation.frequency_penalty),
+        logit_bias: req
+            .logit_bias
+            .unwrap_or_else(|| state.generation.logit_bias.clone()),
         cancel: None,
     };
 
@@ -573,6 +580,9 @@ pub(super) struct CompletionRequest {
     /// OpenAI-style frequency penalty. Scales with token occurrence count.
     #[serde(default)]
     frequency_penalty: Option<f32>,
+    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
+    #[serde(default)]
+    logit_bias: Option<HashMap<u32, f32>>,
     #[serde(default)]
     stream: bool,
 }
@@ -653,6 +663,9 @@ pub(super) async fn completions(
         frequency_penalty: req
             .frequency_penalty
             .unwrap_or(state.generation.frequency_penalty),
+        logit_bias: req
+            .logit_bias
+            .unwrap_or_else(|| state.generation.logit_bias.clone()),
         cancel: None,
     };
 
