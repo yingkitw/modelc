@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-use byteorder::{ByteOrder, LittleEndian};
 
 use super::{
     MAX_STRING_BYTES, VAL_ARRAY, VAL_BOOL, VAL_FLOAT32, VAL_FLOAT64, VAL_INT8, VAL_INT16,
@@ -38,7 +37,7 @@ impl<'a> Cursor<'a> {
         if end > self.data.len() {
             anyhow::bail!("unexpected EOF reading u32");
         }
-        let v = LittleEndian::read_u32(&self.data[self.pos..end]);
+        let v = u32::from_le_bytes(self.data[self.pos..end].try_into().unwrap());
         self.pos = end;
         Ok(v)
     }
@@ -48,7 +47,7 @@ impl<'a> Cursor<'a> {
         if end > self.data.len() {
             anyhow::bail!("unexpected EOF reading u64");
         }
-        let v = LittleEndian::read_u64(&self.data[self.pos..end]);
+        let v = u64::from_le_bytes(self.data[self.pos..end].try_into().unwrap());
         self.pos = end;
         Ok(v)
     }
@@ -195,7 +194,7 @@ impl<'a> Cursor<'a> {
         if end > self.data.len() {
             anyhow::bail!("unexpected EOF reading u16");
         }
-        let v = LittleEndian::read_u16(&self.data[self.pos..end]);
+        let v = u16::from_le_bytes(self.data[self.pos..end].try_into().unwrap());
         self.pos = end;
         Ok(v)
     }

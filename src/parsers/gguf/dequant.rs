@@ -1,5 +1,4 @@
 use anyhow::Result;
-use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
 
 pub(super) fn f64_blob_to_f32(blob: &[u8]) -> Result<Vec<u8>> {
@@ -33,7 +32,7 @@ pub(super) fn dequantize_q4_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
     // Matches `dequantize_row_q4_0` in llama.cpp / ggml.
     for i in 0..nb {
         let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let d = f16::from_bits(u16::from_le_bytes([src[bo], src[bo + 1]])).to_f32();
         let qs = &src[bo + 2..bo + BLK_BYTES];
         for j in 0..16 {
             let x0 = (qs[j] & 0x0F) as i32 - 8;
@@ -57,7 +56,7 @@ pub(super) fn dequantize_q8_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
     // Matches `dequantize_row_q8_0`: `half` delta × int8 quants (ggml-common.h layout).
     for i in 0..nb {
         let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let d = f16::from_bits(u16::from_le_bytes([src[bo], src[bo + 1]])).to_f32();
         for j in 0..super::GGML_BLOCK_ELEMENTS {
             let q = src[bo + 2 + j] as i8;
             y[i * super::GGML_BLOCK_ELEMENTS + j] = q as f32 * d;
@@ -78,7 +77,7 @@ pub(super) fn dequantize_q5_0(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
 
     for i in 0..nb {
         let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let d = f16::from_bits(u16::from_le_bytes([src[bo], src[bo + 1]])).to_f32();
         let qs = &src[bo + 2..bo + 18];
         let qh = &src[bo + 18..bo + 22];
 
@@ -109,8 +108,8 @@ pub(super) fn dequantize_q4_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
 
     for i in 0..nb {
         let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
-        let dmin = f16::from_bits(LittleEndian::read_u16(&src[bo + 2..bo + 4])).to_f32();
+        let d = f16::from_bits(u16::from_le_bytes([src[bo], src[bo + 1]])).to_f32();
+        let dmin = f16::from_bits(u16::from_le_bytes([src[bo + 2], src[bo + 3]])).to_f32();
         let scales = &src[bo + 4..bo + 16];
         let qs = &src[bo + 16..bo + 16 + 128];
 
@@ -142,7 +141,7 @@ pub(super) fn dequantize_q6_k(src: &[u8], nelem: usize) -> Result<Vec<f32>> {
 
     for i in 0..nb {
         let bo = i * BLK_BYTES;
-        let d = f16::from_bits(LittleEndian::read_u16(&src[bo..bo + 2])).to_f32();
+        let d = f16::from_bits(u16::from_le_bytes([src[bo], src[bo + 1]])).to_f32();
         let scales = &src[bo + 2..bo + 18];
         let ql = &src[bo + 18..bo + 146];
         let qh = &src[bo + 146..bo + 210];

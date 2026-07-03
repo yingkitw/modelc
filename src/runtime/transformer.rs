@@ -2,7 +2,7 @@
 //!
 //! These execute GPT-2 / LLaMA artifacts directly from the in-memory `Runtime` so that
 //! `modelc run` produces real logits instead of echoing the input. The numeric helpers and
-//! the block structure mirror the code emitted by [`crate::codegen::native::forward`] exactly,
+//! the block structure mirror the code emitted by [`crate::codegen::native::NativeCodegen`] exactly,
 //! so `modelc run` and `modelc compile` yield identical outputs for the same model. Structure
 //! inspection (layer counts, hidden dim, head count) is shared via [`crate::arch`].
 

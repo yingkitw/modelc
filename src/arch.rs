@@ -1,6 +1,6 @@
 //! Shared model-structure inspection for transformer architectures.
 //!
-//! Both the codegen emitter ([`crate::codegen::native::forward`]) and the runtime
+//! Both the codegen emitter ([`crate::codegen::native::NativeCodegen`]) and the runtime
 //! transformer forward ([`crate::runtime::transformer`]) use these helpers so the two
 //! inference paths agree on layer counts, hidden dimensions, and head counts. Keeping
 //! the inspection logic in one place prevents drift between `modelc compile` and
