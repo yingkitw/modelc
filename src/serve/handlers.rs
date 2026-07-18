@@ -266,14 +266,10 @@ pub(super) async fn chat(
             content: m.content.clone(),
         })
         .collect();
-    let prompt =
-        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages)
-            .unwrap_or_else(|_| {
-                req.messages
-                    .last()
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default()
-            });
+    let prompt = crate::chat_template::apply_chat_template(
+        state.chat_template.as_deref(),
+        &messages,
+    );
     let gen_cfg = make_generation_config(
         &state.generation,
         req.max_tokens,
@@ -351,14 +347,10 @@ pub(super) async fn chat_stream(
             content: m.content.clone(),
         })
         .collect();
-    let prompt =
-        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages)
-            .unwrap_or_else(|_| {
-                req.messages
-                    .last()
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default()
-            });
+    let prompt = crate::chat_template::apply_chat_template(
+        state.chat_template.as_deref(),
+        &messages,
+    );
     let mut gen_cfg = make_generation_config(
         &state.generation,
         req.max_tokens,

@@ -2,6 +2,8 @@ mod common;
 
 use std::net::SocketAddr;
 
+use common::http::{self, HttpError, Response};
+
 use modelc::runtime::serve::Runtime;
 use modelc::runtime::transformer;
 use modelc::serve::run_server;
@@ -100,7 +102,7 @@ fn ephemeral_addr() -> SocketAddr {
 /// binding the listener when we first try).
 fn wait_for_server(url: &str) -> serde_json::Value {
     for _ in 0..50 {
-        if let Ok(resp) = ureq::get(url).call()
+        if let Ok(resp) = http::get(url).call()
             && let Ok(bytes) = read_body(resp)
             && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes)
         {
@@ -111,7 +113,7 @@ fn wait_for_server(url: &str) -> serde_json::Value {
     panic!("server never came up at {url}");
 }
 
-fn read_body(resp: ureq::http::Response<ureq::Body>) -> std::io::Result<Vec<u8>> {
+fn read_body(resp: Response) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut buf = Vec::new();
     resp.into_body().into_reader().read_to_end(&mut buf)?;
@@ -120,7 +122,7 @@ fn read_body(resp: ureq::http::Response<ureq::Body>) -> std::io::Result<Vec<u8>>
 
 fn post_json(url: &str, body: &serde_json::Value) -> serde_json::Value {
     let body_str = serde_json::to_string(body).unwrap();
-    let resp = ureq::post(url)
+    let resp = http::post(url)
         .content_type("application/json")
         .send(&body_str)
         .expect("POST failed");
@@ -570,7 +572,7 @@ async fn run_server_metrics_returns_prometheus_text() {
     let _ = post_json(&format!("{base}/chat"), &chat_body);
 
     // Fetch metrics in Prometheus text format.
-    let mut resp = ureq::get(&format!("{base}/metrics"))
+    let mut resp = http::get(&format!("{base}/metrics"))
         .call()
         .expect("metrics request");
     let text = resp.body_mut().read_to_string().expect("read metrics body");
@@ -656,7 +658,7 @@ async fn run_server_serves_openai_chat_stream() {
     });
     let body_str = serde_json::to_string(&body).unwrap();
 
-    let resp = ureq::post(&format!("{base}/v1/chat/completions"))
+    let resp = http::post(&format!("{base}/v1/chat/completions"))
         .content_type("application/json")
         .send(&body_str)
         .expect("request should succeed");
@@ -808,9 +810,9 @@ async fn run_server_api_key_rejects_unauthenticated() {
     wait_for_server(&format!("{base}/info"));
 
     // Request without Authorization header → 401
-    let status: u16 = match ureq::get(&format!("{base}/metrics")).call() {
-        Ok(r) => r.status().as_u16(),
-        Err(ureq::Error::StatusCode(code)) => code,
+    let status: u16 = match http::get(&format!("{base}/metrics")).call() {
+        Ok(r) => r.status(),
+        Err(HttpError::StatusCode(code)) => code,
         Err(_) => 0,
     };
     assert_eq!(status, 401, "unauthenticated request should be rejected");
@@ -838,7 +840,7 @@ async fn run_server_api_key_accepts_authenticated() {
     wait_for_server(&format!("{base}/info"));
 
     // Request with correct Bearer token → 200
-    let resp = ureq::get(&format!("{base}/metrics"))
+    let resp = http::get(&format!("{base}/metrics"))
         .header("Authorization", "Bearer secret")
         .call()
         .expect("request should succeed");
@@ -872,15 +874,15 @@ async fn run_server_rate_limit_rejects_over_limit() {
     wait_for_server(&format!("{base}/info"));
 
     // First request should succeed.
-    let resp1 = ureq::get(&format!("{base}/metrics"))
+    let resp1 = http::get(&format!("{base}/metrics"))
         .call()
         .expect("first request should succeed");
     assert_eq!(resp1.status(), 200, "first request should pass");
 
     // Second immediate request should be rate-limited (429).
-    let status: u16 = match ureq::get(&format!("{base}/metrics")).call() {
-        Ok(r) => r.status().as_u16(),
-        Err(ureq::Error::StatusCode(code)) => code,
+    let status: u16 = match http::get(&format!("{base}/metrics")).call() {
+        Ok(r) => r.status(),
+        Err(HttpError::StatusCode(code)) => code,
         Err(_) => 0,
     };
     assert_eq!(status, 429, "second request should be rate limited");
@@ -920,13 +922,13 @@ async fn run_server_handles_concurrent_transformer_requests() {
     let base_b = base.clone();
     let (resp_a, resp_b) = tokio::join!(
         tokio::task::spawn_blocking(move || {
-            ureq::post(&format!("{base_a}/chat"))
+            http::post(&format!("{base_a}/chat"))
                 .content_type("application/json")
                 .send(&serde_json::to_string(&body_a).unwrap())
                 .expect("concurrent request A should succeed")
         }),
         tokio::task::spawn_blocking(move || {
-            ureq::post(&format!("{base_b}/chat"))
+            http::post(&format!("{base_b}/chat"))
                 .content_type("application/json")
                 .send(&serde_json::to_string(&body_b).unwrap())
                 .expect("concurrent request B should succeed")
@@ -993,34 +995,34 @@ async fn run_server_max_concurrent_rejects_with_503() {
         tokio::task::spawn_blocking({
             let body = body_str.clone();
             let url = format!("{base}/chat");
-            move || ureq::post(&url).content_type("application/json").send(&body)
+            move || http::post(&url).content_type("application/json").send(&body)
         }),
         tokio::task::spawn_blocking({
             let body = body_str.clone();
             let url = format!("{base}/chat");
-            move || ureq::post(&url).content_type("application/json").send(&body)
+            move || http::post(&url).content_type("application/json").send(&body)
         }),
         tokio::task::spawn_blocking({
             let body = body_str.clone();
             let url = format!("{base}/chat");
-            move || ureq::post(&url).content_type("application/json").send(&body)
+            move || http::post(&url).content_type("application/json").send(&body)
         }),
     );
 
     let statuses = [
         match ra.expect("spawn should not panic") {
-            Ok(r) => r.status().as_u16(),
-            Err(ureq::Error::StatusCode(code)) => code,
+            Ok(r) => r.status(),
+            Err(HttpError::StatusCode(code)) => code,
             Err(_) => 0,
         },
         match rb.expect("spawn should not panic") {
-            Ok(r) => r.status().as_u16(),
-            Err(ureq::Error::StatusCode(code)) => code,
+            Ok(r) => r.status(),
+            Err(HttpError::StatusCode(code)) => code,
             Err(_) => 0,
         },
         match rc.expect("spawn should not panic") {
-            Ok(r) => r.status().as_u16(),
-            Err(ureq::Error::StatusCode(code)) => code,
+            Ok(r) => r.status(),
+            Err(HttpError::StatusCode(code)) => code,
             Err(_) => 0,
         },
     ];
@@ -1109,7 +1111,7 @@ async fn run_server_serves_api_version() {
 
     wait_for_server(&format!("{base}/info"));
 
-    let resp = ureq::get(&format!("{base}/api/version"))
+    let resp = http::get(&format!("{base}/api/version"))
         .call()
         .expect("version request should succeed");
     let bytes = read_body(resp).expect("read body");
@@ -1144,7 +1146,7 @@ async fn run_server_serves_props() {
 
     wait_for_server(&format!("{base}/info"));
 
-    let resp = ureq::get(&format!("{base}/props"))
+    let resp = http::get(&format!("{base}/props"))
         .call()
         .expect("props request should succeed");
     let bytes = read_body(resp).expect("read body");
@@ -1311,7 +1313,7 @@ async fn run_server_chat_stream_include_usage() {
     });
     let body_str = serde_json::to_string(&body).unwrap();
 
-    let resp = ureq::post(&format!("{base}/v1/chat/completions"))
+    let resp = http::post(&format!("{base}/v1/chat/completions"))
         .content_type("application/json")
         .send(&body_str)
         .expect("request should succeed");
@@ -1368,7 +1370,7 @@ async fn run_server_completions_stream_include_usage() {
     });
     let body_str = serde_json::to_string(&body).unwrap();
 
-    let resp = ureq::post(&format!("{base}/v1/completions"))
+    let resp = http::post(&format!("{base}/v1/completions"))
         .content_type("application/json")
         .send(&body_str)
         .expect("request should succeed");
@@ -1416,7 +1418,7 @@ async fn run_server_retrieve_model() {
 
     wait_for_server(&format!("{base}/info"));
 
-    let list = ureq::get(&format!("{base}/v1/models"))
+    let list = http::get(&format!("{base}/v1/models"))
         .call()
         .expect("list models should succeed");
     let list_bytes = read_body(list).expect("read body");
@@ -1426,7 +1428,7 @@ async fn run_server_retrieve_model() {
         .as_str()
         .expect("model id should be present");
 
-    let resp = ureq::get(&format!("{base}/v1/models/{model_id}"))
+    let resp = http::get(&format!("{base}/v1/models/{model_id}"))
         .call()
         .expect("retrieve model should succeed");
     let bytes = read_body(resp).expect("read body");
@@ -1435,7 +1437,7 @@ async fn run_server_retrieve_model() {
     assert_eq!(val["object"].as_str(), Some("model"));
     assert_eq!(val["owned_by"].as_str(), Some("modelc"));
 
-    let not_found = ureq::get(&format!("{base}/v1/models/nonexistent")).call();
+    let not_found = http::get(&format!("{base}/v1/models/nonexistent")).call();
     assert!(
         not_found.is_err(),
         "non-existent model should return error"

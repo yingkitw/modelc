@@ -13,7 +13,7 @@ fn addr(host_port: &str) -> SocketAddr {
 #[test]
 fn test_codegen_creates_project_structure() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -28,7 +28,7 @@ fn test_codegen_creates_project_structure() {
 #[test]
 fn test_codegen_cargo_toml_content() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -46,7 +46,7 @@ fn test_codegen_cargo_toml_content() {
 #[test]
 fn test_codegen_main_rs_contains_model_name() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -63,7 +63,7 @@ fn test_codegen_main_rs_contains_model_name() {
 #[test]
 fn test_codegen_main_rs_contains_tensor_metadata() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -79,7 +79,7 @@ fn test_codegen_main_rs_contains_tensor_metadata() {
 #[test]
 fn test_codegen_embeds_listen_address() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -93,7 +93,7 @@ fn test_codegen_embeds_listen_address() {
 #[test]
 fn test_codegen_embedded_blob_matches_model() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -114,7 +114,7 @@ fn test_codegen_embedded_blob_matches_model() {
 #[test]
 fn test_codegen_main_rs_compilable_structure() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -137,7 +137,7 @@ fn test_codegen_main_rs_compilable_structure() {
 #[test]
 fn test_codegen_large_model() {
     let model = common::create_large_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -159,7 +159,7 @@ fn test_codegen_large_model() {
 fn codegen_mlp_single_stack_emits_matmul() {
     let mut model = common::create_test_model();
     model.architecture = "mlp".to_string();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -176,7 +176,7 @@ fn codegen_generic_arch_keeps_echo_forward() {
     let mut model = common::create_test_model();
     model.architecture = "generic".to_string();
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let codegen = NativeCodegen;
     let project_dir = codegen
         .generate(&model, dir.path(), addr("127.0.0.1:8081"))
@@ -190,7 +190,7 @@ fn codegen_generic_arch_keeps_echo_forward() {
 #[test]
 fn test_codegen_total_params_in_output() {
     let model = common::create_test_model();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
 
     let codegen = NativeCodegen;
     let project_dir = codegen
@@ -209,7 +209,7 @@ fn test_codegen_total_params_in_output() {
 // =============================================================================
 
 fn emitted_main(model: &modelc::model::Model) -> String {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let codegen = NativeCodegen;
     let project_dir = codegen
         .generate(model, dir.path(), addr("127.0.0.1:8080"))
@@ -365,7 +365,7 @@ fn codegen_mlp_emitted_project_compiles() {
 }
 
 fn check_emitted_project_compiles(model: &modelc::model::Model) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let codegen = NativeCodegen;
     let project_dir = codegen
         .generate(model, dir.path(), addr("127.0.0.1:0"))

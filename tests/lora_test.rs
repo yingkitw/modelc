@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+mod common;
+
 use modelc::model::{DataType, Model, TensorData};
 
 /// Build a minimal safetensors file containing a single f32 tensor.
@@ -47,7 +49,7 @@ fn lora_apply_changes_base_tensor() -> Result<()> {
 
     // Build a minimal safetensors file with a single tensor.
     let lora_buf = make_minimal_lora_safetensors();
-    let temp_dir = tempfile::tempdir()?;
+    let temp_dir = common::tempdir()?;
     let lora_path = temp_dir.path().join("adapter.safetensors");
     std::fs::write(&lora_path, &lora_buf)?;
 
@@ -91,7 +93,7 @@ fn lora_apply_skips_non_f32() -> Result<()> {
     };
 
     let lora_buf = make_minimal_lora_safetensors();
-    let temp_dir = tempfile::tempdir()?;
+    let temp_dir = common::tempdir()?;
     let lora_path = temp_dir.path().join("adapter.safetensors");
     std::fs::write(&lora_path, &lora_buf)?;
 

@@ -375,13 +375,7 @@ pub(super) async fn chat_completion(
     }
 
     let prompt =
-        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages)
-            .unwrap_or_else(|_| {
-                req.messages
-                    .last()
-                    .and_then(|m| m.content.clone())
-                    .unwrap_or_default()
-            });
+        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages);
 
     let constraint = req
         .grammar
@@ -1189,6 +1183,33 @@ fn default_encoding_format() -> String {
     "float".to_string()
 }
 
+/// Standard base64 encoder (RFC 4648, no padding-stripping).
+/// Inline to avoid pulling in the `base64` crate.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 #[derive(Serialize)]
 pub(super) struct V1EmbeddingsResponse {
     object: &'static str,
@@ -1229,10 +1250,7 @@ pub(super) async fn v1_embeddings(
                 .iter()
                 .flat_map(|v| v.to_le_bytes())
                 .collect();
-            serde_json::Value::String(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &bytes,
-            ))
+            serde_json::Value::String(base64_encode(&bytes))
         } else {
             serde_json::to_value(embedding).unwrap_or(serde_json::Value::Null)
         };
@@ -1340,5 +1358,51 @@ mod tests {
         let text = r#"{"tool_calls": [{"name": "foo", "arguments": "{\"x\":1}"}]}"#;
         let calls = parse_tool_calls(text).expect("parses");
         assert_eq!(calls[0].function.arguments, "{\"x\":1}");
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        // RFC 4648 §10 test vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_encode_handles_arbitrary_bytes() {
+        // 3-byte chunks should not produce padding.
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_encode(&bytes);
+        assert_eq!(encoded.len() % 4, 0);
+        // Round-trip via the inverse mapping should yield the original.
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let chars: Vec<u8> = encoded.bytes().collect();
+        for chunk in chars.chunks(4) {
+            let mut vals = [0u32; 4];
+            for (i, &c) in chunk.iter().enumerate() {
+                vals[i] = match c {
+                    b'A'..=b'Z' => (c - b'A') as u32,
+                    b'a'..=b'z' => (c - b'a' + 26) as u32,
+                    b'0'..=b'9' => (c - b'0' + 52) as u32,
+                    b'+' => 62,
+                    b'/' => 63,
+                    b'=' => 0,
+                    _ => panic!("unexpected base64 char: {}", c as char),
+                };
+            }
+            let n = (vals[0] << 18) | (vals[1] << 12) | (vals[2] << 6) | vals[3];
+            decoded.push((n >> 16) as u8);
+            if chunk[2] != b'=' {
+                decoded.push((n >> 8) as u8);
+            }
+            if chunk[3] != b'=' {
+                decoded.push(n as u8);
+            }
+        }
+        assert_eq!(decoded, bytes);
     }
 }

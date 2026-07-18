@@ -1122,13 +1122,12 @@ pub(crate) fn softmax(xs: &[f32]) -> Vec<f32> {
 }
 
 pub(crate) fn multinomial(probs: &[f32], step: usize, seed: Option<u64>) -> u32 {
-    use rand::{Rng, SeedableRng};
     let r: f32 = if let Some(s) = seed {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(s.wrapping_add(step as u64));
-        rng.r#gen()
+        let mut rng = MiniRng::from_seed(s.wrapping_add(step as u64));
+        rng.gen_f32()
     } else {
-        let mut rng = rand::thread_rng();
-        rng.r#gen()
+        let mut rng = MiniRng::new();
+        rng.gen_f32()
     };
     let mut cum = 0.0f32;
     for (i, &p) in probs.iter().enumerate() {
@@ -1562,5 +1561,71 @@ mod tests {
             0,
         );
         assert_eq!(token, 1);
+    }
+}
+
+/// Minimal splitmix64 PRNG — replaces the `rand` dependency for sampling.
+///
+/// Not cryptographic. Plenty of statistical quality for token sampling.
+struct MiniRng(u64);
+
+impl MiniRng {
+    fn new() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xdead_beef_cafe_babe);
+        Self(Self::mix(seed))
+    }
+
+    fn from_seed(seed: u64) -> Self {
+        Self(Self::mix(seed))
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        Self::mix(self.0)
+    }
+
+    /// Returns a value in `[0.0, 1.0)`.
+    fn gen_f32(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
+    }
+
+    fn mix(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
+#[cfg(test)]
+mod mini_rng_tests {
+    use super::MiniRng;
+
+    #[test]
+    fn same_seed_same_sequence() {
+        let mut a = MiniRng::from_seed(42);
+        let mut b = MiniRng::from_seed(42);
+        for _ in 0..100 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
+
+    #[test]
+    fn different_seeds_diverge() {
+        let mut a = MiniRng::from_seed(1);
+        let mut b = MiniRng::from_seed(2);
+        assert_ne!(a.next_u64(), b.next_u64());
+    }
+
+    #[test]
+    fn f32_in_unit_range() {
+        let mut rng = MiniRng::from_seed(123);
+        for _ in 0..10_000 {
+            let v = rng.gen_f32();
+            assert!((0.0..1.0).contains(&v));
+        }
     }
 }

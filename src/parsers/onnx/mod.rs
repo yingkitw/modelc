@@ -166,7 +166,6 @@ pub(super) fn onnx_elem_to_model(dt: OnnxDt) -> Result<DataType> {
 #[cfg(test)]
 mod tests {
     use anyhow::{Context, Result};
-    use tempfile::tempdir;
 
     use onnx_rs::ast::{
         DataLocation, DataType as Odt, Graph, Model, OperatorSetId, StringStringEntry, TensorProto,
@@ -174,6 +173,7 @@ mod tests {
     use onnx_rs::encode;
 
     use crate::parsers::{WeightParser, onnx::OnnxParser};
+    use crate::tempdir::tempdir;
 
     #[test]
     fn external_float_initializer_roundtrip() -> Result<()> {

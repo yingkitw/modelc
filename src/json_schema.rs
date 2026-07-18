@@ -1,29 +1,37 @@
-//! Minimal JSON Schema validation for generated output.
+//! Lightweight JSON validation for generated output.
 //!
-//! When a schema is provided, the generated text is parsed as JSON and validated
-//! against the schema. If invalid, generation is retried up to a limit with a
-//! slightly higher temperature to encourage diversity.
+//! When a JSON Schema is provided, we don't run full schema validation (no external
+//! dep). Instead we require the output to parse as JSON and, when the schema carries a
+//! `type` field, match that top-level type. This catches the common failure mode
+//! (non-JSON or wrong shape) without pulling in a schema validator.
 
 use serde_json::Value;
 
-/// Validate a JSON string against a JSON Schema.
-///
-/// `schema` should be a valid JSON Schema object (parsed from a string).
-/// Returns `true` if `text` parses as JSON and validates against the schema.
+/// Returns true when `text` parses as JSON and matches the top-level `type`
+/// declared in `schema`, if any.
 pub fn validate(schema: &Value, text: &str) -> bool {
     let Ok(doc) = serde_json::from_str::<Value>(text) else {
         return false;
     };
-    match jsonschema::validator_for(schema) {
-        Ok(validator) => validator.is_valid(&doc),
-        Err(_) => false,
+    let Some(expected) = schema.get("type").and_then(Value::as_str) else {
+        return true;
+    };
+    match expected {
+        "object" => doc.is_object(),
+        "array" => doc.is_array(),
+        "string" => doc.is_string(),
+        "number" => doc.is_number(),
+        "integer" => doc.is_i64() || doc.is_u64(),
+        "boolean" | "bool" => doc.is_boolean(),
+        "null" => doc.is_null(),
+        _ => true,
     }
 }
 
-/// Generate text with JSON Schema validation, retrying up to `max_retries`.
+/// Generate text with JSON validation, retrying up to `max_retries`.
 ///
 /// `generate_fn` is a closure that takes a `&GenerationConfig` and returns text.
-/// `schema` is the parsed JSON Schema.
+/// `schema` is the parsed JSON Schema (only the top-level `type` is enforced).
 /// `base_config` is the original generation config.
 /// `max_retries` is the maximum number of retries (default 3).
 ///
@@ -39,7 +47,6 @@ where
 {
     for attempt in 0..=max_retries {
         let mut cfg = base_config.clone();
-        // Slightly increase temperature on retries to encourage diversity.
         if attempt > 0 && cfg.temperature <= 0.0 {
             cfg.temperature = 0.3 * attempt as f32;
         }
@@ -48,7 +55,6 @@ where
             return text;
         }
     }
-    // None validated — return the last attempt.
     generate_fn(base_config)
 }
 
@@ -72,6 +78,13 @@ mod tests {
     fn validate_rejects_wrong_type() {
         let schema = serde_json::json!({"type": "number"});
         assert!(!validate(&schema, r#""hello""#));
+    }
+
+    #[test]
+    fn validate_without_type_just_parses() {
+        let schema = serde_json::json!({});
+        assert!(validate(&schema, "{\"a\": 1}"));
+        assert!(!validate(&schema, "not json"));
     }
 
     #[test]

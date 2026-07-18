@@ -2,11 +2,72 @@
 
 #![allow(dead_code)]
 
+pub mod http;
+
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use modelc::model::{DataType, Model, TensorData};
+
+/// Minimal `tempfile`-like helpers — the `tempfile` crate is no longer a dependency.
+/// We avoid pulling in a real `tempfile` crate by using `std::env::temp_dir()` plus
+/// a process-unique counter. RAII cleanup removes the directory on drop.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+pub struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_suffix(label: &str) -> String {
+    let pid = std::process::id();
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("modelc-{}-{}-{}-{}", label, pid, nanos, seq)
+}
+
+pub fn tempdir() -> std::io::Result<TempDir> {
+    let path = std::env::temp_dir().join(unique_suffix("dir"));
+    std::fs::create_dir_all(&path)?;
+    Ok(TempDir { path })
+}
+
+pub fn tempfile() -> std::io::Result<TempFile> {
+    let path = std::env::temp_dir().join(unique_suffix("file"));
+    Ok(TempFile { path })
+}
 
 pub fn create_test_model() -> Model {
     let mut tensors = HashMap::new();

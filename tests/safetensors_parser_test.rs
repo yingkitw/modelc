@@ -5,7 +5,7 @@ use modelc::parsers::safetensors::SafetensorsParser;
 
 #[test]
 fn test_parse_single_f32_tensor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("single.safetensors");
 
     let data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0]);
@@ -24,7 +24,7 @@ fn test_parse_single_f32_tensor() {
 
 #[test]
 fn test_parse_multiple_tensors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("multi.safetensors");
 
     let w_data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -50,7 +50,7 @@ fn test_parse_multiple_tensors() {
 
 #[test]
 fn test_parse_f16_tensor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("f16.safetensors");
 
     let data = vec![0u8; 8]; // 4 elements * 2 bytes each
@@ -65,7 +65,7 @@ fn test_parse_f16_tensor() {
 
 #[test]
 fn test_parse_preserves_data() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("data.safetensors");
 
     let original_data = common::f32_to_bytes(&[42.0, -1.5, 0.0, 100.0]);
@@ -82,7 +82,7 @@ fn test_parse_preserves_data() {
 
 #[test]
 fn test_parse_metadata() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("test.safetensors");
 
     let data = common::f32_to_bytes(&[1.0]);
@@ -97,7 +97,7 @@ fn test_parse_metadata() {
 
 #[test]
 fn test_parse_1d_tensor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("vec.safetensors");
 
     let data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0]);
@@ -112,7 +112,7 @@ fn test_parse_1d_tensor() {
 
 #[test]
 fn test_parse_scalar_tensor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("scalar.safetensors");
 
     let data = common::f32_to_bytes(&[42.0]);
@@ -128,7 +128,7 @@ fn test_parse_scalar_tensor() {
 
 #[test]
 fn test_parse_3d_tensor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("cube.safetensors");
 
     let data = common::f32_to_bytes(&[0.0; 24]);
@@ -156,7 +156,7 @@ fn test_parse_nonexistent_file() {
 
 #[test]
 fn test_parse_invalid_data() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("bad.safetensors");
     std::fs::write(&path, b"not a safetensors file").unwrap();
 
@@ -167,7 +167,7 @@ fn test_parse_invalid_data() {
 
 #[test]
 fn test_parse_empty_safetensors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("empty.safetensors");
 
     common::create_safetensors_file(&path, vec![]);
@@ -181,7 +181,7 @@ fn test_parse_empty_safetensors() {
 
 #[test]
 fn test_parse_i32_tensor() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("int.safetensors");
 
     let data: Vec<u8> = [1i32, 2, 3, 4]

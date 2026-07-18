@@ -5,8 +5,6 @@ mod common;
 use std::fs::{File, read};
 use std::io::Write;
 
-use tempfile::tempdir;
-
 use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
@@ -16,7 +14,7 @@ use modelc::parsers::pytorch::PytorchParser;
 
 #[test]
 fn parse_zip_with_single_nested_safetensors() {
-    let dir = tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let inner_path = dir.path().join("inner.safetensors");
     let data = common::f32_to_bytes(&[9.0, -1.0, 2.5]);
     common::create_safetensors_file(&inner_path, vec![("vec", "F32", vec![3], data.clone())]);
@@ -42,7 +40,7 @@ fn parse_zip_with_single_nested_safetensors() {
 
 #[test]
 fn parse_zip_with_two_safetensors_prefixes_keys() {
-    let dir = tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let a_path = dir.path().join("a.safetensors");
     let b_path = dir.path().join("b.safetensors");
     common::create_safetensors_file(
@@ -72,7 +70,7 @@ fn parse_zip_with_two_safetensors_prefixes_keys() {
 
 #[test]
 fn plain_safetensors_file_still_parsed_as_pytorch() {
-    let dir = tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("weights.pt");
     let data = common::f32_to_bytes(&[1.0, 2.0]);
     common::create_safetensors_file(&path, vec![("x", "F32", vec![2], data.clone())]);

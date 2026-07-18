@@ -19,6 +19,7 @@ pub mod parsers;
 pub mod runtime;
 pub mod serve;
 pub mod store;
+pub mod tempdir;
 pub mod tokenizer;
 
 /// Semver plus short git SHA from `build.rs`, shown by `modelc --version`.

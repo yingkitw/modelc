@@ -24,7 +24,7 @@ fn test_resolve_model_path_rejects_empty() {
 #[test]
 fn test_remove_model_deletes_file() -> Result<()> {
     let model = common::create_test_model();
-    let tmp = tempfile::NamedTempFile::new()?;
+    let tmp = common::tempfile()?;
     modelc::pack::pack(&model, tmp.path(), false)?;
 
     let name = "__modelc_test_rm__";
@@ -40,7 +40,7 @@ fn test_remove_model_deletes_file() -> Result<()> {
 #[test]
 fn test_remove_model_all_deletes_versions() -> Result<()> {
     let model = common::create_test_model();
-    let tmp = tempfile::NamedTempFile::new()?;
+    let tmp = common::tempfile()?;
     modelc::pack::pack(&model, tmp.path(), false)?;
 
     let name = "__modelc_test_rm_all__";
@@ -62,7 +62,7 @@ fn test_remove_model_all_deletes_versions() -> Result<()> {
 #[test]
 fn test_remove_model_guard_rejects_without_force_or_all() -> Result<()> {
     let model = common::create_test_model();
-    let tmp = tempfile::NamedTempFile::new()?;
+    let tmp = common::tempfile()?;
     modelc::pack::pack(&model, tmp.path(), false)?;
 
     let name = "__modelc_test_rm_guard__";
@@ -91,7 +91,7 @@ fn test_remove_model_guard_rejects_without_force_or_all() -> Result<()> {
 #[test]
 fn test_copy_model_creates_copy() -> Result<()> {
     let model = common::create_test_model();
-    let tmp = tempfile::NamedTempFile::new()?;
+    let tmp = common::tempfile()?;
     modelc::pack::pack(&model, tmp.path(), false)?;
 
     let src_name = "__modelc_test_cp_src__";
@@ -117,7 +117,7 @@ fn test_copy_model_creates_copy() -> Result<()> {
 #[test]
 fn test_copy_model_rejects_existing_dest() -> Result<()> {
     let model = common::create_test_model();
-    let tmp = tempfile::NamedTempFile::new()?;
+    let tmp = common::tempfile()?;
     modelc::pack::pack(&model, tmp.path(), false)?;
 
     let name = "__modelc_test_cp_exists__";

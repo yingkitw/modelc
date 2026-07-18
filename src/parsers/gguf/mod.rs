@@ -426,6 +426,7 @@ mod tests {
     use half::f16;
 
     use super::*;
+    use crate::tempdir::tempfile;
 
     #[test]
     fn roundtrip_minimal_gguf_f32() -> Result<()> {
@@ -835,7 +836,7 @@ mod tests {
         buf.extend_from_slice(&VAL_UINT32.to_le_bytes());
         buf.extend_from_slice(&100u32.to_le_bytes());
 
-        let tmp = tempfile::NamedTempFile::new()?;
+        let tmp = tempfile()?;
         std::fs::write(tmp.path(), &buf)?;
 
         let meta = extract_tokenizer_metadata(tmp.path())?;

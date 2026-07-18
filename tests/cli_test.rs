@@ -84,7 +84,7 @@ fn test_detect_pt_case_insensitive() {
 
 #[test]
 fn test_detect_sniff_safetensors_odd_extension() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("weights.chk");
     let data = common::f32_to_bytes(&[9.0]);
     common::create_safetensors_file(&path, vec![("t", "F32", vec![1], data)]);
@@ -93,7 +93,7 @@ fn test_detect_sniff_safetensors_odd_extension() {
 
 #[test]
 fn test_detect_generic_bin_garbage_is_none() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("blob.bin");
     std::fs::write(&path, b"not-a-known-format").unwrap();
     assert_eq!(WeightFormat::detect(&path), None);

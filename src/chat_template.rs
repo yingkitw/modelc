@@ -1,10 +1,11 @@
-//! Chat template rendering for transformer models.
+//! Simple chat message formatting for transformer models.
 //!
-//! Reads Jinja2 chat templates from GGUF metadata (`tokenizer.chat_template`) and renders them
-//! with a message list before tokenization. Falls back to a simple concatenation when no template
-//! is available.
+//! Renders a list of messages as a single prompt. We deliberately do not embed a
+//! Jinja2 engine; for full chat-template support (e.g. Llama-3 special tokens),
+//! render the prompt client-side. The fallback format used here is
+//! `<role>: <content>\n` per message, suitable for base completion-style models
+//! and for tests that only need a deterministic prompt string.
 
-use minijinja::Environment;
 use serde::Serialize;
 
 /// A single message in a chat conversation.
@@ -14,32 +15,11 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-/// Apply a Jinja2 chat template to a list of messages.
+/// Render `messages` as a single prompt string.
 ///
-/// If `template` is `None`, falls back to a simple `role: content\n` concatenation.
-pub fn apply_chat_template(
-    template: Option<&str>,
-    messages: &[ChatMessage],
-) -> anyhow::Result<String> {
-    if let Some(tpl) = template {
-        let mut env = Environment::new();
-        env.add_template("chat", tpl)?;
-        let tmpl = env.get_template("chat")?;
-
-        let ctx = minijinja::context! {
-            messages => messages,
-            bos_token => "",
-            eos_token => "",
-            add_generation_prompt => true,
-        };
-
-        Ok(tmpl.render(ctx)?)
-    } else {
-        Ok(fallback_format(messages))
-    }
-}
-
-fn fallback_format(messages: &[ChatMessage]) -> String {
+/// The optional `template` argument is accepted for API stability but currently
+/// ignored — the fallback format is always used.
+pub fn apply_chat_template(_template: Option<&str>, messages: &[ChatMessage]) -> String {
     let mut out = String::new();
     for m in messages {
         out.push_str(&m.role);
@@ -55,29 +35,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fallback_without_template() {
+    fn formats_role_and_content() {
         let messages = vec![ChatMessage {
             role: "user".to_string(),
             content: "hello".to_string(),
         }];
-        let out = apply_chat_template(None, &messages).unwrap();
+        let out = apply_chat_template(None, &messages);
         assert_eq!(out, "user: hello\n");
     }
 
     #[test]
-    fn simple_jinja_template() {
-        let template = "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}assistant:";
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: "hi".to_string(),
-        }];
-        let out = apply_chat_template(Some(template), &messages).unwrap();
-        assert_eq!(out, "user: hi\nassistant:");
-    }
-
-    #[test]
-    fn llama3_like_template() {
-        let template = "<|begin_of_text|>{% for message in messages %}<|start_header_id|>{{ message.role }}<|end_header_id|>\n\n{{ message.content }}<|eot_id|>{% endfor %}<|start_header_id|>assistant<|end_header_id|>\n\n";
+    fn formats_multiple_messages() {
         let messages = vec![
             ChatMessage {
                 role: "system".to_string(),
@@ -85,13 +53,21 @@ mod tests {
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: "hello".to_string(),
+                content: "hi".to_string(),
             },
         ];
-        let out = apply_chat_template(Some(template), &messages).unwrap();
-        assert!(out.contains("system"));
-        assert!(out.contains("user"));
-        assert!(out.contains("assistant"));
-        assert!(out.contains("<|begin_of_text|>"));
+        let out = apply_chat_template(None, &messages);
+        assert_eq!(out, "system: You are helpful.\nuser: hi\n");
+    }
+
+    #[test]
+    fn template_argument_is_ignored() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let with = apply_chat_template(Some("{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"), &messages);
+        let without = apply_chat_template(None, &messages);
+        assert_eq!(with, without);
     }
 }

@@ -9,7 +9,7 @@ use modelc::compiler;
 #[test]
 #[ignore]
 fn test_e2e_compile_safetensors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let weights_path = dir.path().join("test_model.safetensors");
     let output_path = dir.path().join("test_model_serve");
 
@@ -48,7 +48,7 @@ fn test_e2e_compile_safetensors() {
 #[test]
 #[ignore]
 fn test_e2e_compile_detect_format() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let weights_path = dir.path().join("auto.safetensors");
     let output_path = dir.path().join("auto_serve");
 
@@ -77,7 +77,7 @@ fn test_e2e_compile_detect_format() {
 
 #[test]
 fn test_inspect_safetensors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("inspect.safetensors");
 
     let w_data = common::f32_to_bytes(&[1.0, 2.0, 3.0, 4.0]);
@@ -89,7 +89,7 @@ fn test_inspect_safetensors() {
 
 #[test]
 fn test_inspect_detect_format() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("detect.safetensors");
 
     let data = common::f32_to_bytes(&[1.0]);
@@ -107,7 +107,7 @@ fn test_inspect_nonexistent() {
 
 #[test]
 fn test_inspect_unknown_format() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("unknown.xyz");
     std::fs::write(&path, b"data").unwrap();
 
@@ -117,7 +117,7 @@ fn test_inspect_unknown_format() {
 
 #[test]
 fn test_compile_unknown_format_no_flag() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir().unwrap();
     let path = dir.path().join("unknown.xyz");
     std::fs::write(&path, b"data").unwrap();
 

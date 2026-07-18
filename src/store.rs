@@ -120,23 +120,75 @@ pub fn install(source: &Path, name: &str) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Download a `.modelc` file from a URL into the store with the given name.
+/// Download a `.modelc` file from an `http://` URL into the store with the given name.
+///
+/// Only plain HTTP is supported (HTTPS hosts should be downloaded with `curl`/`wget`
+/// and then installed via `modelc install <path>`).
 pub fn download(url: &str, name: &str) -> Result<PathBuf> {
     let dir = store_dir()?;
     let dest = dir.join(format!("{}.modelc", name));
 
-    let mut body = ureq::get(url)
-        .call()
-        .map_err(|e| anyhow::anyhow!("download failed: {}", e))?
-        .into_body();
-    let mut reader = body.as_reader();
-
-    let mut file =
-        std::fs::File::create(&dest).with_context(|| format!("failed to create {:?}", dest))?;
-    std::io::copy(&mut reader, &mut file)
+    let body = http_get(url)?;
+    std::fs::write(&dest, &body)
         .with_context(|| format!("failed to write downloaded data to {:?}", dest))?;
 
     Ok(dest)
+}
+
+/// Minimal HTTP/1.1 GET over `std::net::TcpStream`. Supports plain `http://` only.
+fn http_get(url: &str) -> Result<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let rest = url
+        .strip_prefix("http://")
+        .context("only http:// URLs are supported; use curl for https://")?;
+    let (host_port, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, format!("/{}", p)),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(80)),
+        None => (host_port.to_string(), 80u16),
+    };
+
+    let mut stream = TcpStream::connect((host.as_str(), port))
+        .with_context(|| format!("failed to connect to {}:{}", host, port))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(300)))
+        .context("failed to set read timeout")?;
+
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: modelc/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .context("failed to write HTTP request")?;
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .context("failed to read HTTP response")?;
+
+    let header_end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("invalid HTTP response: missing header terminator")?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .context("HTTP headers are not valid UTF-8")?;
+
+    let status_line = headers.lines().next().context("empty HTTP response")?;
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .context("invalid HTTP status line")?;
+    if status >= 400 {
+        anyhow::bail!("HTTP request failed with status {}", status);
+    }
+
+    Ok(response[header_end + 4..].to_vec())
 }
 
 /// List versioned copies of a model (files matching `<name>.v<N>.modelc`).

@@ -1,8 +1,10 @@
 use anyhow::Result;
 
+mod common;
+
 #[test]
 fn containerize_creates_files() -> Result<()> {
-    let temp_dir = tempfile::tempdir()?;
+    let temp_dir = common::tempdir()?;
     let artifact = temp_dir.path().join("test.modelc");
     std::fs::write(&artifact, b"FAKE_MODELC_DATA")?;
 

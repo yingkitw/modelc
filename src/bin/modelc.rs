@@ -291,9 +291,6 @@ fn main() -> Result<()> {
             });
             modelc::pack::export_to_safetensors(&path, &output_path)?;
         }
-        modelc::cli::Commands::Completions { shell } => {
-            modelc::cli::generate_completions(shell)?;
-        }
         modelc::cli::Commands::Containerize {
             input,
             output,

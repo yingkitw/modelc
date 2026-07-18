@@ -69,7 +69,7 @@ pub fn compile(
     // or INT8/INT4 tensors before generating the server.
     model.dequantize_in_place();
 
-    let build_dir = tempfile::tempdir().context("failed to create temp dir")?;
+    let build_dir = crate::tempdir::tempdir().context("failed to create temp dir")?;
     let codegen = NativeCodegen;
     let project_dir = codegen.generate(&model, build_dir.path(), listen)?;
 
