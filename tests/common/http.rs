@@ -92,15 +92,23 @@ impl Request {
 
     pub fn send_bytes(mut self, body: &[u8]) -> Result<Response, HttpError> {
         self.body = Some(body.to_vec());
-        self.dispatch()
+        // Move into a FnMut that reconstructs each attempt. We rebuild the Request
+        // from its captured parts; this is cheap (just an allocation).
+        let method = self.method;
+        let url = self.url.clone();
+        let headers = self.headers.clone();
+        let body = self.body.clone();
+        with_retry(move || do_request(method, &url, &headers, body.as_deref()))
     }
 
     pub fn call(self) -> Result<Response, HttpError> {
-        self.dispatch()
-    }
-
-    fn dispatch(self) -> Result<Response, HttpError> {
-        do_request(self.method, &self.url, &self.headers, self.body.as_deref())
+        // Move into a FnMut that reconstructs each attempt. We rebuild the Request
+        // from its captured parts; this is cheap (just an allocation).
+        let method = self.method;
+        let url = self.url.clone();
+        let headers = self.headers.clone();
+        let body = self.body.clone();
+        with_retry(move || do_request(method, &url, &headers, body.as_deref()))
     }
 }
 
@@ -212,4 +220,38 @@ pub fn read_body(resp: Response) -> std::io::Result<Vec<u8>> {
         .into_reader()
         .read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// True when an I/O error looks like a transient connection-level failure worth retrying.
+fn is_transient_io(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+const RETRY_ATTEMPTS: usize = 10;
+const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Wrap a single request attempt with retry on transient I/O errors.
+fn with_retry<F>(mut f: F) -> Result<Response, HttpError>
+where
+    F: FnMut() -> Result<Response, HttpError>,
+{
+    let mut last_err: Option<HttpError> = None;
+    for attempt in 0..RETRY_ATTEMPTS {
+        match f() {
+            Ok(resp) => return Ok(resp),
+            Err(HttpError::Io(e)) if attempt + 1 < RETRY_ATTEMPTS && is_transient_io(&e) => {
+                last_err = Some(HttpError::Io(e));
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("retry loop ran without recording an error"))
 }
