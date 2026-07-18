@@ -1,13 +1,18 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use half::bf16;
 use half::f16;
 
-use crate::model::{DataType, TensorData};
+use crate::model::{DataType, Model, TensorData};
 use crate::runtime::tensor::Tensor;
 
 pub struct Runtime {
     tensors: HashMap<String, Tensor>,
+    /// Lazily-built structural view (tensor names + shapes only) shared with the
+    /// `arch` inspection helpers. Built once per `Runtime` instance — a new
+    /// `Runtime` (e.g. after a LoRA swap) gets a fresh lock so the view refreshes.
+    view: OnceLock<Model>,
 }
 
 fn bytes_to_f32_slice(td: &TensorData) -> Option<Vec<f32>> {
@@ -128,7 +133,10 @@ impl Runtime {
                 tensors.insert(name.clone(), Tensor::from_vec(data, td.shape.clone()));
             }
         }
-        Self { tensors }
+        Self {
+            tensors,
+            view: OnceLock::new(),
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&Tensor> {
@@ -139,6 +147,35 @@ impl Runtime {
         let mut names: Vec<&String> = self.tensors.keys().collect();
         names.sort();
         names
+    }
+
+    /// Cached structural view of this runtime as a synthetic [`Model`], carrying only
+    /// tensor names and shapes (data is empty). Used by the `arch` inspection helpers
+    /// so layer/hidden/head detection does not re-scan the tensor map on every forward
+    /// pass. Cheap to build, free on subsequent calls.
+    pub(crate) fn model_view(&self) -> &Model {
+        let Runtime { tensors, view } = self;
+        view.get_or_init(|| build_model_view(tensors))
+    }
+}
+
+fn build_model_view(tensors: &HashMap<String, Tensor>) -> Model {
+    let mut view = HashMap::with_capacity(tensors.len());
+    for (name, t) in tensors {
+        view.insert(
+            name.clone(),
+            TensorData {
+                shape: t.shape.clone(),
+                dtype: DataType::F32,
+                data: Vec::new(),
+            },
+        );
+    }
+    Model {
+        name: String::new(),
+        architecture: String::new(),
+        tensors: view,
+        metadata: HashMap::new(),
     }
 }
 
@@ -202,5 +239,56 @@ mod tests {
         let rt = Runtime::from_raw(&raw);
         let t = rt.get("w").expect("tensor loaded");
         assert_eq!(t.data.len(), 32);
+    }
+
+    #[test]
+    fn model_view_is_memoized_and_exposes_shapes() {
+        let raw = HashMap::from([(
+            "w".to_string(),
+            TensorData {
+                shape: vec![4, 8],
+                dtype: DataType::F32,
+                data: [0.0f32; 32].iter().flat_map(|f| f.to_le_bytes()).collect(),
+            },
+        )]);
+
+        let rt = Runtime::from_raw(&raw);
+        let v1 = rt.model_view();
+        let v2 = rt.model_view();
+        // Same allocation → the structural view is built once and cached.
+        assert!(std::ptr::eq(v1, v2));
+        let td = v1.tensors.get("w").expect("tensor present in view");
+        assert_eq!(td.shape, vec![4, 8]);
+        // Data is intentionally empty in the structural view (shapes only).
+        assert!(td.data.is_empty());
+    }
+
+    #[test]
+    fn model_view_refreshes_after_runtime_swap() {
+        // A fresh Runtime (e.g. after a LoRA swap) must rebuild its view rather
+        // than serve a stale one from the previous instance.
+        let raw = HashMap::from([(
+            "a".to_string(),
+            TensorData {
+                shape: vec![2, 2],
+                dtype: DataType::F32,
+                data: vec![0u8; 16],
+            },
+        )]);
+        let rt = Runtime::from_raw(&raw);
+        assert!(rt.model_view().tensors.contains_key("a"));
+
+        let raw2 = HashMap::from([(
+            "b".to_string(),
+            TensorData {
+                shape: vec![2, 2],
+                dtype: DataType::F32,
+                data: vec![0u8; 16],
+            },
+        )]);
+        let rt2 = Runtime::from_raw(&raw2);
+        let view2 = rt2.model_view();
+        assert!(!view2.tensors.contains_key("a"));
+        assert!(view2.tensors.contains_key("b"));
     }
 }

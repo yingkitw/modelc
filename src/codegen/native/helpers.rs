@@ -1,5 +1,22 @@
 use crate::model::Model;
 
+/// The shared SIMD GEMV row dot-product. Compiled into `modelc` (runtime path) AND emitted
+/// verbatim into generated `modelc compile` binaries so the two paths share one source of
+/// truth and produce bit-identical logits. See `src/runtime/gemv.rs`.
+const GEMV_KERNEL: &str = include_str!("../../runtime/gemv.rs");
+
+/// `gemv.rs` as text suitable for emitting into a generated `main.rs`. The file's `//!`
+/// module-doc lines are stripped because inner doc comments are only valid at the top of a
+/// module; the kernel is injected mid-file in the emitted binary. Item-level `///` docs and
+/// the function bodies are preserved verbatim, keeping runtime and emitted paths identical.
+fn emitted_gemv_kernel() -> String {
+    GEMV_KERNEL
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//!"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Emit the runtime helpers required by the generated `forward` for this model's architecture.
 ///
 /// The MLP path keeps its existing `matmul_bias` / `relu_inplace` helpers. The GPT-2 and LLaMA
@@ -16,7 +33,7 @@ pub(super) fn emit_helpers(model: &Model) -> String {
 }
 
 fn mlp_helpers() -> String {
-    r#"fn decode_f32(state: &AppState, name: &str) -> Vec<f32> {
+    let body = r#"fn decode_f32(state: &AppState, name: &str) -> Vec<f32> {
     let meta = state
         .tensors
         .get(name)
@@ -76,12 +93,8 @@ fn matmul_bias(
 
     let mut out = vec![0f32; rows];
     for r in 0..rows {
-        let mut acc = bias[r];
         let row = &w_flat[r * cols..(r + 1) * cols];
-        for (wv, xv) in row.iter().zip(x.iter()) {
-            acc += *wv * *xv;
-        }
-        out[r] = acc;
+        out[r] = bias[r] + gemv_dot(row, x);
     }
     out
 }
@@ -90,13 +103,12 @@ fn relu_inplace(xs: &mut [f32]) {
     for v in xs {
         *v = v.max(0.0);
     }
-}"#
-    .trim_end()
-    .to_string()
+}"#.trim_end().to_string();
+    format!("{}\n\n{body}", emitted_gemv_kernel())
 }
 
 fn gpt2_helpers() -> String {
-    r#"fn decode_f32(state: &AppState, name: &str) -> Vec<f32> {
+    let body = r#"fn decode_f32(state: &AppState, name: &str) -> Vec<f32> {
     let meta = state
         .tensors
         .get(name)
@@ -139,12 +151,8 @@ fn linear(state: &AppState, weight_key: &str, bias_key: Option<&str>, x: &[f32])
 
     let mut out = vec![0f32; rows];
     for r in 0..rows {
-        let mut acc = bias[r];
         let row = &w_flat[r * cols..(r + 1) * cols];
-        for (wv, xv) in row.iter().zip(x.iter()) {
-            acc += *wv * *xv;
-        }
-        out[r] = acc;
+        out[r] = bias[r] + gemv_dot(row, x);
     }
     out
 }
@@ -184,13 +192,12 @@ fn add(a: &[f32], b: &[f32]) -> Vec<f32> {
 /// full QKV projection structure while remaining within the codegen GEMV (single-vector) contract.
 fn single_token_attention(_q: &[f32], _k: &[f32], v: &[f32], _n_heads: usize) -> Vec<f32> {
     v.to_vec()
-}"#
-    .trim_end()
-    .to_string()
+}"#.trim_end().to_string();
+    format!("{}\n\n{body}", emitted_gemv_kernel())
 }
 
 fn llama_helpers() -> String {
-    r#"fn decode_f32(state: &AppState, name: &str) -> Vec<f32> {
+    let body = r#"fn decode_f32(state: &AppState, name: &str) -> Vec<f32> {
     let meta = state
         .tensors
         .get(name)
@@ -226,12 +233,8 @@ fn linear(state: &AppState, weight_key: &str, x: &[f32]) -> Vec<f32> {
     let w_flat = decode_f32(state, weight_key);
     let mut out = vec![0f32; rows];
     for r in 0..rows {
-        let mut acc = 0.0f32;
         let row = &w_flat[r * cols..(r + 1) * cols];
-        for (wv, xv) in row.iter().zip(x.iter()) {
-            acc += *wv * *xv;
-        }
-        out[r] = acc;
+        out[r] = gemv_dot(row, x);
     }
     out
 }
@@ -282,7 +285,6 @@ fn rope(x: &[f32], pos: usize, n_heads: usize) -> Vec<f32> {
 /// Single-token causal attention; collapses to `V` for sequence length one (see gpt2 helper).
 fn single_token_attention(_q: &[f32], _k: &[f32], v: &[f32], _n_heads: usize) -> Vec<f32> {
     v.to_vec()
-}"#
-    .trim_end()
-    .to_string()
+}"#.trim_end().to_string();
+    format!("{}\n\n{body}", emitted_gemv_kernel())
 }

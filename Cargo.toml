@@ -1,12 +1,18 @@
 [package]
 name = "modelc"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
-description = "Compile model weight files to standalone executable binaries"
+# Minimum supported Rust version: edition 2024 (1.85) plus `let`-chains (1.88).
+rust-version = "1.88"
+authors = ["Ying Kit WONG"]
+description = "Compile LLM weights (GGUF, Safetensors, ONNX, PyTorch) into a single .modelc artifact and serve an OpenAI-compatible inference API."
 license = "Apache-2.0"
 repository = "https://github.com/yingkitw/modelc"
 homepage = "https://github.com/yingkitw/modelc"
 documentation = "https://docs.rs/modelc"
+readme = "README.md"
+keywords = ["llm", "inference", "gguf", "safetensors", "onnx"]
+categories = ["command-line-utilities", "science", "parser-implementations", "compilers"]
 build = "build.rs"
 
 [[bin]]
@@ -40,3 +46,13 @@ base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.29"
+
+# Optimized release profile: thin LTO + single codegen unit for whole-program
+# optimization, plus symbol stripping for a smaller binary. Skips `panic = "abort"`
+# so the Tokio runtime and `cargo test` keep working with unwinding.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+

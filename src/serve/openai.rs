@@ -138,6 +138,7 @@ pub(super) struct ChatCompletionRequest {
     stream_options: Option<StreamOptions>,
     /// Optional user identifier (OpenAI-standard, accepted but ignored).
     #[serde(default)]
+    #[allow(dead_code)]
     user: Option<String>,
 }
 
@@ -159,10 +160,12 @@ pub(super) struct ResponseFormat {
 #[derive(Deserialize)]
 pub(super) struct JsonSchemaDef {
     #[serde(default)]
+    #[allow(dead_code)] // OpenAI field accepted for API fidelity, ignored.
     name: Option<String>,
     #[serde(default)]
     schema: Option<serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)] // OpenAI field accepted for API fidelity, ignored.
     strict: Option<bool>,
 }
 
@@ -543,7 +546,7 @@ pub(super) async fn chat_completion(
     // ------------------------------------------------------------------
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_n = req.top_logprobs.unwrap_or(0).min(20) as usize;
-    let n = req.n.unwrap_or(1).max(1).min(20) as usize;
+    let n = req.n.unwrap_or(1).clamp(1, 20) as usize;
 
     let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
     let prompt_tokens = tokenizer.encode(&prompt).len();
@@ -789,6 +792,7 @@ pub(super) struct CompletionRequest {
     stream_options: Option<StreamOptions>,
     /// Optional user identifier (OpenAI-standard, accepted but ignored).
     #[serde(default)]
+    #[allow(dead_code)]
     user: Option<String>,
     #[serde(default)]
     stream: bool,
@@ -1022,7 +1026,7 @@ pub(super) async fn completions(
     // ------------------------------------------------------------------
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_n = req.top_logprobs.unwrap_or(0).min(20) as usize;
-    let n = req.n.unwrap_or(1).max(1).min(20) as usize;
+    let n = req.n.unwrap_or(1).clamp(1, 20) as usize;
     let best_of = req.best_of.unwrap_or(n as u32).max(n as u32).min(20) as usize;
     let echo_prompt = req.echo.unwrap_or(false);
     let suffix = req.suffix.as_deref().unwrap_or("");
@@ -1061,7 +1065,7 @@ pub(super) async fn completions(
         }
 
         // Sort by token count descending (proxy for highest logprob) and take top n.
-        all.sort_by(|a, b| b.2.cmp(&a.2));
+        all.sort_by_key(|b| std::cmp::Reverse(b.2));
         all.truncate(n);
 
         for (raw_output, logprobs_field, _) in all.into_iter() {
@@ -1252,7 +1256,7 @@ pub(super) async fn v1_embeddings(
         usage: Usage {
             prompt_tokens: total_tokens,
             completion_tokens: 0,
-            total_tokens: total_tokens,
+            total_tokens,
         },
     })
 }

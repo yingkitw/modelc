@@ -422,14 +422,11 @@ fn batched_gemv_bias(weight: &Tensor, bias: &Tensor, inputs: &[&[f32]]) -> Vec<V
     }
 
     let mut outs = vec![vec![0.0f32; rows]; batch];
+    let dot = crate::runtime::gemv::gemv_dot;
     for (r, row) in weight.data.chunks_exact(cols).enumerate().take(rows) {
         let b = bias.data[r];
         for (batch_idx, inp) in inputs.iter().enumerate() {
-            let mut acc = b;
-            for (wv, xv) in row.iter().zip(inp.iter()) {
-                acc += wv * xv;
-            }
-            outs[batch_idx][r] = acc;
+            outs[batch_idx][r] = b + dot(row, inp);
         }
     }
     outs
@@ -443,14 +440,11 @@ fn gemv_bias(weight: &Tensor, bias: &Tensor, x: &[f32]) -> Vec<f32> {
     assert_eq!(cols, x.len(), "gemv: input size mismatch");
     assert_eq!(bias.shape[0], rows, "gemv: bias size mismatch");
 
-    let mut out = vec![0.0f32; rows];
-    for (r, out_v) in out.iter_mut().enumerate().take(rows) {
-        let mut acc = bias.data[r];
+    let dot = crate::runtime::gemv::gemv_dot;
+    let mut out = Vec::with_capacity(rows);
+    for r in 0..rows {
         let row = &weight.data[r * cols..(r + 1) * cols];
-        for (wv, xv) in row.iter().zip(x.iter()) {
-            acc += wv * xv;
-        }
-        *out_v = acc;
+        out.push(bias.data[r] + dot(row, x));
     }
     out
 }

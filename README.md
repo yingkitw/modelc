@@ -1,47 +1,216 @@
 # modelc
 
-**modelc** is a Rust-based CLI that packages model files into **single, self-contained artifacts** optimized for size, footprint, and performance. It supports multiple model formats and provides an inference experience similar to **Ollama**, **vLLM**, and **SGLang** — run models locally with minimal setup.
+**Package LLM weights into one portable file. Serve an OpenAI-compatible API. All from a single Rust CLI.**
 
-## Why modelc
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Rust edition](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88+-orange.svg)](https://www.rust-lang.org/)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#cross-platform)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584.svg)](https://www.rust-lang.org/)
+[![docs.rs](https://img.shields.io/badge/docs.rs-modelc-rust)](https://docs.rs/modelc)
 
-- **Single-file packaging.** One file contains all model data and can be loaded directly by the CLI. No external weight trees, no path coordination, no "wrong checkpoint" drift.
-- **Size and performance optimized.** The packaged format is designed for minimal footprint and fast loading. Parsing and tensor layout happen at package time, so runtime overhead is low.
-- **Cross-platform.** Runs on **macOS**, **Windows**, and **Linux** from the same toolchain.
-- **Apple Silicon acceleration.** Native support for Apple Silicon **M-series** chips via Metal acceleration.
-- **Multiple format support.** Compatible with **Safetensors**, **GGUF**, **ONNX**, and **PyTorch** checkpoints.
-- **Simple operations.** `modelc run`, `modelc inspect`, `modelc compile` — a minimal command set for packaging, inspection, and serving.
+> **modelc** is a Rust CLI that compiles model weight files — **GGUF, Safetensors, ONNX, and PyTorch** — into a single self-contained `.modelc` artifact and runs an **OpenAI-compatible inference server** (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`). Think of it as a build tool plus a lightweight Ollama-style local runtime, in one binary, with native **Apple Silicon (Metal)** acceleration and CPU SIMD.
 
-**When weight files remain the better fit:** rapid A/B swaps without repackaging, very large checkpoints where embedding blows up artifacts, multitenant “one server, many paths,” or ecosystems that assume on-disk formats (mmap, GGUF loaders, ONNX Runtime with external weights).
+---
 
-See [SPEC.md](./SPEC.md) for scope and limits.
+## What is modelc?
 
-## Prerequisites
+modelc is a command-line tool for working with local language-model weight files. It does two jobs:
 
-- [Rust](https://rustup.rs/) toolchain with `cargo` on your `PATH` (the compiler runs `cargo build` on a generated project).
+1. **Package** weights into one `.modelc` file (JSON header + compressed tensor blob, optional INT4/INT8/FP16 quantization and pruning).
+2. **Serve** that artifact as an HTTP inference API that speaks the OpenAI protocol, so existing clients and SDKs work without changes.
 
-## Build
+It supports **GPT-2 and LLaMA** transformer forward passes, **MLP** models, and **ONNX** graph execution directly from the in-memory runtime — no Python, no PyTorch, no large framework runtime required. Output binaries are pure Rust (axum + tokio).
 
-Produce the **`modelc`** binary:
+### Cross-platform
+
+Runs on **macOS**, **Linux**, and **Windows** from the same Rust toolchain. On Apple Silicon (M1–M4) it uses the **Metal** GPU for matmul/elementwise kernels; on x86_64 and aarch64 it uses **AVX / NEON** SIMD GEMV with a scalar fallback.
+
+## How it compares
+
+| Capability | modelc | Ollama | vLLM | llama.cpp |
+|---|---|---|---|---|
+| Implementation language | Rust | Go (wraps llama.cpp) | Python + CUDA | C++ |
+| Model artifact | **single `.modelc` file** | layered blobs | HuggingFace weights | GGUF file |
+| OpenAI-compatible API | ✅ `/v1/*` | ✅ | ✅ | ✅ |
+| Native GPU | Metal (macOS) | via llama.cpp | CUDA / ROCm | CUDA, Metal, Vulkan |
+| CPU SIMD | ✅ AVX / NEON GEMV | via llama.cpp | limited | ✅ |
+| GGUF / Safetensors / ONNX / PyTorch | ✅ all four | GGUF | HF / Safetensors | GGUF |
+| Quantization | INT4 / INT8 / FP16 at pack | GGUF quants | AWQ / GPTQ | GGUF quants |
+| Speculative decoding, prefix cache, KV quant | ✅ | via llama.cpp | ✅ | ✅ |
+| Standalone emitted binary (`compile`) | ✅ | ❌ | ❌ | ❌ |
+| Best fit | packaging, portable single-file artifacts, lightweight serving | model zoo + chat app | high-throughput GPU serving | widest model support / edge |
+
+> modelc's niche is **packaging and portability**: one tool that compiles, optimizes, and serves from a single file. It is not a high-throughput GPU serving engine like vLLM — see [When not to use modelc](#when-not-to-use-modelc).
+
+## Quickstart
+
+```bash
+# 1. Build & install the CLI (Rust toolchain required)
+cargo install --path .
+
+# 2. Package a model into a single .modelc artifact
+modelc pack model.gguf --compress -o my.modelc
+
+# 3. Serve an OpenAI-compatible API on http://localhost:8080
+modelc run my.modelc
+
+# 4. Chat with it (OpenAI protocol)
+curl -s http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"my","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Or run a prebuilt binary directly:
 
 ```bash
 cargo build --release
+./target/release/modelc --help
 ```
 
-Binary path: `./target/release/modelc` (or `target/debug/modelc` without `--release`). To put `modelc` on your PATH:
+## Supported formats
+
+| Format | Flag (`-f`) | Extensions | Notes |
+|---|---|---|---|
+| **GGUF** | `gguf` | `.gguf`, `.bin` (sniffed) | F32/F16/BF16/I8/I16/I32/I64/F64 + Q4_0/Q5_0/Q8_0/Q4_K/Q6_K (dequantized on-the-fly). Reads BPE vocab, merges, BOS/EOS, and Jinja2 chat template from KV metadata. |
+| **Safetensors** | `safetensors` | `.safetensors` | Merges `__metadata__` (`architecture` / `model_type`) into the model IR. |
+| **ONNX** | `onnx` | `.onnx` | Inline, external-data, and segmented initializers; graph ops executed via the tensor runtime. |
+| **PyTorch** | `pytorch` | `.pt`, `.pth` | Torch **ZIP** containers incl. nested Safetensors payloads. Pickle-only checkpoints should be exported to Safetensors/ONNX/GGUF first. |
+
+Ambiguous or extensionless files (e.g. generic `.bin`) are auto-sniffed against GGUF / zip / Safetensors magic bytes.
+
+## Usage
+
+### Core workflow
 
 ```bash
-cargo install --path .
+# Package
+modelc pack model.safetensors -o my.modelc
+modelc pack model.gguf --compress -o my.modelc
+modelc pack model.safetensors --quantize int8 --prune 0.001 -o my.modelc
+
+# Serve
+modelc run my.modelc
+modelc run my.modelc --port 8080 --profile
+modelc run my.modelc --max-context 2048 --grammar "^\d+$"
+modelc run my.modelc --temperature 0.7 --max-tokens 512
+modelc run my.modelc --api-key sk-xxx --rate-limit 120
+modelc run my.modelc --max-concurrent 8
+
+# Local model store (Ollama-style)
+modelc list
+modelc rm my-model [--all|--force]
+modelc cp my-model my-model-copy
+modelc pull username/model-name --version 2
+modelc switch my-model 2
 ```
 
-## Test
+### Inspect & export
 
 ```bash
-cargo test
+modelc inspect model.safetensors
+modelc inspect model.safetensors --quant-sizes   # preview fp32/fp16/int8/int4/q4_0 sizes
+modelc inspect model.modelc --readme              # generate a Markdown model card
+modelc export model.modelc -o out.safetensors
+modelc verify model.modelc
+modelc bench model.modelc --iterations 50
+modelc search llama
 ```
+
+### Compile to a standalone binary (legacy)
+
+```bash
+modelc compile model.safetensors -o ./my-model-serve   # emits a pure-Rust axum server
+modelc containerize my.modelc                          # emits Dockerfile + entrypoint
+```
+
+The `compile` path and the `run` path produce **bit-identical logits** — they share one SIMD GEMV kernel (`src/runtime/gemv.rs`), so you can develop with `run` and ship `compile` and get the same numbers.
+
+## Flags reference
+
+### `pack` flags
+- **`--compress`** — zstd-compress the artifact (version-2 format).
+- **`--quantize fp16|int8|int4`** — quantize F32 tensors at pack time (INT4/INT8 auto-dequantize on `run`).
+- **`--prune <threshold>`** — zero small weights below threshold.
+- **`--arch llama|gpt2|mlp|…`** — optional architecture hint.
+- **`--format` / `-f`** — force the input weight format.
+- **`-o`** — output `.modelc` path.
+
+### `run` flags
+| Flag | Default | Purpose |
+|---|---|---|
+| `--bind` / `--port` | `0.0.0.0` / `8080` | HTTP bind address / port |
+| `--api-key <key>` | — | Require `Authorization: Bearer <key>` (exempts `/health`, `/info`) |
+| `--rate-limit <N>` | unlimited | Max requests/min per client IP |
+| `--max-concurrent <N>` | unlimited | In-flight inference cap; over-limit gets `503` |
+| `--max-context <N>` | — | Hard context limit → sliding-window KV eviction |
+| `--anchor-tokens <N>` | `0` | Preserve first N tokens during shifts (StreamingLLM) |
+| `--max-tokens <N>` | `256` | Max tokens to generate |
+| `--temperature <T>` | `1.0` | Sampling temperature |
+| `--top-p <P>` | `0.0` | Nucleus sampling |
+| `--min-p <P>` | `0.0` | Min-p sampling |
+| `--repetition-penalty` / `--presence-penalty` / `--frequency-penalty` | `1.0` / `0.0` / `0.0` | Token-reuse penalties |
+| `--grammar <regex>` | — | Regex grammar constraint during sampling |
+| `--seed <n>` | — | Deterministic sampling |
+| `--profile` | — | Print per-step inference timing |
+
+### `compile` flags
+The emitted `model-serve` binary binds `--bind`+`--port` unless `--listen ADDR:PORT` is set (wins, embedded verbatim; IPv6 like `[::1]:8080` supported). Other flags: `--arch`, `--format`/`-f`, `--target` (passed to `cargo build --target`), `--debug` (build with debug profile instead of `--release`).
+
+## HTTP API
+
+All responses are `application/json`; streaming endpoints use SSE (`text/event-stream`).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/info` | Model name, architecture, params, bytes, tensor names |
+| `GET` | `/health` | Liveness probe |
+| `GET` | `/metrics` | Prometheus text (request count, latency histogram, active gauge, tokens counter) |
+| `GET` | `/props` | llama.cpp-compatible server properties |
+| `GET` | `/api/version` | `{ version, git_sha }` |
+| `GET` | `/v1/system` | CPU/GPU/memory/core info |
+| `GET` | `/v1/models` · `/v1/models/:id` | OpenAI model list / retrieval |
+| `POST` | `/infer` | Raw tensor inference (`input` or batch `inputs`) |
+| `POST` | `/tokenize` · `/detokenize` | Token ID ↔ text round-trip |
+| `POST` | `/chat` · `/complete` | Native chat / completion |
+| `POST` | `/chat/stream` | SSE chat stream |
+| `POST` | `/embeddings` | Native embeddings (single or batch) |
+| `POST` | `/v1/chat/completions` | **OpenAI chat** (stream + non-stream, tools, logprobs, JSON schema, `n`, …) |
+| `POST` | `/v1/completions` | **OpenAI legacy completion** (stream + non-stream, `echo`, `best_of`, `suffix`, `n`, …) |
+| `POST` | `/v1/embeddings` | **OpenAI embeddings** (`encoding_format` float/base64, `dimensions`, `usage`) |
+| `POST` | `/lora/load` · `/lora/unload` | Hot-swap LoRA adapters without restart |
+
+**Inference backend priority:** ONNX execution plan → transformer forward (`gpt2`/`llama`) → MLP GEMV → echo fallback. Inputs longer than the hidden size are gracefully truncated.
+
+## Features
+
+### Inference & generation
+- **GPT-2 / LLaMA transformer runtime** — full FP32 forward (layer norm / RMS norm, GeLU / SwiGLU, RoPE, single-token causal attention, output projection), numerically matched to the emitted `compile` server.
+- **Autoregressive generation** — greedy, temperature, top-p (nucleus), min-p sampling; repetition / presence / frequency penalties; logit bias; stop sequences; deterministic `--seed`.
+- **KV cache** — per-layer K/V with FP32, INT8 (~4× smaller), and Mixed (hot FP32 + cold INT8) variants; sliding-window context shifting + StreamingLLM anchor-token preservation.
+- **Prefix caching** — LRU of KV snapshots keyed by token sequence; longest-prefix reuse across requests.
+- **Speculative decoding** — EAGLE3-style `MlpDraftModel` (tiny 2-layer MLP) or weight-free `PromptLookupDraftModel`; verified via the KV cache.
+- **Streaming** — SSE token streaming with request cancellation on client disconnect.
+- **Concurrent generation** — `RwLock` prefix cache with short hold times; transformer requests run in parallel up to CPU core count.
+
+### Quantization & optimization
+- **Pack-time quantization** — `--quantize fp16|int8|int4`; preview with `inspect --quant-sizes`.
+- **Weight pruning** — `--prune <threshold>`.
+- **GGUF quantized inference** — Q4_0/Q5_0/Q8_0/Q4_K/Q6_K preserved in-IR and dequantized on-the-fly (~8× artifact size reduction for Q4_0).
+- **zstd compression** — `--compress` (version-2 artifact format).
+- **SIMD GEMV** — NEON (aarch64) / AVX (x86_64) K-dimension vectorized dot product, shared bit-for-bit between `run` and `compile` via `src/runtime/gemv.rs`.
+
+### Serving & operations
+- **OpenAI compatibility** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`; tools, tool_choice, JSON mode / JSON Schema, `n`, `best_of`, `echo`, `suffix`, `logprobs`, `stream_options.include_usage`, `user`, `max_completion_tokens`, `response_format`.
+- **Auth & limits** — `--api-key` bearer auth, `--rate-limit` per-IP token bucket, `--max-concurrent` backpressure.
+- **Observability** — Prometheus `/metrics`, `/v1/system` hardware info, `/api/version`, `/props`.
+- **LoRA hot-swap** — load/unload adapters at runtime via HTTP, atomic runtime swap.
+- **Graceful shutdown** — drains in-flight requests (incl. SSE) on `SIGINT`/`SIGTERM`.
+- **Docker/OCI** — `modelc containerize` emits a minimal Dockerfile + entrypoint.
 
 ## Examples
 
-Runnable programs live under [`examples/`](./examples/); see [`examples/README.md`](./examples/README.md) for a table and quick flows. Typical invocations:
+Runnable programs live under [`examples/`](./examples/) (see [`examples/README.md`](./examples/README.md)):
 
 ```bash
 cargo run --example create_simple_model -- ./demo_mlp.safetensors
@@ -49,254 +218,58 @@ cargo run --example parse_weights -- ./demo_mlp.safetensors safetensors
 cargo run --example runtime_inference
 ```
 
-## Usage
+## When not to use modelc
 
-Examples use the **`modelc`** command. Put it on your `PATH` with `cargo install --path .`, or after `cargo build --release` call the binary by path (see **Build**).
+modelc trades flexibility for portability. Prefer raw weight files when you need:
+- **Rapid A/B swaps** without repackaging.
+- **Very large checkpoints** where embedding everything into one artifact is wasteful.
+- **Multitenant "one server, many paths"** deployments that assume on-disk layouts.
+- **Ecosystems that expect on-disk formats** (mmap loaders, GGUF loaders, ONNX Runtime with external weights, HuggingFace `transformers`).
 
-### Core workflow
+See [SPEC.md](./SPEC.md) for full scope and limits.
 
-**Pack** models into `.modelc` single-file artifacts:
+## FAQ
 
-```bash
-modelc pack path/to/model.safetensors -o my-model.modelc
-modelc pack path/to/model.gguf --compress -o my-model.modelc
-modelc pack path/to/model.safetensors --quantize int8 --prune 0.001 -o my-model.modelc
-```
+**Is modelc an Ollama replacement?**
+It overlaps Ollama's `pack`/`run`/`list` UX and exposes the same OpenAI API, but modelc focuses on single-file packaging and portable artifacts rather than a model zoo. Use Ollama for its catalog and chat app; use modelc when you want one optimized file you can ship anywhere.
 
-**Run** inference from local artifacts:
+**Does modelc need a GPU?**
+No. It runs on CPU everywhere (AVX/NEON SIMD). On Apple Silicon it additionally uses Metal. There is no CUDA backend — for GPU high-throughput serving use vLLM.
 
-```bash
-modelc run my-model.modelc
-modelc run my-model.modelc --port 8080 --profile
-modelc run my-model.modelc --max-context 2048 --grammar "^\d+$"
-modelc run my-model.modelc --temperature 0.7 --max-tokens 512
-modelc run my-model.modelc --api-key sk-xxx --rate-limit 120
-modelc run my-model.modelc --max-concurrent 8
-```
+**Which model architectures work end-to-end?**
+GPT-2 and LLaMA run full transformer forward passes with text generation. MLP models run stacked GEMV. ONNX models execute their graph ops. Other architectures parse and inspect correctly but fall back to echo output for generation.
 
-**List** locally stored models:
+**Is the API really OpenAI-compatible?**
+Yes — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and `/v1/models` follow the OpenAI schema (streaming, tools, logprobs, `n`, JSON schema, etc.), so drop-in clients work. Behavior is bounded by the loaded model's quality.
 
-```bash
-modelc list
-```
+**How is `run` different from `compile`?**
+`run` serves an existing `.modelc` artifact in-process. `compile` emits a standalone pure-Rust binary (`cargo build`). Both share the same SIMD GEMV kernel and produce identical logits, so `run` is for iteration and `compile` is for shipping.
 
-**Remove** a model from the local store:
+## Configuration
 
-```bash
-modelc rm my-model
-modelc rm my-model --all          # also delete versioned copies
-modelc rm my-model --force        # delete even if versioned copies exist
-```
-
-**Copy** a model in the local store:
-
-```bash
-modelc cp my-model my-model-copy
-```
-
-**Pull** models from remote sources:
-
-```bash
-modelc pull username/model-name
-modelc pull username/model-name --version 2
-```
-
-**Chat / completion inference:**
-
-```bash
-# HTTP API: POST /chat with messages
-# HTTP API: POST /complete with prompt
-# HTTP API: POST /chat/stream for SSE streaming
-```
-
-### Legacy compile workflow
-
-Inspect weights (tensor names, shapes, dtypes, sizes):
-
-```bash
-modelc inspect path/to/model.safetensors
-modelc inspect path/to/file -f gguf
-modelc inspect path/to/model.safetensors --quant-sizes   # preview fp32/fp16/int8/int4/q4_0 sizes
-```
-
-Compile to a standalone binary (default output: `<stem>_serve` next to the input):
-
-```bash
-modelc compile path/to/model.safetensors -o ./my-model-serve
-```
-
-From the built artifact in this repository (no install):
-
-```bash
-./target/release/modelc inspect path/to/model.safetensors
-./target/release/modelc compile path/to/model.safetensors -o ./my-model-serve
-```
-
-`modelc --help` and `modelc --version` show subcommands and semver plus a short git revision (from `build.rs` when `.git` is present).
-
-### Pack flags
-
-- **`--compress`** — use zstd compression to reduce artifact size (produces version 2 format).
-- **`--arch`** — optional hint (`llama`, `gpt2`, `mlp`, …) stored in the model.
-- **`--format` / `-f`** — weight format when extensions or magic-byte sniffing are ambiguous.
-- **`-o`** — output path for the `.modelc` artifact.
-
-### Run flags
-
-- **`--port`** — HTTP server port (default `8080`).
-- **`--bind`** — HTTP server bind address (default `0.0.0.0`).
-- **`--api-key <key>`** — Require `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`.
-- **`--rate-limit <N>`** — Max requests per minute per client IP (default: unlimited).
-- **`--max-concurrent <N>`** — Max concurrent inference requests. Excess requests receive `503 Service Unavailable`. Exempts `/health`, `/info`, and `/metrics`.
-- **`--max-context <N>`** — Hard context limit; triggers sliding-window KV eviction when exceeded.
-- **`--anchor-tokens <N>`** — Preserve the first N tokens during context shifting (StreamingLLM-style).
-- **`--temperature <T>`** — Sampling temperature (default `1.0`).
-- **`--max-tokens <N>`** — Max tokens to generate (default `256`).
-- **`--top-p <P>`** — Nucleus sampling threshold (default `0.0`, disabled).
-- **`--min-p <P>`** — Min-p sampling threshold (default `0.0`, disabled).
-- **`--repetition-penalty <F>`** — Multiplicative repetition penalty (default `1.0`, disabled).
-- **`--presence-penalty <F>`** — OpenAI-style presence penalty (default `0.0`, disabled).
-- **`--frequency-penalty <F>`** — OpenAI-style frequency penalty (default `0.0`, disabled).
-- **`--grammar <pattern>`** — Regex grammar constraint applied during sampling.
-- **`--profile`** — Print per-step inference timing.
-
-### Compile flags (legacy)
-
-The generated `model-serve` binary binds to **`--bind`** (IP, default `0.0.0.0`) plus **`--port`** (default `8080`), unless **`--listen ADDR:PORT`** is set, which wins and is embedded verbatim (IPv6 literals such as `[::1]:8080` are supported).
-
-Other compile flags:
-- **`--arch`** — optional hint (`llama`, `gpt2`, …) stored in the model and surfaced in `/info`.
-- **`--format` / `-f`** — weight format when extensions or magic-byte sniffing are ambiguous.
-- **`--target`** — passed through to `cargo build --target`.
-- **`--debug`** — builds the generated crate with Cargo’s debug profile instead of `--release` (release is the default).
-
-Supported input formats (`-f` when needed):
-
-| Flag value    | Typical extensions                          |
-|---------------|---------------------------------------------|
-| `safetensors` | `.safetensors`                              |
-| `gguf`        | `.gguf`, `.bin` with sniff / name heuristics |
-| `onnx`        | `.onnx`                                     |
-| `pytorch`     | `.pt`, `.pth`, name-heuristic `.bin`        |
-
-Ambiguous files (e.g. extensionless or generic `.bin`): the CLI may **sniff** GGUF / zip (PyTorch-ish) / small Safetensors blobs (see [SPEC.md](./SPEC.md)).
-
-## HTTP API (run + model-serve)
-
-| Method | Path                    | Body / response |
-|--------|-------------------------|-----------------|
-| `GET`  | `/info`                 | JSON: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (names). |
-| `GET`  | `/health`               | JSON: `status`, `model`, `architecture` — liveness probe. |
-| `POST` | `/infer`                | Request JSON: `{ "input": [f32, ...] }` or `{ "inputs": [[f32, ...], ...] }` for batch. Response: `{ "output": [f32, ...] }` or `{ "outputs": [[f32, ...], ...] }`. |
-| `POST` | `/chat`                 | Request JSON: `{ "messages": [{"role": "user", "content": "..."}] }`. Response: `{ "message": {"role": "assistant", "content": "..."} }`. |
-| `POST` | `/chat/stream`          | SSE stream of `{ "delta": "...", "done": bool }` chunks. |
-| `POST` | `/complete`             | Request JSON: `{ "prompt": "..." }`. Response: `{ "completion": "..." }`. |
-| `POST` | `/embeddings`           | Request JSON: `{ "input": "..." }`. Response: `{ "embedding": [f32, ...], "model": "..." }`. |
-| `POST` | `/v1/embeddings`        | OpenAI-compatible embeddings. Accepts `encoding_format: "float"` or `"base64"`. Returns `dimensions`, `index`, and `usage`. |
-| `POST` | `/tokenize`            | Request JSON: `{ "input": "..." }` or `{ "inputs": [...] }`. Response: `{ "tokens": [id, ...], "count": N }` (batch: `tokens_batch`). |
-| `GET`  | `/api/version`         | JSON: `version` (semver), `git_sha` — for orchestration/health checks. |
-| `GET`  | `/v1/system`           | System/hardware info: CPU cores, OS, arch, Metal availability, total memory. |
-| `GET`  | `/v1/models`            | OpenAI-compatible model list. |
-| `POST` | `/v1/chat/completions`  | OpenAI-compatible chat completion (streaming + non-streaming). |
-| `POST` | `/v1/completions`       | OpenAI-compatible legacy text completion (streaming + non-streaming). |
-
-**Inference backends** (priority order):
-1. **ONNX execution plan** — if the model metadata contains `onnx.execution_plan`, ops are executed via the runtime tensor engine (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast).
-2. **Transformer forward** — when `architecture == "gpt2"` or `"llama"`, runs the full FP32 transformer forward (layer norm / RMS norm, GeLU / SwiGLU, RoPE, single-token causal attention, output projection). Inputs are resized to the model hidden size; numerics match the `compile`-emitted server.
-3. **MLP GEMV** — when `architecture == "mlp"`, emits a stacked GEMV + bias (+ ReLU between hidden layers) using `layerN.weight`/`layerN.bias` or a single `weight`/`bias`.
-4. **Echo fallback** — returns input unchanged when no execution plan matches.
-
-All JSON responses are `application/json`; SSE uses `text/event-stream`.
-
-## crates.io checklist
-
-Before the first (`modelc`) publish:
-
-1. Bump `Cargo.toml` `version`, tag `vX.Y.Z`, run `cargo publish --dry-run`.
-2. Snapshot `modelc --help` / subcommand help after any CLI churn (crate README can embed the summary).
-3. After the first publish, add a crates.io version badge ([shields.io versioning](https://shields.io/category/version); crate URL https://crates.io/crates/modelc once live).
-4. Maintain a concise changelog (`CHANGELOG.md` optional) noting parser/format support changes.
-
-## Format references (parsers / exports)
-
-- Safetensors — [huggingface/safetensors](https://github.com/huggingface/safetensors)
-- GGUF — [GGML GGUF notes](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-- ONNX — [onnx.ai](https://onnx.ai/onnx/intro/)
-- PyTorch checkpoints — accepts mislabeled standalone Safetensors bytes and Torch **ZIP** containers that nest `*.safetensors` payloads; pickled-only checkpoints should be exported to Safetensors, ONNX, or GGUF externally.
-
-## Features
-
-- **ONNX graph execution** — parses ONNX graph nodes into an execution plan (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast) and runs inference via the tensor runtime.
-- **LoRA adapter support** — load and apply LoRA adapters on top of a base model at runtime (`src/lora.rs`).
-- **INT4 quantization + weight pruning** — pack-time `--quantize int4` and `--prune <threshold>` for extreme size reduction.
-- **Docker/OCI image generation** — `modelc containerize <artifact>` emits a minimal Dockerfile + entrypoint.
-- **Model versioning** — store multiple versions and `modelc switch <name> <version>`.
-- **Shell completions** — generate bash/zsh/fish completions for all subcommands.
-- **Per-op profiling** — `--profile` flag on `run` prints timing per inference step.
-- **KV cache** — `KvCache` stores per-layer Key/Value vectors for autoregressive generation. `forward_gpt2_cached` / `forward_llama_cached` append current K/V and compute attention over all cached positions, eliminating redundant recomputation.
-- **Autoregressive text generation** — `src/generate.rs` provides `generate()` with greedy, temperature, and top-p (nucleus) sampling, KV cache reuse, and token embedding lookup. Wires into the HTTP server so `/chat`, `/complete`, and `/v1/chat/completions` return real generated text for GPT-2 / LLaMA models. Accepts per-request `max_tokens`, `temperature`, and `top_p` overrides on all text generation endpoints.
-- **Byte-level BPE tokenizer** — `src/tokenizer.rs` provides encode/decode with greedy merge algorithm. Foundation for real text-in/text-out transformer inference.
-- **GGUF tokenizer metadata extraction** — reads vocab, merges, and BOS/EOS token IDs directly from GGUF KV metadata (`extract_tokenizer_metadata`). Constructs a `BpeTokenizer` from in-file tokenizer data without external files.
-- **Chat template rendering** — `src/chat_template.rs` reads Jinja2 templates from GGUF metadata (`tokenizer.chat_template`) and formats messages before tokenization using `minijinja`. Falls back to simple concatenation when no template is present.
-- **GGUF quantization inference** — Q4_0, Q5_0, Q8_0, Q4_K, Q6_K block-quantized tensors are preserved in IR and dequantized on-the-fly by `Runtime::from_raw` (`src/runtime/serve.rs`). Reduces `.modelc` artifact size ~8x for Q4_0 models while keeping the transformer forward pass functional. Codegen path (`compile`) calls `dequantize_in_place` before emitting the server so generated binaries still receive FP32 weights.
-- **Structured output / JSON mode** — `POST /v1/chat/completions` accepts `response_format: { type: "json_object" }` to constrain output to valid JSON. Injects a system prompt requesting JSON-only responses and post-processes generated text with `extract_json_object` to extract the first well-formed JSON object or array. Falls back to raw text if no valid JSON is found.
-- **Function calling / tool use** — `POST /v1/chat/completions` accepts an OpenAI-compatible `tools` array. When tools are present, a system prompt describing available tools is injected into the conversation. Generated output is parsed for a `tool_calls` JSON array; if found, the response returns `tool_calls` with `finish_reason: "tool_calls"`. Otherwise falls back to regular text content. Supports both inline JSON arguments and pre-serialized argument strings.
-- **Continuous batching (MLP)** — `POST /infer` with multiple `inputs` and MLP architecture routes to `run_mlp_forward_batched` (`src/serve/infer.rs`), which computes the entire batch in a single pass via `batched_gemv_bias`. Eliminates redundant weight traversal and improves CPU cache locality compared to serial per-item inference. Transformer generation batching is future work.
-- **Speculative decoding** — `generate()` supports `config.gamma > 0` to enable speculative decoding with an n-gram draft model (`src/generate.rs`). The draft model proposes `gamma` candidate tokens by looking up trigram continuations from the prefix; the target model verifies each candidate in a loop using the KV cache. Accepted tokens skip the sampling step. Now supports prefix caching (restores cached K/V before priming), context shifting (`max_context`), and grammar constraints (`sample_constrained`). Disabled by default (`gamma: 0`). Establishes infrastructure for future faster draft models (e.g., smaller transformer or prompt lookup decoding).
-- **Streaming token generation** — `/chat/stream` and `/v1/chat/completions` with `stream: true` generate token IDs via `generate_token_ids()`, then decode and emit each token incrementally through SSE. After each new token, the cumulative sequence is decoded and only the text delta is sent. The OpenAI-compatible stream emits `chat.completion.chunk` objects with `delta.role` on the first chunk and `delta.content` per token, ending with `finish_reason: "stop"` and a `[DONE]` sentinel. Non-transformer models fall back to a single chunk.
-- **Batched embeddings** — `POST /embeddings` accepts `inputs: ["...", "..."]` and returns `embeddings: [{"embedding": [...], "index": 0}, ...]`. Single-input `input: "..."` remains backward compatible and returns `embedding: [...]`.
-- **Token-level logprobs** — `POST /v1/chat/completions` accepts OpenAI-compatible `logprobs: true` and `top_logprobs: N` (0–20). `generate_with_logprobs()` (`src/generate.rs`) records `ln(P(token))` from the raw pre-temperature softmax plus up to N top alternatives per position, so logprobs are deterministic regardless of sampling temperature. The response carries `choices[].logprobs.content` with per-token `token`, `logprob`, raw UTF-8 `bytes`, and `top_logprobs` entries. The field is `null` when not requested (matching OpenAI); non-transformer models return an empty `content` array.
-- **Quantized KV cache** — `KvLayer::Int8` (`src/runtime/transformer.rs`) stores per-token K/V vectors as INT8 with per-token scales, giving ~4× memory reduction vs FP32. `KvCache::new_quantized(n_layers, hidden, use_int8)` selects INT8 or FP32 at creation; `GenerationConfig.use_int8_kv` wires the choice through `generate_token_ids`, `generate_with_logprobs`, and `speculative_generate`. Dequantization is transparent via `k_all`/`v_all`, so attention and generation logic is unchanged.
-- **Prefix caching** — `PrefixCache` (`src/prefix_cache.rs`) stores `KvCache` snapshots keyed by token sequence. Longest-prefix matching lets later requests whose prompt starts with a cached sequence restore the saved K/V and only process the divergent suffix. Wired into `generate_core`, `generate_token_ids_with_cache`, and `generate_with_logprobs_with_cache`. The serve layer locks a per-state cache and passes it through. LRU eviction bounds memory to 32 entries.
-- **LoRA loading at runtime via HTTP** — `POST /lora/load { path: "...", alpha: 1.0 }` clones the base model tensors, applies a Safetensors LoRA adapter (`src/lora.rs`), and atomically swaps the runtime via `RwLock<Runtime>`. `POST /lora/unload` restores the base model from the stored `base_tensors` without restarting the server.
-- **Grammar-based constrained decoding** — `GenerationConfig.constraint` holds an optional `Arc<dyn Constraint>`. `RegexConstraint` (`src/constraint.rs`) wraps a regex pattern and masks invalid tokens to `-inf` before sampling. The `sample_constrained` helper in `generate.rs` decodes the partial output, builds a per-token validity mask, and applies it. HTTP endpoints (`/chat`, `/complete`, `/v1/chat/completions`) accept an optional `grammar` string (regex pattern) per request. The heuristic is permissive (tries common suffixes to avoid false negatives) rather than exact, which is acceptable for a minimal implementation.
-- **Prometheus metrics** — `GET /metrics` renders request counts, inference latency histograms (buckets: 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, +Inf), active request gauge, and tokens-generated counter in Prometheus text format. Handlers use `ActiveRequestGuard` and `InferenceTimer` RAII structs so instrumentation is automatic and zero-overhead when not scraped.
-- **JSON Schema constrained generation** — `POST /chat`, `/complete`, and `/v1/chat/completions` accept an optional `json_schema` object per request. Generated text is parsed as JSON and validated against the schema using the `jsonschema` crate. If invalid, generation is retried up to 3 times with increasing temperature to encourage diversity. More robust than the post-hoc `json_object` mode (`response_format: { type: "json_object" }`), which still works for backward compatibility.
-- **Context shifting (sliding window KV cache)** — `GenerationConfig.max_context` sets a hard context limit. When total tokens exceed it during generation, `generate_core` shifts both the `KvCache` (`KvLayer::shift` removes oldest K/V vectors from every layer) and `token_ids` left, keeping roughly the newest 75%. `prompt_len` is adjusted so generation continues seamlessly. Enables effectively infinite context length at the cost of losing distant history.
-- **Mixed-precision KV cache** — `KvLayer::Mixed` stores recent tokens in FP32 and automatically moves older tokens to INT8 cold storage when the hot window (default 64 tokens) overflows. Preserves accuracy for the actively attended context while reducing memory footprint vs pure FP32. Compatible with prefix caching, context shifting, and speculative decoding.
-- **Anchor token preservation (StreamingLLM-style)** — `GenerationConfig.anchor_tokens` (default 0, set via `--anchor-tokens N`) preserves the first N initial tokens during context shifting. The first few tokens act as "attention sinks"; evicting them degrades generation quality. `KvLayer::shift_anchored` removes tokens from the middle (after anchors) rather than from the beginning. Works with all KV cache variants (FP32, INT8, Mixed).
-- **Concurrent transformer generation** — The prefix cache was a `Mutex` that serialized all transformer requests. Refactored to `RwLock` with brief lock hold times: read-lock for lookup, release during generation, write-lock for insertion. Multiple transformer requests now run in parallel, limited only by CPU cores. Covered by `run_server_handles_concurrent_transformer_requests` test.
-- **Attention allocation optimization** — `attention_kv` previously allocated ~3×n_heads buffers per attention call (e.g., ~432 allocations per token for a 12-layer, 12-head model). Rewrote to use a single pre-allocated scratch buffer reused across heads, plus `softmax_inplace` with zero allocations. Eliminates the dominant allocation hotspot in the transformer forward pass.
-- **OpenAI `/v1/completions` endpoint** — Legacy (non-chat) completions API: `POST /v1/completions { model, prompt, max_tokens, temperature, top_p, stop, stream }`. Returns `text_completion` objects with `choices[].text`. Supports streaming SSE, `logprobs`, `top_logprobs`, `grammar`, and `json_schema`.
-- **EAGLE3 / neural speculative decoding** — `src/draft.rs` introduces a `DraftModel` trait and an `MlpDraftModel`: a tiny 2-layer MLP (embedding → FC1 + ReLU → FC2 → logits) that is orders of magnitude faster than the full transformer. Falls back to `PromptLookupDraftModel` (weight-free, searches the token context for repeated substrings) when no neural draft tensors are present. Wired into all serve endpoints automatically.
-- **API key authentication + rate limiting** — `modelc run` accepts `--api-key <key>` (requires `Authorization: Bearer <key>` on all endpoints except `/health` and `/info`) and `--rate-limit <N>` (max requests per minute per client IP). Returns standard HTTP status codes (`401 Unauthorized`, `429 Too Many Requests`).
-- **Stop sequences** — `GenerationConfig.stop` holds a list of strings that halt generation when any appear in the decoded output. Checked after each token; output is truncated to just before the matched sequence. Wired through all text generation endpoints.
-- **Repetition / presence / frequency penalties** — three sampling penalties discourage token reuse. `repetition_penalty` (multiplicative, transformers-style) and OpenAI-standard `presence_penalty` (once per seen token) / `frequency_penalty` (scales with count) adjust logits before sampling. Wired through all text-generation endpoints (`/chat`, `/complete`, `/v1/chat/completions`, `/v1/completions`) as optional request fields and the CLI (`--repetition-penalty`, `--presence-penalty`, `--frequency-penalty`). They share a fast path that skips the per-token allocation when all are at their defaults.
-- **Logit bias** — OpenAI-standard `logit_bias` parameter: a JSON object mapping token ID to additive bias (-100 to 100). Positive values boost a token's likelihood; negative values suppress it. Applied after penalties but before grammar constraints. Wired through all text-generation endpoints as an optional `logit_bias` request field. Empty map = fast path (no allocation).
-- **`echo` and `n` for `/v1/completions`** — OpenAI-standard parameters: `echo: true` prepends the prompt to the completion in the response (streaming emits the prompt as the first chunk); `n: N` generates N independent completions (clamped 1–20) with incrementing `index` in `choices`. `n` is also supported on `/v1/chat/completions`.
-- **`/props` server properties endpoint** — `GET /props` (llama.cpp-compatible) exposes model name, architecture, total params/bytes, chat template, and default generation parameters so clients can auto-configure without trial-and-error. Exempt from auth and backpressure.
-- **`/detokenize` endpoint** — `POST /detokenize` (llama.cpp-compatible) decodes token IDs back to text, complementing `/tokenize` for round-trip token management.
-- **`suffix` for `/v1/completions`** — OpenAI-standard `suffix` parameter appends text after the generated completion. With `echo: true`, output is `prompt + completion + suffix`.
-- **`stream_options.include_usage`** — OpenAI-standard streaming option for `/v1/chat/completions` and `/v1/completions`. When `stream_options: { include_usage: true }` is set, the SSE stream emits a final chunk with empty `choices` and a `usage` object before `[DONE]`.
-- **`GET /v1/models/:id`** — OpenAI-standard model retrieval endpoint. Returns a single model object by ID, or `404 model_not_found` for unknown IDs.
-- **`best_of` for `/v1/completions`** — OpenAI-standard `best_of` generates N completions server-side (clamped 1–20), picks the best by token count, and returns the top `n`.
-- **`user` field** — OpenAI-standard `user` parameter accepted on both `/v1/chat/completions` and `/v1/completions` for abuse tracking. Accepted but ignored.
-- **`response_format: { type: "json_schema" }`** — OpenAI-standard Structured Outputs for `/v1/chat/completions`. Injects the schema as a system prompt and validates/retries generated output against it.
-- **`tool_choice` for `/v1/chat/completions`** — OpenAI-standard tool choice control: `"auto"` (default), `"none"` (no tools), `"required"` (must call a tool), or `{"type": "function", "function": {"name": "..."}}` (must call named tool).
-- **`name` field on messages** — OpenAI-standard `name` field on chat message objects, accepted and serialized in responses.
-- **`max_completion_tokens`** — OpenAI's newer parameter name for `max_tokens` (o1+ models). Accepted on both endpoints; takes precedence over `max_tokens` when both are provided.
-- **Batch `prompt` for `/v1/completions`** — OpenAI-standard batch mode. When `prompt` is an array of strings, generates completions for each prompt with incrementing `index`.
-- **Min-p sampling** — `min_p` keeps only tokens whose probability is at least `min_p` fraction of the max probability, then renormalizes. The threshold scales with the model's confidence per step, making it simpler and often more effective than top-p (nucleus). Can combine with `top_p` (min-p runs after). Wired through all text-generation endpoints as `min_p` and the CLI (`--min-p`).
-- **Tokenize endpoint** — `POST /tokenize` returns token IDs and count for a prompt (single `input` or batch `inputs`), using the same byte-level BPE tokenizer as `/chat`. Standard in Ollama and llama.cpp server; useful for prompt budgeting and management.
-- **System info endpoint** — `GET /v1/system` exposes best-effort hardware info (CPU cores, OS, arch, pointer width, Metal availability, total memory) for orchestration and debugging. No added dependencies (stdlib + `/proc/meminfo`/`sysctl`).
-- **Quantization size preview** — `modelc inspect --quant-sizes` previews the artifact size under each format (fp32/fp16/int8/int4/q4_0) and the savings vs the current size, without actually quantizing. Computed from element counts, so it's accurate regardless of current dtype.
-- **Request cancellation on disconnect** — when an SSE streaming client (`/chat/stream`, `/v1/chat/completions`, `/v1/completions` with `stream: true`) disconnects, the server trips a cooperative cancel flag checked once per token, aborting the generation loop instead of running to completion. Saves CPU when users stop a response mid-stream.
+A config file at `~/.modelc/config.toml` can set default `bind`, `port`, store path, and compression. Shell completions: `modelc completions bash|zsh|fish`. `modelc --help` and `modelc --version` list subcommands and the semver + git SHA (from `build.rs` when `.git` is present).
 
 ## Repository layout
 
-- `src/` — CLI, parsers, `Model` IR, codegen, runtime helpers, ONNX execution engine.
-  - `src/parsers/` — format-specific parsers, modularized by format (`gguf/`, `onnx/` subdirectories).
-  - `src/onnx_exec/` — ONNX graph execution plan builder and executor (`mod.rs`, `helpers.rs`).
-  - `src/codegen/native/` — native code generator, modularized (`mod.rs`, `forward.rs`, `helpers.rs`).
-  - `src/serve/` — HTTP inference server, modularized (`mod.rs`, `handlers.rs`, `infer.rs`).
-  - `src/tokenizer.rs` — byte-level BPE tokenizer (encode/decode with greedy merge algorithm).
-  - `src/chat_template.rs` — Jinja2 chat template rendering for message formatting before tokenization.
-- `examples/` — runnable `cargo --example` programs ([`examples/README.md`](./examples/README.md)).
-- `tests/` — integration tests.
+```
+src/
+  bin/modelc.rs     CLI entrypoint
+  cli.rs            clap commands, format detection, completions
+  model.rs          canonical Model / TensorData / DataType IR
+  parsers/          gguf/ onnx/ safetensors.rs pytorch.rs (WeightParser impls)
+  onnx_exec/        ONNX graph execution engine
+  codegen/native/   standalone-binary emitter (forward.rs, helpers.rs)
+  runtime/          tensor/ops/serve + transformer.rs (KV cache) + gemv.rs (shared SIMD)
+  serve/            axum server: handlers, infer, openai (v1/*), auth, metrics
+  generate.rs       autoregressive generation, samplers, speculative decoding
+  tokenizer.rs      byte-level BPE tokenizer
+  lora.rs prefix_cache.rs constraint.rs draft.rs  ...
+examples/           runnable cargo examples
+tests/              integration tests
+```
 
-See [SPEC.md](./SPEC.md), [ARCHITECTURE.md](./ARCHITECTURE.md), and [TODO.md](./TODO.md).
+Companion docs: [SPEC.md](./SPEC.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [TODO.md](./TODO.md) · [PRODUCT.md](./PRODUCT.md)
 
 ## License
 
 Licensed under the Apache License, Version 2.0 ([LICENSE](./LICENSE)).
-

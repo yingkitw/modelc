@@ -13,7 +13,7 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 
 | Module / path | Responsibility |
 |---------------|----------------|
-| `src/main.rs` | Binary entry; resolves `--listen` / `--bind`+`--port`, prints `CLI_VERSION`, calls compiler/packer/runner. |
+| `src/bin/modelc.rs` | Binary entry; resolves `--listen` / `--bind`+`--port`, prints `CLI_VERSION`, calls compiler/packer/runner. |
 | `src/cli.rs` | `Cli`, `Commands`, `WeightFormat`, `ModelArch`, format detection + magic sniffing, `compile_listen`, shell completions. |
 | `src/lib.rs` | Re-exports modules; `CLI_VERSION` (`CARGO_PKG_VERSION` + `MODELC_GIT_SHA` from `build.rs`). |
 | `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers; auto architecture inference from tensor names; `QuantPreview` for `--quant-sizes`. |
@@ -38,7 +38,8 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/onnx_exec/` | ONNX graph execution engine. `mod.rs` (plan builder, executor), `helpers.rs` (attribute getters, transpose, element-wise ops). |
 | `src/codegen/` | `CodeGenerator` trait; `native/` module emits standalone Rust server. |
 | `src/codegen/native/` | `mod.rs` (codegen entry, `generate_cargo_toml`, `generate_main_rs`, MLP plan detection), `forward.rs` (MLP/GPT2/LLaMA forward generation), `helpers.rs` (decode_f32, matmul_bias, relu_inplace). |
-| `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`); `transformer.rs` runs GPT-2/LLaMA forward passes + KV cache (`KvCache`/`KvLayer` FP32/INT8/Mixed, context shifting, anchor preservation). |
+| `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`, `gemv`); `transformer.rs` runs GPT-2/LLaMA forward passes + KV cache (`KvCache`/`KvLayer` FP32/INT8/Mixed, context shifting, anchor preservation). |
+| `src/runtime/gemv.rs` | Shared SIMD GEMV row dot-product (`gemv_dot`, NEON/AVX with scalar fallback). Compiled into `modelc` AND emitted verbatim into `modelc compile` binaries so `run` and `compile` produce bit-identical logits. |
 | `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `handlers.rs` (Axum endpoints incl. `/tokenize`, `/v1/system`), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
 | `src/metal.rs` | Apple Silicon Metal acceleration: matmul, relu, add, mul_scalar, softmax, layer_norm kernels (macOS only). |
 | `src/compute/` | Metal compute shaders (`shaders.metal`). |

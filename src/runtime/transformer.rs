@@ -6,8 +6,9 @@
 //! so `modelc run` and `modelc compile` yield identical outputs for the same model. Structure
 //! inspection (layer counts, hidden dim, head count) is shared via [`crate::arch`].
 
+use std::borrow::Cow;
+
 use crate::arch;
-use crate::model::{DataType, Model, TensorData};
 use crate::runtime::serve::Runtime;
 
 /// Run a single-vector (single-token) GPT-2 forward. `input.len()` must equal the model's
@@ -23,9 +24,9 @@ pub fn forward_gpt2_cached(
     profile: bool,
     kv_cache: &mut Option<KvCache>,
 ) -> Option<Vec<f32>> {
-    let view = runtime_model_view(runtime);
-    let layers = arch::detect_layers(&view, "transformer.h.");
-    let hidden = arch::gpt2_hidden_dim(&view, &layers);
+    let view = runtime.model_view();
+    let layers = arch::detect_layers(view, "transformer.h.");
+    let hidden = arch::gpt2_hidden_dim(view, &layers);
     let n_heads = arch::gpt2_head_count(hidden);
 
     let mut h = input.to_vec();
@@ -67,10 +68,10 @@ pub fn forward_llama_cached(
     profile: bool,
     kv_cache: &mut Option<KvCache>,
 ) -> Option<Vec<f32>> {
-    let view = runtime_model_view(runtime);
-    let layers = arch::llama_layers(&view);
-    let hidden = arch::llama_hidden_dim(&view, &layers);
-    let n_heads = arch::llama_head_count(&view, hidden);
+    let view = runtime.model_view();
+    let layers = arch::llama_layers(view);
+    let hidden = arch::llama_hidden_dim(view, &layers);
+    let n_heads = arch::llama_head_count(view, hidden);
 
     let mut h = input.to_vec();
 
@@ -98,9 +99,9 @@ pub fn forward_llama_cached(
 /// Extract the final hidden-state vector (after layer norm, before the output head) for
 /// GPT-2 artifacts. Returns `None` when the model lacks the necessary tensors.
 pub fn embed_gpt2(runtime: &Runtime, input: &[f32], profile: bool) -> Option<Vec<f32>> {
-    let view = runtime_model_view(runtime);
-    let layers = arch::detect_layers(&view, "transformer.h.");
-    let hidden = arch::gpt2_hidden_dim(&view, &layers);
+    let view = runtime.model_view();
+    let layers = arch::detect_layers(view, "transformer.h.");
+    let hidden = arch::gpt2_hidden_dim(view, &layers);
     let n_heads = arch::gpt2_head_count(hidden);
 
     let mut h = input.to_vec();
@@ -130,10 +131,10 @@ pub fn embed_gpt2(runtime: &Runtime, input: &[f32], profile: bool) -> Option<Vec
 /// Extract the final hidden-state vector (after RMS norm, before the output head) for
 /// LLaMA artifacts.
 pub fn embed_llama(runtime: &Runtime, input: &[f32], profile: bool) -> Option<Vec<f32>> {
-    let view = runtime_model_view(runtime);
-    let layers = arch::llama_layers(&view);
-    let hidden = arch::llama_hidden_dim(&view, &layers);
-    let n_heads = arch::llama_head_count(&view, hidden);
+    let view = runtime.model_view();
+    let layers = arch::llama_layers(view);
+    let hidden = arch::llama_hidden_dim(view, &layers);
+    let n_heads = arch::llama_head_count(view, hidden);
 
     let mut h = input.to_vec();
 
@@ -267,6 +268,27 @@ impl KvLayer {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Borrowed view of the accumulated K data.
+    ///
+    /// For [`KvLayer::Fp32`] (the default) this returns a borrowed slice into the
+    /// backing buffer — zero-copy, so attention pays nothing per token as the cache
+    /// grows. Quantized variants ([`KvLayer::Int8`] / [`KvLayer::Mixed`]) still
+    /// materialize owned FP32 via [`k_all`](Self::k_all), preserving their behavior.
+    pub fn k_all_cow(&self) -> Cow<'_, [f32]> {
+        match self {
+            KvLayer::Fp32 { k, .. } => Cow::Borrowed(k),
+            _ => Cow::Owned(self.k_all()),
+        }
+    }
+
+    /// Borrowed view of the accumulated V data. See [`k_all_cow`](Self::k_all_cow).
+    pub fn v_all_cow(&self) -> Cow<'_, [f32]> {
+        match self {
+            KvLayer::Fp32 { v, .. } => Cow::Borrowed(v),
+            _ => Cow::Owned(self.v_all()),
+        }
     }
 
     pub fn k_all(&self) -> Vec<f32> {
@@ -698,9 +720,9 @@ fn gpt2_attention(
 
     let (k_all, v_all) = if let Some(layer) = kv_cache {
         layer.append(k, v);
-        (layer.k_all(), layer.v_all())
+        (layer.k_all_cow(), layer.v_all_cow())
     } else {
-        (k.to_vec(), v.to_vec())
+        (Cow::Borrowed(k), Cow::Borrowed(v))
     };
 
     let attn = attention_kv(q, &k_all, &v_all, n_heads);
@@ -786,9 +808,9 @@ fn llama_attention(
 
     let (k_all, v_all) = if let Some(layer) = kv_cache {
         layer.append(&k, &v);
-        (layer.k_all(), layer.v_all())
+        (layer.k_all_cow(), layer.v_all_cow())
     } else {
-        (k, v)
+        (Cow::Borrowed(&k[..]), Cow::Borrowed(&v[..]))
     };
 
     let attn = attention_kv(&q, &k_all, &v_all, n_heads);
@@ -818,7 +840,10 @@ fn llama_mlp(runtime: &Runtime, prefix: &str, h: &[f32]) -> Option<Vec<f32>> {
 
 // ---------------------------------------------------------------------------
 // Numeric helpers — identical math to the emitted codegen helpers
-// (src/codegen/native/helpers.rs) so `run` and `compile` outputs match.
+// (src/codegen/native/helpers.rs) so `run` and `compile` outputs match. The GEMV
+// inner product is shared bit-for-bit between the two paths via
+// `src/runtime/gemv.rs` (`gemv_dot`), which the codegen emitter injects verbatim
+// into generated binaries. Edit that file and both paths move together.
 // ---------------------------------------------------------------------------
 
 /// `y = W x + b` for a dense `[out, in]` weight. `bias` may be empty/None → treated as zero.
@@ -830,14 +855,16 @@ fn linear_with(
     let (rows, cols) = matrix_dims(weight);
     assert_eq!(cols, x.len(), "linear: cols {cols} != input {}", x.len());
 
-    let mut out = vec![0.0f32; rows];
-    for (r, out_v) in out.iter_mut().enumerate() {
-        let mut acc = bias.and_then(|b| b.data.get(r).copied()).unwrap_or(0.0);
+    let dot = crate::runtime::gemv::gemv_dot;
+    let mut out = Vec::with_capacity(rows);
+    for r in 0..rows {
         let row = &weight.data[r * cols..(r + 1) * cols];
-        for (wv, xv) in row.iter().zip(x.iter()) {
-            acc += *wv * *xv;
-        }
-        *out_v = acc;
+        // `bias + dot` mirrors the emitted `linear`/`matmul_bias`; when bias is absent we
+        // return the dot verbatim (no `0.0 + dot`) so runtime and codegen stay bit-identical.
+        out.push(match bias {
+            Some(b) => b.data.get(r).copied().unwrap_or(0.0) + dot(row, x),
+            None => dot(row, x),
+        });
     }
     out
 }
@@ -1002,29 +1029,8 @@ fn softmax_inplace(xs: &mut [f32]) {
 // ---------------------------------------------------------------------------
 // Bridge: present the runtime's tensor names/shapes as a synthetic `Model` so the
 // shared `arch` inspection helpers can read structure without a real `Model` instance.
+// Implemented as `Runtime::model_view` (memoized); see `runtime/serve.rs`.
 // ---------------------------------------------------------------------------
-
-fn runtime_model_view(runtime: &Runtime) -> Model {
-    let mut tensors = std::collections::HashMap::new();
-    for name in runtime.tensor_names() {
-        if let Some(t) = runtime.get(name) {
-            tensors.insert(
-                name.clone(),
-                TensorData {
-                    shape: t.shape.clone(),
-                    dtype: DataType::F32,
-                    data: Vec::new(),
-                },
-            );
-        }
-    }
-    Model {
-        name: String::new(),
-        architecture: String::new(),
-        tensors,
-        metadata: std::collections::HashMap::new(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1361,5 +1367,76 @@ mod tests {
         // Each head's output should be a weighted sum of its V vectors,
         // so values should be finite and non-zero.
         assert!(out.iter().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn kv_layer_fp32_cow_is_zero_copy_and_correct() {
+        let mut layer = KvLayer::new_fp32();
+        let hidden = 4;
+        layer.append(
+            &[1.0, 2.0, 3.0, 4.0],
+            &[5.0, 6.0, 7.0, 8.0],
+        );
+        layer.append(
+            &[9.0, 10.0, 11.0, 12.0],
+            &[13.0, 14.0, 15.0, 16.0],
+        );
+
+        // FP32 path must borrow the backing buffer (zero-copy), not materialize.
+        let kcow = layer.k_all_cow();
+        let vcow = layer.v_all_cow();
+        assert!(
+            matches!(kcow, Cow::Borrowed(_)),
+            "FP32 K view should be borrowed (zero-copy)"
+        );
+        assert!(
+            matches!(vcow, Cow::Borrowed(_)),
+            "FP32 V view should be borrowed (zero-copy)"
+        );
+
+        // Borrowed view must equal the materialized Vec in content and length.
+        assert_eq!(kcow.as_ref(), layer.k_all().as_slice());
+        assert_eq!(vcow.as_ref(), layer.v_all().as_slice());
+        assert_eq!(kcow.len(), 2 * hidden);
+    }
+
+    #[test]
+    fn kv_layer_int8_cow_is_owned() {
+        let mut layer = KvLayer::new_int8(4);
+        layer.append(
+            &[1.0, 2.0, 3.0, 4.0],
+            &[5.0, 6.0, 7.0, 8.0],
+        );
+        // Quantized layers cannot borrow FP32 directly — they must materialize.
+        assert!(matches!(layer.k_all_cow(), Cow::Owned(_)));
+        assert!(matches!(layer.v_all_cow(), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn attention_kv_cow_path_matches_materialized() {
+        // Regression: the zero-copy Cow path feeding attention_kv must produce
+        // output identical to the previous materialize-then-slice path.
+        let n_heads = 2;
+        let head_dim = 4;
+        let seq_len = 3;
+        let q: Vec<f32> = (0..n_heads * head_dim).map(|i| (i as f32) * 0.1).collect();
+        let flat: Vec<f32> = (0..(seq_len * n_heads * head_dim))
+            .map(|i| (i as f32) * 0.05)
+            .collect();
+
+        let mut layer = KvLayer::new_fp32();
+        for t in 0..seq_len {
+            let start = t * n_heads * head_dim;
+            layer.append(&flat[start..start + n_heads * head_dim], &flat[start..start + n_heads * head_dim]);
+        }
+
+        let out_cow = attention_kv(&q, &layer.k_all_cow(), &layer.v_all_cow(), n_heads);
+        let k_mat = layer.k_all();
+        let v_mat = layer.v_all();
+        let out_mat = attention_kv(&q, &k_mat, &v_mat, n_heads);
+        assert_eq!(out_cow.len(), out_mat.len());
+        for (a, b) in out_cow.iter().zip(out_mat.iter()) {
+            assert!((a - b).abs() < 1e-6, "cow vs materialized mismatch: {a} vs {b}");
+        }
     }
 }

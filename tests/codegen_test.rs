@@ -218,6 +218,35 @@ fn emitted_main(model: &modelc::model::Model) -> String {
 }
 
 #[test]
+fn emitted_helpers_share_simd_gemv_kernel() {
+    // MLP and GPT-2 emitted binaries must embed the shared `gemv_dot` kernel so that
+    // `modelc run` and `modelc compile` share one source of truth (bit-identical logits).
+    let mlp = emitted_main(&common::create_test_model());
+    assert!(mlp.contains("fn gemv_dot"), "MLP emit must include shared gemv_dot");
+    assert!(
+        mlp.contains("bias[r] + gemv_dot("),
+        "MLP matmul_bias must route through gemv_dot"
+    );
+    // The module-doc `//!` lines must be stripped (they'd be invalid mid-file).
+    assert!(!mlp.contains("//!"), "emitted source must not contain `//!` doc lines");
+
+    let gpt2 = emitted_main(&common::create_gpt2_test_model());
+    assert!(gpt2.contains("fn gemv_dot"), "GPT-2 emit must include shared gemv_dot");
+    assert!(
+        gpt2.contains("bias[r] + gemv_dot("),
+        "GPT-2 linear must route through gemv_dot"
+    );
+
+    // The generic echo path emits no helpers and therefore no kernel.
+    let mut generic = common::create_test_model();
+    generic.architecture = "generic".to_string();
+    assert!(
+        !emitted_main(&generic).contains("fn gemv_dot"),
+        "generic echo path must not emit the kernel"
+    );
+}
+
+#[test]
 fn codegen_gpt2_emits_complete_transformer_block() {
     let model = common::create_gpt2_test_model();
     let src = emitted_main(&model);
@@ -327,6 +356,12 @@ fn codegen_gpt2_emitted_project_compiles() {
 #[ignore]
 fn codegen_llama_emitted_project_compiles() {
     check_emitted_project_compiles(&common::create_llama_test_model());
+}
+
+#[test]
+#[ignore]
+fn codegen_mlp_emitted_project_compiles() {
+    check_emitted_project_compiles(&common::create_test_model());
 }
 
 fn check_emitted_project_compiles(model: &modelc::model::Model) {

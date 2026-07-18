@@ -262,12 +262,8 @@ pub fn extract_tokenizer_metadata(path: &Path) -> Result<GgufTokenizerMetadata> 
                     let _ = cursor.read_kv_value_formatted(value_type);
                 }
             }
-            "tokenizer.chat_template" => {
-                if value_type == VAL_STRING {
-                    meta.chat_template = Some(cursor.read_string()?);
-                } else {
-                    let _ = cursor.read_kv_value_formatted(value_type);
-                }
+            "tokenizer.chat_template" if value_type == VAL_STRING => {
+                meta.chat_template = Some(cursor.read_string()?);
             }
             _ => {
                 let _ = cursor.read_kv_value_formatted(value_type);
