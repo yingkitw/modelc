@@ -202,6 +202,8 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `GET` | `/metrics` | Prometheus text (request count, latency histogram, active gauge, tokens counter) |
 | `GET` | `/props` | llama.cpp-compatible server properties |
 | `GET` | `/api/version` | `{ version, git_sha }` |
+| `GET` | `/api/tags` | **Ollama-compatible** local model store listing |
+| `POST` | `/api/show` | **Ollama-compatible** model details by name (no load) |
 | `GET` | `/v1/system` | CPU/GPU/memory/core info |
 | `GET` | `/v1/models` · `/v1/models/:id` | OpenAI model list / retrieval |
 | `POST` | `/infer` | Raw tensor inference (`input` or batch `inputs`) |

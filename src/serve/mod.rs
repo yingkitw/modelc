@@ -213,6 +213,8 @@ fn build_router(
         .route("/info", get(handlers::model_info))
         .route("/props", get(handlers::server_props))
         .route("/api/version", get(handlers::version_info))
+        .route("/api/tags", get(handlers::api_tags))
+        .route("/api/show", post(handlers::api_show))
         .route("/health", get(handlers::health))
         .route("/chat", post(handlers::chat))
         .route("/chat/stream", post(handlers::chat_stream))
@@ -484,6 +486,40 @@ struct RerankingResult {
 #[derive(Serialize)]
 struct Document {
     text: String,
+}
+
+#[derive(Serialize)]
+struct ApiTagsResponse {
+    models: Vec<ApiTag>,
+}
+
+#[derive(Serialize)]
+struct ApiTag {
+    name: String,
+    size: u64,
+    details: ApiTagDetails,
+}
+
+#[derive(Serialize)]
+struct ApiTagDetails {
+    architecture: String,
+    parameter_size: String,
+    quantization: String,
+}
+
+#[derive(Deserialize)]
+struct ApiShowRequest {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct ApiShowResponse {
+    name: String,
+    architecture: String,
+    size_bytes: u64,
+    parameter_size: String,
+    quantization: String,
+    tensor_count: usize,
 }
 
 #[derive(Deserialize)]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
+    response::IntoResponse,
     response::sse::{Event, Sse},
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -716,4 +717,54 @@ promptEl.focus();
 </body>
 </html>"#;
     axum::response::Html(html)
+}
+
+pub(super) async fn api_tags() -> Json<super::ApiTagsResponse> {
+    let models = crate::store::list_models().unwrap_or_default();
+    let tags: Vec<super::ApiTag> = models
+        .iter()
+        .map(|m| super::ApiTag {
+            name: m.name.clone(),
+            size: m.size_bytes,
+            details: super::ApiTagDetails {
+                architecture: m.architecture.clone().unwrap_or_default(),
+                parameter_size: format!("{}", m.params.unwrap_or(0)),
+                quantization: if m.compressed { "compressed" } else { "f32" }.to_string(),
+            },
+        })
+        .collect();
+    Json(super::ApiTagsResponse { models: tags })
+}
+
+pub(super) async fn api_show(
+    Json(req): Json<super::ApiShowRequest>,
+) -> axum::response::Response {
+    match crate::store::resolve_model_path(&req.name) {
+        Ok(path) => match crate::pack::read_header(&path) {
+            Ok(header) => {
+                let params: usize = header
+                    .tensors
+                    .iter()
+                    .map(|t| t.shape.iter().product::<usize>())
+                    .sum();
+                let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                Json(super::ApiShowResponse {
+                    name: header.name,
+                    architecture: header.architecture,
+                    size_bytes,
+                    parameter_size: format!("{}", params),
+                    quantization: header
+                        .metadata
+                        .get("quantization")
+                        .cloned()
+                        .unwrap_or_else(|| "f32".to_string()),
+                    tensor_count: header.tensors.len(),
+                })
+                .into_response()
+            }
+            Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                .into_response(),
+        },
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }

@@ -1824,3 +1824,77 @@ async fn run_server_serves_web_ui() {
         "should reference the chat completions endpoint"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_tags() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = http::get(&format!("{base}/api/tags"))
+        .call()
+        .expect("GET /api/tags should succeed");
+    let bytes = read_body(resp).expect("read body");
+    let val: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+    assert!(val["models"].is_array(), "models should be an array");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_show() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    // Install a model into the store so /api/show can find it.
+    let tmp = common::tempfile().unwrap();
+    modelc::pack::pack(&model, tmp.path(), false).unwrap();
+    let test_name = "__modelc_test_api_show__";
+    modelc::store::install(tmp.path(), test_name).unwrap();
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({ "name": test_name });
+    let val = post_json(&format!("{base}/api/show"), &body);
+    assert!(val["name"].as_str().is_some(), "name field present");
+    assert!(
+        val["architecture"].as_str().is_some(),
+        "architecture field present"
+    );
+    assert!(
+        val["size_bytes"].as_u64().is_some(),
+        "size_bytes field present"
+    );
+    assert!(
+        val["tensor_count"].as_u64().is_some(),
+        "tensor_count field present"
+    );
+
+    // Clean up.
+    modelc::store::remove_model(test_name, false, true).unwrap();
+}
