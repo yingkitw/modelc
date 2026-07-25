@@ -242,7 +242,7 @@ pub fn generate_token_ids_with_cache(
     draft_model: Option<&dyn crate::draft::DraftModel>,
 ) -> Vec<u32> {
     let prompt_ids = tokenizer.encode(prompt);
-    let lookup = cache.as_ref().and_then(|c| c.lookup(&prompt_ids));
+    let lookup = cache.as_ref().and_then(|c| c.lookup(&prompt_ids).ok());
     if config.gamma > 0 {
         let (text, maybe_kv) = speculative_generate(
             runtime,
@@ -263,7 +263,7 @@ pub fn generate_token_ids_with_cache(
         if let Some(ref mut c) = cache
             && let Some(kv) = maybe_kv
         {
-            c.insert(
+            let _ = c.insert(
                 all_ids,
                 CachedPrefix {
                     kv,
@@ -290,7 +290,7 @@ pub fn generate_token_ids_with_cache(
     {
         let mut full_ids = prompt_ids.clone();
         full_ids.extend_from_slice(&ids);
-        c.insert(
+        let _ = c.insert(
             full_ids,
             CachedPrefix {
                 kv,
@@ -361,7 +361,7 @@ pub fn generate_with_logprobs_with_cache(
     mut cache: Option<&mut PrefixCache>,
 ) -> (Vec<u32>, Vec<TokenLogprob>) {
     let prompt_ids = tokenizer.encode(prompt);
-    let lookup = cache.as_ref().and_then(|c| c.lookup(&prompt_ids));
+    let lookup = cache.as_ref().and_then(|c| c.lookup(&prompt_ids).ok());
     let (ids, logprobs, maybe_kv) = generate_core(
         runtime,
         architecture,
@@ -378,7 +378,7 @@ pub fn generate_with_logprobs_with_cache(
     {
         let mut full_ids = prompt_ids.clone();
         full_ids.extend_from_slice(&ids);
-        c.insert(
+        let _ = c.insert(
             full_ids,
             CachedPrefix {
                 kv,

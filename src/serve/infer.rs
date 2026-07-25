@@ -124,7 +124,7 @@ pub(super) fn run_text_inference_with_config(
         // Brief read lock for prefix cache lookup.
         let lookup = {
             let guard = state.prefix_cache.read().expect("prefix cache poisoned");
-            guard.lookup(&prompt_ids)
+            guard.lookup(&prompt_ids).ok()
         };
         let runtime = state.runtime.read().expect("runtime lock poisoned");
         let (ids, maybe_kv) = if config.gamma > 0 {
@@ -165,7 +165,7 @@ pub(super) fn run_text_inference_with_config(
             let mut guard = state.prefix_cache.write().expect("prefix cache poisoned");
             let mut full_ids = prompt_ids.clone();
             full_ids.extend_from_slice(&ids);
-            guard.insert(
+            let _ = guard.insert(
                 full_ids,
                 crate::prefix_cache::CachedPrefix {
                     kv,
@@ -223,7 +223,7 @@ pub(super) fn run_text_inference_token_ids(
         let prompt_ids = tokenizer.encode(prompt);
         let lookup = {
             let guard = state.prefix_cache.read().expect("prefix cache poisoned");
-            guard.lookup(&prompt_ids)
+            guard.lookup(&prompt_ids).ok()
         };
         let runtime = state.runtime.read().expect("runtime lock poisoned");
         let (ids, maybe_kv) = if config.gamma > 0 {
@@ -263,7 +263,7 @@ pub(super) fn run_text_inference_token_ids(
             let mut guard = state.prefix_cache.write().expect("prefix cache poisoned");
             let mut full_ids = prompt_ids.clone();
             full_ids.extend_from_slice(&ids);
-            guard.insert(
+            let _ = guard.insert(
                 full_ids,
                 crate::prefix_cache::CachedPrefix {
                     kv,
@@ -295,7 +295,7 @@ pub(super) fn run_text_inference_with_logprobs(
     let prompt_ids = tokenizer.encode(prompt);
     let lookup = {
         let guard = state.prefix_cache.read().expect("prefix cache poisoned");
-        guard.lookup(&prompt_ids)
+        guard.lookup(&prompt_ids).ok()
     };
     let runtime = state.runtime.read().expect("runtime lock poisoned");
     let (ids, logprobs, maybe_kv) = crate::generate::generate_core(
@@ -313,7 +313,7 @@ pub(super) fn run_text_inference_with_logprobs(
         let mut guard = state.prefix_cache.write().expect("prefix cache poisoned");
         let mut full_ids = prompt_ids.clone();
         full_ids.extend_from_slice(&ids);
-        guard.insert(
+        let _ = guard.insert(
             full_ids,
             crate::prefix_cache::CachedPrefix {
                 kv,

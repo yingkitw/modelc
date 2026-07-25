@@ -9,6 +9,7 @@ pub mod containerize;
 pub mod draft;
 pub mod generate;
 pub mod json_schema;
+pub mod kv_error;
 pub mod lora;
 pub mod metal;
 pub mod model;

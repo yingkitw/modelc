@@ -1,6 +1,6 @@
-# modelc
+# modelc — Rust LLM Inference Server & Model Packaging CLI
 
-**Package LLM weights into one portable file. Serve an OpenAI-compatible API. All from a single Rust CLI.**
+**Package LLM weights into one portable file. Serve an OpenAI-compatible API. All from a single Rust CLI with Metal GPU and CPU SIMD acceleration.**
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Rust edition](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
@@ -8,8 +8,30 @@
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#cross-platform)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584.svg)](https://www.rust-lang.org/)
 [![docs.rs](https://img.shields.io/badge/docs.rs-modelc-rust)](https://docs.rs/modelc)
+[![crates.io](https://img.shields.io/badge/crates.io-modelc-red)](https://crates.io/crates/modelc)
 
-> **modelc** is a Rust CLI that compiles model weight files — **GGUF, Safetensors, ONNX, and PyTorch** — into a single self-contained `.modelc` artifact and runs an **OpenAI-compatible inference server** (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`). Think of it as a build tool plus a lightweight Ollama-style local runtime, in one binary, with native **Apple Silicon (Metal)** acceleration and CPU SIMD.
+> **modelc** is a Rust CLI that compiles model weight files — **GGUF, Safetensors, ONNX, and PyTorch** — into a single self-contained `.modelc` artifact and runs an **OpenAI-compatible inference server** (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`). Think of it as a build tool plus a lightweight Ollama-style local runtime, in one binary, with native **Apple Silicon (Metal)** acceleration and CPU SIMD. No Python, no PyTorch, no large framework runtime — just one Rust binary that compiles, optimizes, and serves LLM models locally.
+
+---
+
+## Table of Contents
+
+- [What is modelc?](#what-is-modelc)
+- [Who is this for?](#who-is-this-for)
+- [How it compares](#how-it-compares)
+- [Quickstart](#quickstart)
+- [Supported formats](#supported-formats)
+- [Usage](#usage)
+- [Flags reference](#flags-reference)
+- [HTTP API](#http-api)
+- [Features](#features)
+- [Examples](#examples)
+- [When not to use modelc](#when-not-to-use-modelc)
+- [Alternatives](#alternatives)
+- [FAQ](#faq)
+- [Configuration](#configuration)
+- [Repository layout](#repository-layout)
+- [License](#license)
 
 ---
 
@@ -21,6 +43,17 @@ modelc is a command-line tool for working with local language-model weight files
 2. **Serve** that artifact as an HTTP inference API that speaks the OpenAI protocol, so existing clients and SDKs work without changes.
 
 It supports **GPT-2 and LLaMA** transformer forward passes, **MLP** models, and **ONNX** graph execution directly from the in-memory runtime — no Python, no PyTorch, no large framework runtime required. Output binaries are pure Rust (axum + tokio).
+
+## Who is this for?
+
+modelc is designed for developers and teams who need to:
+
+- **Package and ship LLM models** as a single portable file — no external weight files, no directory layouts to manage.
+- **Run local LLM inference** with an OpenAI-compatible API — drop-in replacement for OpenAI clients and SDKs.
+- **Serve models on Apple Silicon** with native Metal GPU acceleration, or on any CPU with AVX/NEON SIMD.
+- **Optimize models at pack time** — quantize to INT4/INT8/FP16, prune small weights, compress with zstd.
+- **Embed inference in Rust projects** — `compile` emits a standalone pure-Rust binary with no runtime dependencies.
+- **Avoid Python/PyTorch infrastructure** — modelc is a single Rust binary with zero Python dependencies.
 
 ### Cross-platform
 
@@ -228,6 +261,20 @@ modelc trades flexibility for portability. Prefer raw weight files when you need
 
 See [SPEC.md](./SPEC.md) for full scope and limits.
 
+## Alternatives
+
+modelc occupies a specific niche: **single-file LLM packaging + portable Rust inference server**. If modelc doesn't fit your use case, consider these alternatives:
+
+| Tool | Language | Best for | Key difference from modelc |
+|---|---|---|---|
+| [Ollama](https://github.com/ollama/ollama) | Go (wraps llama.cpp) | Model zoo + chat app | Large catalog, easy chat UI; no single-file artifacts |
+| [vLLM](https://github.com/vllm-project/vllm) | Python + CUDA | High-throughput GPU serving | CUDA/ROCm optimized for datacenter; requires Python |
+| [llama.cpp](https://github.com/ggerganov/llama.cpp) | C++ | Widest model support / edge | Most mature GGUF ecosystem; no packaging layer |
+| [llamafile](https://github.com/Mozilla-Ocho/llamafile) | C++ | Single-file executable | Embeds model + llama.cpp in one executable; not Rust |
+| [Candle](https://github.com/huggingface/candle) | Rust | Rust ML framework | Library, not a CLI/server; no packaging |
+| [mistral.rs](https://github.com/EricLBuehler/mistral.rs) | Rust | Rust inference engine | Broader model support; no single-file packaging |
+| [LocalAI](https://github.com/mudler/LocalAI) | Go | Drop-in OpenAI replacement | Multi-backend (llama.cpp, vllm); heavier deployment |
+
 ## FAQ
 
 **Is modelc an Ollama replacement?**
@@ -244,6 +291,18 @@ Yes — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and `/v1/mo
 
 **How is `run` different from `compile`?**
 `run` serves an existing `.modelc` artifact in-process. `compile` emits a standalone pure-Rust binary (`cargo build`). Both share the same SIMD GEMV kernel and produce identical logits, so `run` is for iteration and `compile` is for shipping.
+
+**Can I use modelc in production?**
+modelc is suitable for lightweight serving, edge deployment, and development workflows. For high-throughput multi-GPU production serving, use vLLM or a managed inference provider. modelc's strength is portability and single-file deployment.
+
+**What quantization formats are supported?**
+modelc supports INT4, INT8, and FP16 quantization at pack time (`--quantize`), plus GGUF native quantized formats (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K) which are preserved in the IR and dequantized on-the-fly during inference.
+
+**Does modelc support streaming?**
+Yes — all OpenAI-compatible endpoints support SSE streaming (`stream: true`), with request cancellation on client disconnect.
+
+**Can I use modelc with HuggingFace models?**
+Yes — export HuggingFace models to Safetensors or ONNX format, then `modelc pack` the exported file. PyTorch `.pt`/`.pth` checkpoints in ZIP format are also supported directly.
 
 ## Configuration
 
@@ -273,3 +332,7 @@ Companion docs: [SPEC.md](./SPEC.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · 
 ## License
 
 Licensed under the Apache License, Version 2.0 ([LICENSE](./LICENSE)).
+
+---
+
+**Keywords:** Rust LLM inference server · OpenAI-compatible API · GGUF · Safetensors · ONNX · PyTorch · model packaging · quantization · Metal GPU · CPU SIMD · local LLM · edge inference · single-file model artifact · transformer runtime · GPT-2 · LLaMA · speculative decoding · KV cache · prefix caching · LoRA hot-swap

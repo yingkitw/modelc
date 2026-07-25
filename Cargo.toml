@@ -1,18 +1,16 @@
 [package]
 name = "modelc"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
-# Minimum supported Rust version: edition 2024 (1.85) plus `let`-chains (1.88).
-rust-version = "1.88"
 authors = ["Ying Kit WONG"]
-description = "Compile LLM weights (GGUF, Safetensors, ONNX, PyTorch) into a single .modelc artifact and serve an OpenAI-compatible inference API."
+description = "Rust CLI that compiles LLM weights (GGUF, Safetensors, ONNX, PyTorch) into a single .modelc artifact and serves a local OpenAI-compatible inference API with Metal GPU and CPU SIMD acceleration."
 license = "Apache-2.0"
 repository = "https://github.com/yingkitw/modelc"
 homepage = "https://github.com/yingkitw/modelc"
 documentation = "https://docs.rs/modelc"
 readme = "README.md"
-keywords = ["llm", "inference", "gguf", "safetensors", "onnx"]
-categories = ["command-line-utilities", "science", "parser-implementations", "compilers"]
+keywords = ["llm", "inference", "openai", "gguf", "transformer"]
+categories = ["command-line-utilities", "science", "parser-implementations", "compilers", "web-programming::http-server"]
 build = "build.rs"
 
 [[bin]]
