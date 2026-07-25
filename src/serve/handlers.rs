@@ -15,10 +15,11 @@ use super::infer::{
 };
 use super::{
     AppState, CancelOnDrop, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse,
-    DefaultGenerationProps, DetokenizeRequest, DetokenizeResponse, EmbeddingEntry,
+    DefaultGenerationProps, DetokenizeRequest, DetokenizeResponse, Document, EmbeddingEntry,
     EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest, InferResponse,
-    LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo, ServerProps,
-    StreamChunk, SystemInfo, TokenizeRequest, TokenizeResponse, VersionInfo,
+    LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message, ModelInfo, RerankingRequest,
+    RerankingResponse, RerankingResult, ServerProps, StreamChunk, SystemInfo, TokenizeRequest,
+    TokenizeResponse, VersionInfo,
 };
 
 pub(super) async fn infer(
@@ -502,4 +503,58 @@ pub(super) async fn metrics_handler(
         .header("Content-Type", "text/plain; version=0.0.4")
         .body(body)
         .unwrap()
+}
+
+pub(super) async fn reranking(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RerankingRequest>,
+) -> Json<RerankingResponse> {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+
+    let query_input: Vec<f32> = req.query.bytes().map(|b| b as f32 / 255.0).collect();
+    let query_emb = run_embeddings(&state, &query_input).unwrap_or_default();
+
+    let mut results: Vec<RerankingResult> = req
+        .documents
+        .iter()
+        .enumerate()
+        .map(|(idx, doc)| {
+            let doc_input: Vec<f32> = doc.bytes().map(|b| b as f32 / 255.0).collect();
+            let doc_emb = run_embeddings(&state, &doc_input).unwrap_or_default();
+            let score = cosine_similarity(&query_emb, &doc_emb);
+            RerankingResult {
+                index: idx,
+                relevance_score: score,
+                document: Document {
+                    text: doc.clone(),
+                },
+            }
+        })
+        .collect();
+
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if let Some(top_n) = req.top_n {
+        results.truncate(top_n);
+    }
+
+    Json(RerankingResponse {
+        model: state.name.clone(),
+        results,
+    })
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }

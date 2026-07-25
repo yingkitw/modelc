@@ -1743,3 +1743,51 @@ async fn run_server_completions_batch_prompt() {
     assert_eq!(choices[0]["index"].as_u64(), Some(0));
     assert_eq!(choices[1]["index"].as_u64(), Some(1));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_reranking() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "query": "what is rust",
+        "documents": [
+            "Rust is a systems programming language",
+            "Python is a scripting language",
+            "Rust is memory-safe without garbage collection"
+        ],
+        "top_n": 2
+    });
+    let val = post_json(&format!("{base}/reranking"), &body);
+    assert!(val["model"].as_str().is_some(), "model field present");
+    let results = val["results"].as_array().expect("results should be array");
+    assert_eq!(results.len(), 2, "top_n=2 should return 2 results");
+    assert!(results[0]["index"].as_u64().is_some(), "index field present");
+    assert!(
+        results[0]["relevance_score"].as_f64().is_some(),
+        "relevance_score field present"
+    );
+    assert!(
+        results[0]["document"]["text"].as_str().is_some(),
+        "document.text field present"
+    );
+    assert!(
+        results[0]["relevance_score"].as_f64() >= results[1]["relevance_score"].as_f64(),
+        "results should be sorted by descending relevance"
+    );
+}

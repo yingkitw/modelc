@@ -123,7 +123,7 @@ impl PrefixCache {
             let kv_length = cached.kv.layers[0].as_ref().map(|l| l.len()).unwrap_or(0);
             // Allow KV length to be greater than or equal to token sequence length
             // (can happen when some tokens are cached but not all)
-            if kv_length > 0 && tokens.len() > 0 && kv_length < tokens.len() / 2 {
+            if kv_length > 0 && !tokens.is_empty() && kv_length < tokens.len() / 2 {
                 // Only error if KV is much shorter than expected - likely a real issue
                 return Err(CacheValidationError::DimensionMismatch {
                     layer: 0,

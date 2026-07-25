@@ -226,6 +226,7 @@ fn build_router(
         .route("/v1/chat/completions", post(openai::chat_completion))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/embeddings", post(openai::v1_embeddings))
+        .route("/reranking", post(handlers::reranking))
         .route("/lora/load", post(handlers::lora_load))
         .route("/lora/unload", post(handlers::lora_unload))
         .with_state(state.clone());
@@ -455,6 +456,32 @@ struct EmbeddingsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     embeddings: Option<Vec<EmbeddingEntry>>,
     model: String,
+}
+
+#[derive(Deserialize)]
+struct RerankingRequest {
+    query: String,
+    documents: Vec<String>,
+    #[serde(default)]
+    top_n: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct RerankingResponse {
+    model: String,
+    results: Vec<RerankingResult>,
+}
+
+#[derive(Serialize)]
+struct RerankingResult {
+    index: usize,
+    relevance_score: f32,
+    document: Document,
+}
+
+#[derive(Serialize)]
+struct Document {
+    text: String,
 }
 
 #[derive(Deserialize)]

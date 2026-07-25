@@ -160,7 +160,7 @@ fn test_cache_with_zero_capacity() {
     // Should still function with minimum capacity of 1
     assert_eq!(cache.capacity(), 1);
     
-    let tokens = vec![1 as u32];
+    let tokens = vec![1_u32];
     let result = cache.insert(
         tokens,
         CachedPrefix {
@@ -291,7 +291,7 @@ fn test_cache_with_empty_kv_layers() {
     let mut cache = PrefixCache::new(10);
     
     let tokens = vec![1, 2, 3];
-    let mut kv = KvCache::new(2);
+    let kv = KvCache::new(2);
     // Don't populate layers - leave them empty
     
     let result = cache.insert(
@@ -523,7 +523,7 @@ fn test_cache_at_capacity_boundaries() {
     assert_eq!(cache.len(), capacity);
     
     // Try to insert one more - should succeed and evict LRU
-    let tokens = vec![99 as u32; 2];
+    let tokens = vec![99_u32; 2];
     assert!(cache.insert(
         tokens,
         CachedPrefix {

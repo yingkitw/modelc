@@ -259,7 +259,7 @@ fn test_from_dimension_mismatch_to_kv_error() {
 #[test]
 fn test_kv_result_ok() {
     let result: KvResult<i32> = Ok(42);
-    assert_eq!(result.unwrap(), 42);
+    assert_eq!(result, Ok(42));
 }
 
 #[test]
@@ -271,10 +271,8 @@ fn test_kv_result_err() {
 #[test]
 fn test_kv_result_with_context() {
     let ctx = KvContext::new("test_operation").with_layer(1);
-    let result: KvResult<i32> = Err(ctx.dimension_error(64, 32));
+    let err = ctx.dimension_error(64, 32);
     
-    assert!(result.is_err());
-    let err = result.unwrap_err();
     assert!(matches!(err, KvError::InvalidDimensions { .. }));
 }
 
@@ -468,7 +466,7 @@ fn test_error_in_nested_operations() {
                 Err(_e) => {
                     let ctx = KvContext::new("outer_operation")
                         .with_position(idx);
-                    return Err(ctx.out_of_bounds_error(*value, 100, false).into());
+                    return Err(ctx.out_of_bounds_error(*value, 100, false));
                 }
             }
         }

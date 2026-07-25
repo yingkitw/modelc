@@ -205,7 +205,7 @@ fn test_cache_respects_capacity_with_errors() {
     assert_eq!(cache.len(), capacity);
     
     // Try to insert oversized sequence - should fail
-    let oversized = vec![99 as u32; 10];
+    let oversized = vec![99_u32; 10];
     let result = cache.insert(
         oversized,
         CachedPrefix {
@@ -329,7 +329,7 @@ fn test_cache_stats_reflect_current_state() {
     
     // Add entries
     let tokens1 = vec![1, 2, 3];
-    let tokens2 = vec![4 as u32, 5 as u32];
+    let tokens2 = vec![4_u32, 5_u32];
     
     assert!(cache.insert(
         tokens1.clone(),
@@ -538,7 +538,7 @@ fn test_cache_error_handling_during_capacity_pressure() {
     assert_eq!(cache.len(), 2);
     
     // Try to insert oversized sequence - should fail
-    let oversized = vec![100 as u32; 10];
+    let oversized = vec![100_u32; 10];
     let result = cache.insert(
         oversized,
         CachedPrefix {
@@ -581,7 +581,7 @@ fn test_cache_state_after_multiple_error_scenarios() {
     
     // Scenario 3: Oversized sequence error
     assert!(cache.insert(
-        vec![3 as u32; 10],
+        vec![3_u32; 10],
         CachedPrefix {
             kv: create_test_kv_cache(2, 128, 10),
             last_logits: vec![],
