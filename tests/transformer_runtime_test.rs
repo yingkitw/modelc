@@ -1791,3 +1791,36 @@ async fn run_server_serves_reranking() {
         "results should be sorted by descending relevance"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_web_ui() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = http::get(&format!("{base}/"))
+        .call()
+        .expect("GET / should succeed");
+    let bytes = read_body(resp).expect("read body");
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("<!DOCTYPE html>"), "should return HTML");
+    assert!(html.contains("modelc"), "should contain modelc title");
+    assert!(
+        html.contains("/v1/chat/completions"),
+        "should reference the chat completions endpoint"
+    );
+}

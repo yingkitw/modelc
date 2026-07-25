@@ -40,7 +40,7 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/codegen/native/` | `mod.rs` (codegen entry, `generate_cargo_toml`, `generate_main_rs`, MLP plan detection), `forward.rs` (MLP/GPT2/LLaMA forward generation), `helpers.rs` (decode_f32, matmul_bias, relu_inplace). |
 | `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`, `gemv`); `transformer.rs` runs GPT-2/LLaMA forward passes + KV cache (`KvCache`/`KvLayer` FP32/INT8/Mixed, context shifting, anchor preservation). |
 | `src/runtime/gemv.rs` | Shared SIMD GEMV row dot-product (`gemv_dot`, NEON/AVX with scalar fallback). Compiled into `modelc` AND emitted verbatim into `modelc compile` binaries so `run` and `compile` produce bit-identical logits. |
-| `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `handlers.rs` (Axum endpoints incl. `/tokenize`, `/v1/system`, `/reranking`), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
+| `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `handlers.rs` (Axum endpoints incl. `/tokenize`, `/v1/system`, `/reranking`, `/` web UI), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
 | `src/metal.rs` | Apple Silicon Metal acceleration: matmul, relu, add, mul_scalar, softmax, layer_norm kernels (macOS only). |
 | `src/compute/` | Metal compute shaders (`shaders.metal`). |
 

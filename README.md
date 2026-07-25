@@ -196,6 +196,7 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/` | **Built-in web UI** (chat interface, streaming, zero-setup) |
 | `GET` | `/info` | Model name, architecture, params, bytes, tensor names |
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/metrics` | Prometheus text (request count, latency histogram, active gauge, tokens counter) |

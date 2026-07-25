@@ -208,6 +208,7 @@ fn build_router(
     });
 
     let router = Router::new()
+        .route("/", get(handlers::web_ui))
         .route("/infer", post(handlers::infer))
         .route("/info", get(handlers::model_info))
         .route("/props", get(handlers::server_props))
@@ -216,6 +217,7 @@ fn build_router(
         .route("/chat", post(handlers::chat))
         .route("/chat/stream", post(handlers::chat_stream))
         .route("/complete", post(handlers::complete))
+        .route("/infill", post(handlers::infill))
         .route("/embeddings", post(handlers::embeddings))
         .route("/tokenize", post(handlers::tokenize))
         .route("/detokenize", post(handlers::detokenize))
@@ -575,6 +577,35 @@ struct CompleteRequest {
 
 #[derive(Serialize)]
 struct CompleteResponse {
+    completion: String,
+}
+
+#[derive(Deserialize)]
+struct InfillRequest {
+    prefix: String,
+    suffix: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<usize>,
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    top_p: Option<f32>,
+    #[serde(default)]
+    min_p: Option<f32>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    repetition_penalty: Option<f32>,
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct InfillResponse {
     completion: String,
 }
 

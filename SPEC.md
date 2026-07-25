@@ -162,6 +162,7 @@ Created by `pack`, consumed by `run`.
 
 ### HTTP API (both `run` and `model-serve`)
 
+- **`GET /`** — built-in web UI. Returns a self-contained HTML page with a chat interface that connects to `/v1/chat/completions` (SSE streaming) and displays model info from `/info`. No external dependencies, no build step — just open the server URL in a browser. Covered by `run_server_serves_web_ui` test.
 - **`GET /info`** — JSON object: `name`, `architecture`, `total_params`, `total_bytes`, `tensors` (array of tensor name strings).
 - **`GET /health`** — JSON object: `status` (`"ok"`), `model`, `architecture`. Liveness probe for load balancers and orchestration.
 - **`POST /infer`** — request JSON `{ "input": number[] }` (`f32`) or `{ "inputs": [[...], [...]] }` for batch. Response `{ "output": number[] }` or `{ "outputs": [[...], [...]] }`.
