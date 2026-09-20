@@ -130,6 +130,10 @@ modelc run my.modelc --temperature 0.7 --max-tokens 512
 modelc run my.modelc --api-key sk-xxx --rate-limit 120
 modelc run my.modelc --max-concurrent 8
 
+# One-shot generation (no HTTP server)
+modelc prompt my.modelc "Write a haiku about rust"
+modelc prompt my.modelc "2+2=" --max-tokens 32 --temperature 0 --seed 1
+
 # Local model store (Ollama-style)
 modelc list
 modelc rm my-model [--all|--force]
@@ -187,6 +191,9 @@ The `compile` path and the `run` path produce **bit-identical logits** — they 
 | `--seed <n>` | — | Deterministic sampling |
 | `--profile` | — | Print per-step inference timing |
 
+### `prompt` flags
+Same sampling flags as `run` for a single generation: `--max-tokens`, `--temperature`, `--top-p`, `--min-p`, `--seed`. Prints to stdout and exits. Transformer artifacts (`gpt2` / `llama`) emit decoded text; other architectures echo a JSON float array (same as `POST /complete` without a transformer).
+
 ### `compile` flags
 The emitted `model-serve` binary binds `--bind`+`--port` unless `--listen ADDR:PORT` is set (wins, embedded verbatim; IPv6 like `[::1]:8080` supported). Other flags: `--arch`, `--format`/`-f`, `--target` (passed to `cargo build --target`), `--debug` (build with debug profile instead of `--release`).
 
@@ -208,7 +215,7 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `GET` | `/v1/models` · `/v1/models/:id` | OpenAI model list / retrieval |
 | `POST` | `/infer` | Raw tensor inference (`input` or batch `inputs`) |
 | `POST` | `/tokenize` · `/detokenize` | Token ID ↔ text round-trip |
-| `POST` | `/chat` · `/complete` | Native chat / completion |
+| `POST` | `/chat` · `/complete` · `/infill` | Native chat / completion / FIM infill |
 | `POST` | `/chat/stream` | SSE chat stream |
 | `POST` | `/embeddings` | Native embeddings (single or batch) |
 | `POST` | `/v1/chat/completions` | **OpenAI chat** (stream + non-stream, tools, logprobs, JSON schema, `n`, …) |
@@ -216,6 +223,8 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `POST` | `/v1/embeddings` | **OpenAI embeddings** (`encoding_format` float/base64, `dimensions`, `usage`) |
 | `POST` | `/reranking` | **Reranking** (llama.cpp-compatible; query + documents → sorted by cosine similarity, optional `top_n`) |
 | `POST` | `/lora/load` · `/lora/unload` | Hot-swap LoRA adapters without restart |
+| `GET` | `/api/cache/stats` | Prefix cache stats (entries, tokens, KV bytes, utilization) |
+| `POST` | `/api/cache/clear` | Drop every cached prefix snapshot (e.g. after LoRA swap) |
 
 **Inference backend priority:** ONNX execution plan → transformer forward (`gpt2`/`llama`) → MLP GEMV → echo fallback. Inputs longer than the hidden size are gracefully truncated.
 
@@ -310,14 +319,14 @@ Yes — export HuggingFace models to Safetensors or ONNX format, then `modelc pa
 
 ## Configuration
 
-A config file at `~/.modelc/config.toml` can set default `bind`, `port`, store path, and compression. Shell completions: `modelc completions bash|zsh|fish`. `modelc --help` and `modelc --version` list subcommands and the semver + git SHA (from `build.rs` when `.git` is present).
+A config file at `~/.modelc/config.toml` can set default `bind`, `port`, store path, and compression. `modelc --help` and `modelc --version` list subcommands and the semver + git SHA (from `build.rs` when `.git` is present).
 
 ## Repository layout
 
 ```
 src/
   bin/modelc.rs     CLI entrypoint
-  cli.rs            clap commands, format detection, completions
+  cli.rs            clap commands, format detection, compile_listen
   model.rs          canonical Model / TensorData / DataType IR
   parsers/          gguf/ onnx/ safetensors.rs pytorch.rs (WeightParser impls)
   onnx_exec/        ONNX graph execution engine

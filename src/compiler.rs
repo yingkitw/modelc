@@ -392,3 +392,71 @@ pub fn print_quant_sizes(input: &Path, format: Option<&WeightFormat>) -> Result<
 
     Ok(())
 }
+
+/// One-shot generation from an in-memory [`Model`] — no HTTP server.
+///
+/// Transformer artifacts (`gpt2` / `llama` with a detectable hidden size) run the
+/// same autoregressive path as `/complete`. Everything else echoes the prompt as a
+/// JSON array of byte-normalized floats, matching the non-transformer `/complete`
+/// fallback so `modelc prompt` and the HTTP API stay consistent.
+pub fn prompt_model(
+    model: &Model,
+    prompt: &str,
+    config: &crate::generate::GenerationConfig,
+) -> String {
+    if let Some(hidden) = crate::arch::transformer_hidden_dim(model)
+        && (model.architecture == "gpt2" || model.architecture == "llama")
+    {
+        let runtime = crate::runtime::serve::Runtime::from_raw(&model.tensors);
+        let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+        return crate::generate::generate(
+            &runtime,
+            &model.architecture,
+            hidden,
+            &tokenizer,
+            prompt,
+            config,
+            None,
+        );
+    }
+    let input: Vec<f32> = prompt.bytes().map(|b| b as f32 / 255.0).collect();
+    serde_json::to_string(&input).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use crate::generate::GenerationConfig;
+    use crate::model::{DataType, TensorData};
+    use std::collections::HashMap;
+
+    fn mlp_fixture() -> Model {
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".into(),
+            TensorData {
+                shape: vec![2, 2],
+                dtype: DataType::F32,
+                data: [0.1f32, 0.2, 0.3, 0.4]
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect(),
+            },
+        );
+        Model {
+            name: "mlp".into(),
+            architecture: "mlp".into(),
+            tensors,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn prompt_model_mlp_echoes_byte_normalized_json() {
+        let out = prompt_model(&mlp_fixture(), "AB", &GenerationConfig::default());
+        let vals: Vec<f32> = serde_json::from_str(&out).expect("json array");
+        assert_eq!(vals.len(), 2);
+        assert!((vals[0] - (b'A' as f32 / 255.0)).abs() < 1e-6);
+        assert!((vals[1] - (b'B' as f32 / 255.0)).abs() < 1e-6);
+    }
+}

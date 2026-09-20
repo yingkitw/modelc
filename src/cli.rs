@@ -348,6 +348,34 @@ pub enum Commands {
         #[arg(short, long, help = "Force deletion even if versioned copies exist")]
         force: bool,
     },
+
+    #[command(about = "One-shot text generation from a .modelc artifact (no HTTP server)")]
+    Prompt {
+        #[arg(help = "Path to .modelc artifact or model name", value_hint = ValueHint::FilePath)]
+        input: String,
+
+        #[arg(help = "Prompt text")]
+        prompt: String,
+
+        #[arg(long, value_name = "N", help = "Maximum tokens to generate")]
+        max_tokens: Option<usize>,
+
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            help = "Sampling temperature (0.0 = greedy)"
+        )]
+        temperature: Option<f32>,
+
+        #[arg(long, value_name = "N", help = "Random seed for reproducible sampling")]
+        seed: Option<u64>,
+
+        #[arg(long, value_name = "FLOAT", help = "Nucleus sampling threshold")]
+        top_p: Option<f32>,
+
+        #[arg(long, value_name = "FLOAT", help = "Min-p sampling threshold")]
+        min_p: Option<f32>,
+    },
 }
 
 /// Resolve `--listen` vs `--bind` + `--port` before calling [`crate::compiler::compile`].
@@ -491,5 +519,24 @@ mod tests_listen {
     fn compile_listen_bind_port() {
         let a = compile_listen("127.0.0.1", 9000, None).unwrap();
         assert_eq!(a.port(), 9000);
+    }
+
+    #[test]
+    fn compile_listen_overrides_bind_port() {
+        let a = compile_listen("0.0.0.0", 1, Some("127.0.0.1:9090")).unwrap();
+        assert_eq!(a.to_string(), "127.0.0.1:9090");
+    }
+
+    #[test]
+    fn compile_listen_ipv6() {
+        let a = compile_listen("::1", 8080, Some("[::1]:8080")).unwrap();
+        assert_eq!(a.port(), 8080);
+        assert!(a.is_ipv6());
+    }
+
+    #[test]
+    fn compile_listen_invalid_address_errors() {
+        let err = compile_listen("127.0.0.1", 8080, Some("not-an-addr")).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid socket address"));
     }
 }

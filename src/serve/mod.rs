@@ -64,7 +64,16 @@ pub async fn run_server(
     auth: Option<auth::AuthConfig>,
     max_concurrent: Option<usize>,
 ) -> anyhow::Result<()> {
-    run_server_with_shutdown(model, addr, profile, generation, auth, max_concurrent, shutdown_signal()).await
+    run_server_with_shutdown(
+        model,
+        addr,
+        profile,
+        generation,
+        auth,
+        max_concurrent,
+        shutdown_signal(),
+    )
+    .await
 }
 
 /// Like [`run_server`], but with a caller-supplied shutdown signal. When `shutdown`
@@ -108,6 +117,86 @@ where
     Ok(())
 }
 
+impl AppState {
+    /// Build an `AppState` for tests without going through the full `run_server`
+    /// bootstrap. Mirrors the construction in `build_router` but lets tests inject
+    /// a hand-built `Model` + generation config without spawning a TCP listener.
+    #[doc(hidden)]
+    pub fn for_test(
+        model: Model,
+        profile: bool,
+        generation: crate::generate::GenerationConfig,
+        auth: Option<auth::AuthConfig>,
+        max_concurrent: Option<usize>,
+    ) -> std::sync::Arc<Self> {
+        let _ = auth; // auth is wired at the router layer, not in AppState
+        let architecture = model.architecture.clone();
+        let transformer_hidden = crate::arch::transformer_hidden_dim(&model);
+        let mlp_plan = infer_mlp_plan(&model);
+        let onnx_plan = model
+            .metadata
+            .get("onnx.execution_plan")
+            .and_then(|s| crate::onnx_exec::ExecutionPlan::from_json(s).ok());
+        let chat_template = model.metadata.get("tokenizer.chat_template").cloned();
+        let base_tensors = model.tensors.clone();
+        let runtime = Runtime::from_raw(&model.tensors);
+        // Try the neural draft model first; fall back to prompt-lookup for
+        // transformer architectures without `draft.*` tensors. Mirrors the
+        // production build_router path.
+        let mut draft_model: Option<std::sync::Arc<dyn crate::draft::DraftModel>> =
+            transformer_hidden.and_then(|hidden| {
+                let vocab_size = model
+                    .metadata
+                    .get("tokenizer.vocab_size")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                crate::draft::MlpDraftModel::from_runtime(
+                    &runtime,
+                    vocab_size,
+                    hidden,
+                    64,
+                    generation.temperature,
+                    generation.top_p,
+                )
+                .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
+            });
+        // Fall back to prompt lookup decoding when no neural draft weights are present.
+        if draft_model.is_none() && (architecture == "gpt2" || architecture == "llama") {
+            draft_model = Some(
+                std::sync::Arc::new(crate::draft::PromptLookupDraftModel::new(3))
+                    as std::sync::Arc<dyn crate::draft::DraftModel>,
+            );
+        }
+        let max_concurrent = max_concurrent.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+        let tensor_names = {
+            let mut names: Vec<String> = model.tensors.keys().cloned().collect();
+            names.sort();
+            names
+        };
+        std::sync::Arc::new(Self {
+            name: model.name.clone(),
+            architecture,
+            total_params: model.total_params(),
+            total_bytes: model.total_bytes(),
+            tensor_names,
+            runtime: std::sync::RwLock::new(runtime),
+            base_tensors,
+            mlp_plan,
+            onnx_plan,
+            transformer_hidden,
+            chat_template,
+            profile,
+            generation,
+            prefix_cache: std::sync::RwLock::new(crate::prefix_cache::PrefixCache::new(
+                PREFIX_CACHE_CAPACITY,
+            )),
+            metrics: metrics::Metrics::default(),
+            draft_model,
+            max_concurrent,
+        })
+    }
+}
+
 /// Resolves on `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM`. Used as the graceful-shutdown
 /// trigger for [`run_server`].
 async fn shutdown_signal() {
@@ -141,72 +230,19 @@ fn build_router(
     generation: crate::generate::GenerationConfig,
     max_concurrent: Option<usize>,
 ) -> Router {
-    let onnx_plan = model
-        .metadata
-        .get("onnx.execution_plan")
-        .and_then(|json| crate::onnx_exec::ExecutionPlan::from_json(json).ok());
-
-    let chat_template = model.metadata.get("tokenizer.chat_template").cloned();
-
-    let runtime = Runtime::from_raw(&model.tensors);
-    let draft_model: Option<std::sync::Arc<dyn crate::draft::DraftModel>> =
-        transformer_hidden_dim(&model).and_then(|hidden| {
-            let vocab_size = model
-                .metadata
-                .get("tokenizer.vocab_size")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            crate::draft::MlpDraftModel::from_runtime(
-                &runtime,
-                vocab_size,
-                hidden,
-                64,
-                generation.temperature,
-                generation.top_p,
-            )
-            .map(|dm| std::sync::Arc::new(dm) as std::sync::Arc<dyn crate::draft::DraftModel>)
-        });
-
-    // Fall back to prompt lookup decoding when no neural draft weights are present.
-    let draft_model = draft_model.or_else(|| {
-        Some(std::sync::Arc::new(crate::draft::PromptLookupDraftModel::new(3))
-            as std::sync::Arc<dyn crate::draft::DraftModel>)
-    });
-
-    let max_concurrent = max_concurrent.and_then(|n| {
-        if n > 0 {
-            Some(Arc::new(tokio::sync::Semaphore::new(n)))
-        } else {
-            None
-        }
-    });
-
-    let state = Arc::new(AppState {
-        name: model.name.clone(),
-        architecture: model.architecture.clone(),
-        total_params: model.total_params(),
-        total_bytes: model.total_bytes(),
-        tensor_names: {
-            let mut names: Vec<String> = model.tensors.keys().cloned().collect();
-            names.sort();
-            names
-        },
-        runtime: std::sync::RwLock::new(runtime),
-        base_tensors: model.tensors.clone(),
-        mlp_plan: infer_mlp_plan(&model),
-        onnx_plan,
-        transformer_hidden: transformer_hidden_dim(&model),
-        chat_template,
+    build_router_from_state(AppState::for_test(
+        model,
         profile,
         generation,
-        prefix_cache: std::sync::RwLock::new(crate::prefix_cache::PrefixCache::new(
-            PREFIX_CACHE_CAPACITY,
-        )),
-        metrics: metrics::Metrics::default(),
-        draft_model,
+        None,
         max_concurrent,
-    });
+    ))
+}
 
+/// Variant that wires a pre-built `AppState` into the router. Used by both
+/// `build_router` (production) and tests (which need to inject a synthetic
+/// `AppState` to exercise handlers in isolation).
+pub fn build_router_from_state(state: std::sync::Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/", get(handlers::web_ui))
         .route("/infer", post(handlers::infer))
@@ -233,6 +269,8 @@ fn build_router(
         .route("/reranking", post(handlers::reranking))
         .route("/lora/load", post(handlers::lora_load))
         .route("/lora/unload", post(handlers::lora_unload))
+        .route("/api/cache/stats", get(handlers::cache_stats))
+        .route("/api/cache/clear", post(handlers::cache_clear))
         .with_state(state.clone());
 
     router.layer(axum::middleware::from_fn_with_state(
@@ -241,7 +279,7 @@ fn build_router(
     ))
 }
 
-struct AppState {
+pub struct AppState {
     name: String,
     architecture: String,
     total_params: usize,
@@ -522,6 +560,17 @@ struct ApiShowResponse {
     tensor_count: usize,
 }
 
+/// `GET /api/cache/stats` response.
+#[derive(Serialize)]
+struct CacheStatsResponse {
+    entries: usize,
+    capacity: usize,
+    total_tokens: usize,
+    total_kv_bytes: usize,
+    /// `entries / capacity`, in the closed interval `[0.0, 1.0]`.
+    utilization: f64,
+}
+
 #[derive(Deserialize)]
 struct ChatRequest {
     messages: Vec<Message>,
@@ -736,24 +785,6 @@ fn parse_layer_suffix(name: &str) -> Option<u32> {
     }
 
     idx.parse::<u32>().ok()
-}
-
-/// Resolve the hidden dimension for transformer architectures so `/infer` can resize inputs
-/// to the expected single-vector width. Returns `None` for non-transformer models or when the
-/// hidden size is zero / undetectable.
-fn transformer_hidden_dim(model: &Model) -> Option<usize> {
-    let hidden = match model.architecture.as_str() {
-        "gpt2" => {
-            let layers = crate::arch::detect_layers(model, "transformer.h.");
-            crate::arch::gpt2_hidden_dim(model, &layers)
-        }
-        "llama" => {
-            let layers = crate::arch::llama_layers(model);
-            crate::arch::llama_hidden_dim(model, &layers)
-        }
-        _ => return None,
-    };
-    (hidden > 0).then_some(hidden)
 }
 
 #[cfg(test)]

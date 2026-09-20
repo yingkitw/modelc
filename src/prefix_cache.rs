@@ -17,7 +17,7 @@
 //! - Capacity violations
 //! - Corrupted cache state
 
-use crate::kv_error::{CacheValidationError, ValidationResult, KvError, KvResult};
+use crate::kv_error::{CacheValidationError, KvError, KvResult, ValidationResult};
 use crate::runtime::transformer::KvCache;
 
 /// Cached K/V state plus the logits produced by the last token of the cached sequence.
@@ -64,7 +64,7 @@ impl PrefixCache {
 
     /// Find the longest cached token sequence that is a prefix of `tokens`.
     /// On a tie, the most-recently-inserted entry wins.
-    /// 
+    ///
     /// Returns `KvError::EmptyCache` if the cache is empty and tokens is non-empty.
     /// Returns `KvError::InvalidTokenSequence` if the token sequence is invalid.
     pub fn lookup(&self, tokens: &[u32]) -> KvResult<CacheLookup> {
@@ -73,9 +73,7 @@ impl PrefixCache {
 
         let mut best: Option<(&Vec<u32>, &CachedPrefix)> = None;
         for (seq, cached) in &self.entries {
-            if tokens.starts_with(seq)
-                && best.is_none_or(|(b, _)| seq.len() > b.len())
-            {
+            if tokens.starts_with(seq) && best.is_none_or(|(b, _)| seq.len() > b.len()) {
                 best = Some((seq, cached));
             }
         }
@@ -94,11 +92,11 @@ impl PrefixCache {
         let matched_len = seq.len();
         let last_logits = (matched_len == tokens.len() && !cached.last_logits.is_empty())
             .then(|| cached.last_logits.clone());
-        
+
         // Validate cache state consistency
         if matched_len > 0 && cached.kv.layers.is_empty() {
             return Err(KvError::InvalidCacheState(
-                "Matched prefix has empty KV layers".to_string()
+                "Matched prefix has empty KV layers".to_string(),
             ));
         }
 
@@ -111,13 +109,13 @@ impl PrefixCache {
 
     /// Insert (or refresh) a cached prefix. Moves the entry to the front (MRU) and
     /// evicts the least-recently-used entry when over capacity.
-    /// 
+    ///
     /// Returns `KvError::CapacityExceeded` if a single entry would exceed capacity.
     /// Returns `CacheValidationError` if the token sequence or KV state is invalid.
     pub fn insert(&mut self, tokens: Vec<u32>, cached: CachedPrefix) -> ValidationResult<()> {
         // Validate token sequence
         Self::validate_tokens(&tokens)?;
-        
+
         // Validate KV state matches token sequence length (more lenient check)
         if !cached.kv.layers.is_empty() {
             let kv_length = cached.kv.layers[0].as_ref().map(|l| l.len()).unwrap_or(0);
@@ -145,16 +143,16 @@ impl PrefixCache {
         if let Some(pos) = self.entries.iter().position(|(k, _)| *k == tokens) {
             self.entries.remove(pos);
         }
-        
+
         // Insert at front (MRU)
         self.entries.insert(0, (tokens, cached));
-        
+
         // Evict LRU entries if over capacity
         while self.entries.len() > self.max_entries {
             let last = self.entries.len() - 1;
             self.entries.remove(last);
         }
-        
+
         Ok(())
     }
 
@@ -194,7 +192,7 @@ impl PrefixCache {
         if tokens.is_empty() {
             return Err(CacheValidationError::EmptySequence);
         }
-        
+
         // Check for obviously invalid token IDs (most models use < 100k or < 1M)
         const MAX_REASONABLE_TOKEN_ID: u32 = 1_000_000;
         for (pos, &token) in tokens.iter().enumerate() {
@@ -205,19 +203,22 @@ impl PrefixCache {
                 });
             }
         }
-        
+
         Ok(())
     }
 
     /// Get statistics about cache usage.
     pub fn stats(&self) -> PrefixCacheStats {
-        let total_tokens: usize = self.entries.iter()
-            .map(|(tokens, _)| tokens.len())
-            .sum();
-        
-        let total_kv_bytes: usize = self.entries.iter()
+        let total_tokens: usize = self.entries.iter().map(|(tokens, _)| tokens.len()).sum();
+
+        let total_kv_bytes: usize = self
+            .entries
+            .iter()
             .map(|(_, cached)| {
-                cached.kv.layers.iter()
+                cached
+                    .kv
+                    .layers
+                    .iter()
                     .filter_map(|layer| layer.as_ref())
                     .map(|layer| layer.len() * 2 * 4) // K and V vectors, f32 = 4 bytes
                     .sum::<usize>()
@@ -282,7 +283,8 @@ mod tests {
                 kv: dummy_cache(3),
                 last_logits: vec![0.5, 0.2],
             },
-        ).expect("insert should succeed");
+        )
+        .expect("insert should succeed");
 
         let look = pc.lookup(&tokens).expect("exact match");
         assert_eq!(look.matched_len, 3);
@@ -298,12 +300,16 @@ mod tests {
                 kv: dummy_cache(2),
                 last_logits: vec![0.9],
             },
-        ).expect("insert should succeed");
+        )
+        .expect("insert should succeed");
 
         // Query extends the cached prefix — partial match, no logits reuse.
         let look = pc.lookup(&[1, 2, 3, 4]).expect("prefix match");
         assert_eq!(look.matched_len, 2);
-        assert!(look.last_logits.is_none(), "partial match must not expose logits");
+        assert!(
+            look.last_logits.is_none(),
+            "partial match must not expose logits"
+        );
         // Cloned KV reflects the cached prefix length (2 positions, hidden=2 → 4 floats).
         let layer = look.kv.layers[0].as_ref().unwrap();
         assert_eq!(layer.len(), 2);
@@ -314,12 +320,20 @@ mod tests {
         let mut pc = PrefixCache::new(4);
         pc.insert(
             vec![1],
-            CachedPrefix { kv: dummy_cache(1), last_logits: vec![] },
-        ).expect("insert should succeed");
+            CachedPrefix {
+                kv: dummy_cache(1),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
         pc.insert(
             vec![1, 2, 3],
-            CachedPrefix { kv: dummy_cache(3), last_logits: vec![] },
-        ).expect("insert should succeed");
+            CachedPrefix {
+                kv: dummy_cache(3),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
 
         let look = pc.lookup(&[1, 2, 3, 4]).expect("match");
         assert_eq!(look.matched_len, 3, "longer cached prefix should win");
@@ -330,8 +344,12 @@ mod tests {
         let mut pc = PrefixCache::new(4);
         pc.insert(
             vec![9, 9],
-            CachedPrefix { kv: dummy_cache(2), last_logits: vec![] },
-        ).expect("insert should succeed");
+            CachedPrefix {
+                kv: dummy_cache(2),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
         let result = pc.lookup(&[1, 2, 9, 9]);
         assert!(result.is_err(), "entry must be a *prefix* of the query");
     }
@@ -341,23 +359,56 @@ mod tests {
         let mut pc = PrefixCache::new(4);
         pc.insert(
             vec![1, 2],
-            CachedPrefix { kv: dummy_cache(2), last_logits: vec![0.1] },
-        ).expect("insert should succeed");
+            CachedPrefix {
+                kv: dummy_cache(2),
+                last_logits: vec![0.1],
+            },
+        )
+        .expect("insert should succeed");
         pc.insert(
             vec![1, 2],
-            CachedPrefix { kv: dummy_cache(2), last_logits: vec![0.9] },
-        ).expect("insert should succeed");
+            CachedPrefix {
+                kv: dummy_cache(2),
+                last_logits: vec![0.9],
+            },
+        )
+        .expect("insert should succeed");
         assert_eq!(pc.len(), 1, "refresh should not duplicate");
         let look = pc.lookup(&[1, 2]).unwrap();
-        assert_eq!(look.last_logits, Some(vec![0.9]), "refresh should overwrite");
+        assert_eq!(
+            look.last_logits,
+            Some(vec![0.9]),
+            "refresh should overwrite"
+        );
     }
 
     #[test]
     fn lru_eviction_drops_oldest() {
         let mut pc = PrefixCache::new(2);
-        pc.insert(vec![1], CachedPrefix { kv: dummy_cache(1), last_logits: vec![] }).expect("insert should succeed");
-        pc.insert(vec![2], CachedPrefix { kv: dummy_cache(1), last_logits: vec![] }).expect("insert should succeed");
-        pc.insert(vec![3], CachedPrefix { kv: dummy_cache(1), last_logits: vec![] }).expect("insert should succeed");
+        pc.insert(
+            vec![1],
+            CachedPrefix {
+                kv: dummy_cache(1),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
+        pc.insert(
+            vec![2],
+            CachedPrefix {
+                kv: dummy_cache(1),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
+        pc.insert(
+            vec![3],
+            CachedPrefix {
+                kv: dummy_cache(1),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
         assert_eq!(pc.len(), 2);
         // [1] was evicted as LRU; [2] and [3] remain.
         assert!(pc.lookup(&[1, 2]).is_err());
@@ -374,10 +425,13 @@ mod tests {
     #[test]
     fn empty_tokens_rejected() {
         let mut pc = PrefixCache::new(4);
-        let result = pc.insert(vec![], CachedPrefix { 
-            kv: dummy_cache(0), 
-            last_logits: vec![] 
-        });
+        let result = pc.insert(
+            vec![],
+            CachedPrefix {
+                kv: dummy_cache(0),
+                last_logits: vec![],
+            },
+        );
         assert!(matches!(result, Err(CacheValidationError::EmptySequence)));
     }
 
@@ -385,11 +439,17 @@ mod tests {
     fn invalid_token_id_rejected() {
         let mut pc = PrefixCache::new(4);
         let invalid_tokens = vec![1, 2, 999999999]; // Unreasonably large token ID
-        let result = pc.insert(invalid_tokens, CachedPrefix { 
-            kv: dummy_cache(3), 
-            last_logits: vec![] 
-        });
-        assert!(matches!(result, Err(CacheValidationError::InvalidTokenId { .. })));
+        let result = pc.insert(
+            invalid_tokens,
+            CachedPrefix {
+                kv: dummy_cache(3),
+                last_logits: vec![],
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(CacheValidationError::InvalidTokenId { .. })
+        ));
     }
 
     #[test]
@@ -397,32 +457,49 @@ mod tests {
         let mut pc = PrefixCache::new(4);
         // KV cache has 2 positions but tokens claim 3
         // With our lenient validation, this is allowed because 2 >= 3/2
-        let result = pc.insert(vec![1, 2, 3], CachedPrefix { 
-            kv: dummy_cache(2), // Only 2 positions
-            last_logits: vec![] 
-        });
+        let result = pc.insert(
+            vec![1, 2, 3],
+            CachedPrefix {
+                kv: dummy_cache(2), // Only 2 positions
+                last_logits: vec![],
+            },
+        );
         // This should now succeed due to lenient validation
         assert!(result.is_ok(), "Lenient validation should allow this case");
-        
+
         // But extreme mismatches should still be rejected
-        let extreme_result = pc.insert(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10], CachedPrefix { 
-            kv: dummy_cache(1), // Only 1 position vs 10 tokens
-            last_logits: vec![] 
-        });
-        assert!(extreme_result.is_err(), "Extreme mismatch should be rejected");
+        let extreme_result = pc.insert(
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            CachedPrefix {
+                kv: dummy_cache(1), // Only 1 position vs 10 tokens
+                last_logits: vec![],
+            },
+        );
+        assert!(
+            extreme_result.is_err(),
+            "Extreme mismatch should be rejected"
+        );
     }
 
     #[test]
     fn cache_stats_work() {
         let mut pc = PrefixCache::new(4);
-        pc.insert(vec![1, 2], CachedPrefix { 
-            kv: dummy_cache(2), 
-            last_logits: vec![] 
-        }).expect("insert should succeed");
-        pc.insert(vec![3, 4, 5], CachedPrefix { 
-            kv: dummy_cache(3), 
-            last_logits: vec![] 
-        }).expect("insert should succeed");
+        pc.insert(
+            vec![1, 2],
+            CachedPrefix {
+                kv: dummy_cache(2),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
+        pc.insert(
+            vec![3, 4, 5],
+            CachedPrefix {
+                kv: dummy_cache(3),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
 
         let stats = pc.stats();
         assert_eq!(stats.entries, 2);
@@ -435,11 +512,15 @@ mod tests {
     #[test]
     fn remove_existing_entry() {
         let mut pc = PrefixCache::new(4);
-        pc.insert(vec![1, 2], CachedPrefix { 
-            kv: dummy_cache(2), 
-            last_logits: vec![] 
-        }).expect("insert should succeed");
-        
+        pc.insert(
+            vec![1, 2],
+            CachedPrefix {
+                kv: dummy_cache(2),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
+
         assert_eq!(pc.len(), 1);
         assert!(pc.remove(&[1, 2]));
         assert_eq!(pc.len(), 0);
@@ -454,11 +535,15 @@ mod tests {
     #[test]
     fn clear_empties_cache() {
         let mut pc = PrefixCache::new(4);
-        pc.insert(vec![1, 2], CachedPrefix { 
-            kv: dummy_cache(2), 
-            last_logits: vec![] 
-        }).expect("insert should succeed");
-        
+        pc.insert(
+            vec![1, 2],
+            CachedPrefix {
+                kv: dummy_cache(2),
+                last_logits: vec![],
+            },
+        )
+        .expect("insert should succeed");
+
         assert_eq!(pc.len(), 1);
         pc.clear();
         assert_eq!(pc.len(), 0);

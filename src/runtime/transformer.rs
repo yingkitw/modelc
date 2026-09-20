@@ -1211,15 +1211,30 @@ mod tests {
         let mut cache = KvCache::new(2);
         cache.layers[0] = Some(KvLayer::new_fp32());
         cache.layers[1] = Some(KvLayer::new_fp32());
-        cache.layers[0].as_mut().unwrap().append(&[1.0f32, 2.0], &[3.0f32, 4.0]);
-        cache.layers[0].as_mut().unwrap().append(&[5.0f32, 6.0], &[7.0f32, 8.0]);
-        cache.layers[1].as_mut().unwrap().append(&[9.0f32, 10.0], &[11.0f32, 12.0]);
-        cache.layers[1].as_mut().unwrap().append(&[13.0f32, 14.0], &[15.0f32, 16.0]);
+        cache.layers[0]
+            .as_mut()
+            .unwrap()
+            .append(&[1.0f32, 2.0], &[3.0f32, 4.0]);
+        cache.layers[0]
+            .as_mut()
+            .unwrap()
+            .append(&[5.0f32, 6.0], &[7.0f32, 8.0]);
+        cache.layers[1]
+            .as_mut()
+            .unwrap()
+            .append(&[9.0f32, 10.0], &[11.0f32, 12.0]);
+        cache.layers[1]
+            .as_mut()
+            .unwrap()
+            .append(&[13.0f32, 14.0], &[15.0f32, 16.0]);
 
         cache.shift(1);
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.layers[0].as_ref().unwrap().k_all(), vec![5.0f32, 6.0]);
-        assert_eq!(cache.layers[1].as_ref().unwrap().k_all(), vec![13.0f32, 14.0]);
+        assert_eq!(
+            cache.layers[1].as_ref().unwrap().k_all(),
+            vec![13.0f32, 14.0]
+        );
     }
 
     #[test]
@@ -1260,7 +1275,10 @@ mod tests {
         // Cold tokens have INT8 quantization error; verify roughly equal.
         assert_eq!(mixed_k.len(), fp32_k.len());
         for (a, b) in mixed_k.iter().zip(fp32_k.iter()) {
-            assert!((a - b).abs() < 0.05, "mixed k mismatch: expected {b}, got {a}");
+            assert!(
+                (a - b).abs() < 0.05,
+                "mixed k mismatch: expected {b}, got {a}"
+            );
         }
     }
 
@@ -1283,7 +1301,10 @@ mod tests {
     fn kv_layer_fp32_shift_anchored_preserves_first() {
         let mut layer = KvLayer::new_fp32();
         for i in 0..6 {
-            layer.append(&[i as f32, i as f32 + 0.5], &[i as f32 + 10.0, i as f32 + 10.5]);
+            layer.append(
+                &[i as f32, i as f32 + 0.5],
+                &[i as f32 + 10.0, i as f32 + 10.5],
+            );
         }
         // 6 tokens, remove 2 with anchor=2: keep [0,1] + [4,5]
         layer.shift_anchored(2, 2);
@@ -1296,7 +1317,10 @@ mod tests {
     fn kv_layer_int8_shift_anchored_preserves_first() {
         let mut layer = KvLayer::new_int8(2);
         for i in 0..6 {
-            layer.append(&[i as f32, i as f32 + 0.5], &[i as f32 + 10.0, i as f32 + 10.5]);
+            layer.append(
+                &[i as f32, i as f32 + 0.5],
+                &[i as f32 + 10.0, i as f32 + 10.5],
+            );
         }
         layer.shift_anchored(2, 2);
         assert_eq!(layer.len(), 4);
@@ -1312,7 +1336,10 @@ mod tests {
     fn kv_layer_mixed_shift_anchored_preserves_first() {
         let mut layer = KvLayer::new_mixed(2, 3);
         for i in 0..8 {
-            layer.append(&[i as f32, i as f32 + 0.5], &[i as f32 + 10.0, i as f32 + 10.5]);
+            layer.append(
+                &[i as f32, i as f32 + 0.5],
+                &[i as f32 + 10.0, i as f32 + 10.5],
+            );
         }
         // 8 tokens, remove 3 with anchor=2: keep [0,1] + [5,6,7]
         layer.shift_anchored(3, 2);
@@ -1346,7 +1373,10 @@ mod tests {
         softmax_inplace(&mut actual);
         assert_eq!(actual.len(), expected.len());
         for (a, e) in actual.iter().zip(expected.iter()) {
-            assert!((a - e).abs() < 1e-6, "softmax_inplace mismatch: expected {e}, got {a}");
+            assert!(
+                (a - e).abs() < 1e-6,
+                "softmax_inplace mismatch: expected {e}, got {a}"
+            );
         }
     }
 
@@ -1358,9 +1388,15 @@ mod tests {
         let n_heads = 4;
         let head_dim = 8;
         let seq_len = 16;
-        let q: Vec<f32> = (0..(n_heads * head_dim)).map(|i| (i as f32) * 0.1).collect();
-        let k_all: Vec<f32> = (0..(seq_len * n_heads * head_dim)).map(|i| (i as f32) * 0.05).collect();
-        let v_all: Vec<f32> = (0..(seq_len * n_heads * head_dim)).map(|i| (i as f32) * 0.03).collect();
+        let q: Vec<f32> = (0..(n_heads * head_dim))
+            .map(|i| (i as f32) * 0.1)
+            .collect();
+        let k_all: Vec<f32> = (0..(seq_len * n_heads * head_dim))
+            .map(|i| (i as f32) * 0.05)
+            .collect();
+        let v_all: Vec<f32> = (0..(seq_len * n_heads * head_dim))
+            .map(|i| (i as f32) * 0.03)
+            .collect();
 
         let out = attention_kv(&q, &k_all, &v_all, n_heads);
         assert_eq!(out.len(), n_heads * head_dim);
@@ -1373,14 +1409,8 @@ mod tests {
     fn kv_layer_fp32_cow_is_zero_copy_and_correct() {
         let mut layer = KvLayer::new_fp32();
         let hidden = 4;
-        layer.append(
-            &[1.0, 2.0, 3.0, 4.0],
-            &[5.0, 6.0, 7.0, 8.0],
-        );
-        layer.append(
-            &[9.0, 10.0, 11.0, 12.0],
-            &[13.0, 14.0, 15.0, 16.0],
-        );
+        layer.append(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0]);
+        layer.append(&[9.0, 10.0, 11.0, 12.0], &[13.0, 14.0, 15.0, 16.0]);
 
         // FP32 path must borrow the backing buffer (zero-copy), not materialize.
         let kcow = layer.k_all_cow();
@@ -1403,10 +1433,7 @@ mod tests {
     #[test]
     fn kv_layer_int8_cow_is_owned() {
         let mut layer = KvLayer::new_int8(4);
-        layer.append(
-            &[1.0, 2.0, 3.0, 4.0],
-            &[5.0, 6.0, 7.0, 8.0],
-        );
+        layer.append(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0]);
         // Quantized layers cannot borrow FP32 directly — they must materialize.
         assert!(matches!(layer.k_all_cow(), Cow::Owned(_)));
         assert!(matches!(layer.v_all_cow(), Cow::Owned(_)));
@@ -1427,7 +1454,10 @@ mod tests {
         let mut layer = KvLayer::new_fp32();
         for t in 0..seq_len {
             let start = t * n_heads * head_dim;
-            layer.append(&flat[start..start + n_heads * head_dim], &flat[start..start + n_heads * head_dim]);
+            layer.append(
+                &flat[start..start + n_heads * head_dim],
+                &flat[start..start + n_heads * head_dim],
+            );
         }
 
         let out_cow = attention_kv(&q, &layer.k_all_cow(), &layer.v_all_cow(), n_heads);
@@ -1436,7 +1466,10 @@ mod tests {
         let out_mat = attention_kv(&q, &k_mat, &v_mat, n_heads);
         assert_eq!(out_cow.len(), out_mat.len());
         for (a, b) in out_cow.iter().zip(out_mat.iter()) {
-            assert!((a - b).abs() < 1e-6, "cow vs materialized mismatch: {a} vs {b}");
+            assert!(
+                (a - b).abs() < 1e-6,
+                "cow vs materialized mismatch: {a} vs {b}"
+            );
         }
     }
 }

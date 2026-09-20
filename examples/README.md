@@ -18,6 +18,8 @@ cargo run --example create_simple_model -- ./demo_mlp.st
 cargo run --example parse_weights -- ./demo_mlp.st safetensors
 # or after `cargo install --path .`:
 modelc inspect ./demo_mlp.st --arch mlp
+modelc pack ./demo_mlp.st -o ./demo.modelc --arch mlp
+modelc prompt ./demo.modelc "hello"          # one-shot, no HTTP server
 ```
 
 Exercise the ONNX external-weights path requires a separate `.bin` plus an `.onnx` that references it; unit tests under `src/parsers/onnx.rs` build minimal models programmatically—you can mirror that pattern when exporting real models.

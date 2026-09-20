@@ -52,21 +52,13 @@ pub(super) fn run_inference(state: &AppState, input: &[f32]) -> Vec<f32> {
 /// the model's hidden size (truncated or zero-padded) so `/infer` is tolerant of length
 /// mismatches instead of erroring. Returns `None` for non-transformer models or when the
 /// forward has no usable output head (caller then falls back to echo).
-fn run_transformer(
-    state: &AppState,
-    runtime: &Runtime,
-    input: &[f32],
-) -> Option<Vec<f32>> {
+fn run_transformer(state: &AppState, runtime: &Runtime, input: &[f32]) -> Option<Vec<f32>> {
     let hidden = state.transformer_hidden?;
     let resized = resize_to_hidden(input, hidden);
     let start = std::time::Instant::now();
     let out = match state.architecture.as_str() {
-        "gpt2" => {
-            crate::runtime::transformer::forward_gpt2(runtime, &resized, state.profile)
-        }
-        "llama" => {
-            crate::runtime::transformer::forward_llama(runtime, &resized, state.profile)
-        }
+        "gpt2" => crate::runtime::transformer::forward_gpt2(runtime, &resized, state.profile),
+        "llama" => crate::runtime::transformer::forward_llama(runtime, &resized, state.profile),
         _ => None,
     };
     if state.profile
@@ -101,9 +93,7 @@ pub(super) fn run_embeddings(state: &AppState, input: &[f32]) -> Option<Vec<f32>
     let runtime = state.runtime.read().expect("runtime lock poisoned");
     match state.architecture.as_str() {
         "gpt2" => crate::runtime::transformer::embed_gpt2(&runtime, &resized, state.profile),
-        "llama" => {
-            crate::runtime::transformer::embed_llama(&runtime, &resized, state.profile)
-        }
+        "llama" => crate::runtime::transformer::embed_llama(&runtime, &resized, state.profile),
         _ => None,
     }
 }
@@ -492,5 +482,26 @@ mod tests {
             "expected 10.0, got {}",
             outs[0][0]
         );
+    }
+
+    #[test]
+    fn resize_to_hidden_truncates_long_input() {
+        let input = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let out = super::resize_to_hidden(&input, 3);
+        assert_eq!(out, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn resize_to_hidden_zero_pads_short_input() {
+        let input = vec![1.0, 2.0];
+        let out = super::resize_to_hidden(&input, 4);
+        assert_eq!(out, vec![1.0, 2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn resize_to_hidden_noop_when_equal() {
+        let input = vec![1.0, 2.0, 3.0];
+        let out = super::resize_to_hidden(&input, 3);
+        assert_eq!(out, vec![1.0, 2.0, 3.0]);
     }
 }

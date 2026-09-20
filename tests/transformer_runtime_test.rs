@@ -377,6 +377,19 @@ async fn run_server_serves_openai_chat_completions() {
     // Without `logprobs` requested, the field must serialize to null.
     assert!(choices[0]["logprobs"].is_null());
     assert!(val["usage"]["total_tokens"].as_u64().unwrap_or(0) > 0);
+    // `created` must be a plausible Unix timestamp (OpenAI protocol), not 0.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let created = val["created"].as_u64().expect("created timestamp");
+    assert!(
+        created > 1_600_000_000 && created <= now_secs + 5,
+        "created {created} should be a recent Unix timestamp (now={now_secs})"
+    );
+    // `system_fingerprint` identifies the backend build.
+    let fp = val["system_fingerprint"].as_str().expect("fingerprint");
+    assert!(fp.starts_with("fp_modelc_"), "unexpected fingerprint {fp}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -710,6 +723,23 @@ async fn run_server_serves_openai_completions() {
     assert_eq!(val["choices"][0]["finish_reason"].as_str(), Some("stop"));
     assert!(val["usage"]["prompt_tokens"].is_number());
     assert!(val["usage"]["completion_tokens"].is_number());
+    // OpenAI protocol: `created` is a real Unix timestamp; `system_fingerprint`
+    // identifies the backend build.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let created = val["created"].as_u64().expect("created timestamp");
+    assert!(
+        created > 1_600_000_000 && created <= now_secs + 5,
+        "created {created} should be a recent Unix timestamp (now={now_secs})"
+    );
+    assert!(
+        val["system_fingerprint"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("fp_modelc_")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -739,7 +769,9 @@ async fn run_server_completions_echo() {
         "echo": true
     });
     let val = post_json(&format!("{base}/v1/completions"), &body);
-    let text = val["choices"][0]["text"].as_str().expect("should have text");
+    let text = val["choices"][0]["text"]
+        .as_str()
+        .expect("should have text");
     assert!(
         text.starts_with("hello"),
         "echo=true should prepend prompt to completion, got: {text}"
@@ -989,23 +1021,36 @@ async fn run_server_max_concurrent_rejects_with_503() {
     let body_str = serde_json::to_string(&serde_json::json!({
         "messages": [{"role": "user", "content": "hello"}],
         "max_tokens": 4
-    })).unwrap();
+    }))
+    .unwrap();
 
     let (ra, rb, rc) = tokio::join!(
         tokio::task::spawn_blocking({
             let body = body_str.clone();
             let url = format!("{base}/chat");
-            move || http::post(&url).content_type("application/json").send(&body)
+            move || {
+                http::post(&url)
+                    .content_type("application/json")
+                    .send(&body)
+            }
         }),
         tokio::task::spawn_blocking({
             let body = body_str.clone();
             let url = format!("{base}/chat");
-            move || http::post(&url).content_type("application/json").send(&body)
+            move || {
+                http::post(&url)
+                    .content_type("application/json")
+                    .send(&body)
+            }
         }),
         tokio::task::spawn_blocking({
             let body = body_str.clone();
             let url = format!("{base}/chat");
-            move || http::post(&url).content_type("application/json").send(&body)
+            move || {
+                http::post(&url)
+                    .content_type("application/json")
+                    .send(&body)
+            }
         }),
     );
 
@@ -1071,7 +1116,10 @@ async fn run_server_serves_openai_v1_embeddings() {
     let data = val["data"].as_array().expect("data array");
     assert_eq!(data.len(), 1);
     assert_eq!(data[0]["object"].as_str(), Some("embedding"));
-    assert!(data[0]["embedding"].is_array(), "float embedding should be array");
+    assert!(
+        data[0]["embedding"].is_array(),
+        "float embedding should be array"
+    );
     let dims = data[0]["dimensions"].as_u64().expect("dimensions present") as usize;
     let emb = data[0]["embedding"].as_array().unwrap();
     assert_eq!(emb.len(), dims, "dimensions should match embedding length");
@@ -1085,7 +1133,10 @@ async fn run_server_serves_openai_v1_embeddings() {
     let val = post_json(&format!("{base}/v1/embeddings"), &body);
     let data = val["data"].as_array().expect("data array");
     assert_eq!(data.len(), 2);
-    assert!(data[0]["embedding"].as_str().is_some(), "base64 embedding should be a string");
+    assert!(
+        data[0]["embedding"].as_str().is_some(),
+        "base64 embedding should be a string"
+    );
     assert_eq!(data[0]["index"].as_u64(), Some(0));
     assert_eq!(data[1]["index"].as_u64(), Some(1));
     assert!(data[0]["dimensions"].as_u64().is_some());
@@ -1151,10 +1202,7 @@ async fn run_server_serves_props() {
         .expect("props request should succeed");
     let bytes = read_body(resp).expect("read body");
     let val: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
-    assert!(
-        val["model"].as_str().is_some(),
-        "model should be present"
-    );
+    assert!(val["model"].as_str().is_some(), "model should be present");
     assert!(
         val["architecture"].as_str().is_some(),
         "architecture should be present"
@@ -1196,7 +1244,9 @@ async fn run_server_detokenize() {
     // First tokenize to get valid token IDs, then detokenize to verify round-trip.
     let tok_body = serde_json::json!({ "input": "hello" });
     let tok_val = post_json(&format!("{base}/tokenize"), &tok_body);
-    let tokens = tok_val["tokens"].as_array().expect("tokens should be array");
+    let tokens = tok_val["tokens"]
+        .as_array()
+        .expect("tokens should be array");
     assert!(!tokens.is_empty(), "should have at least one token");
 
     let detok_body = serde_json::json!({ "tokens": tokens });
@@ -1205,6 +1255,54 @@ async fn run_server_detokenize() {
     assert!(
         text.contains("hello"),
         "detokenized text should contain original input, got: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_infill() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let body = serde_json::json!({
+        "prefix": "fn main() {",
+        "suffix": "}",
+        "max_tokens": 4,
+        "temperature": 0.0
+    });
+    let val = post_json(&format!("{base}/infill"), &body);
+    let completion = val["completion"]
+        .as_str()
+        .expect("infill response must include completion");
+    // Tiny GPT-2 fixture still runs the FIM path; output may be empty if a stop
+    // sequence matches immediately, but the field must be present and UTF-8.
+    let _ = completion;
+
+    let with_prompt = serde_json::json!({
+        "prefix": "let x = ",
+        "suffix": ";",
+        "prompt": "complete the rust snippet",
+        "max_tokens": 2,
+        "seed": 1
+    });
+    let val = post_json(&format!("{base}/infill"), &with_prompt);
+    assert!(
+        val["completion"].is_string(),
+        "prompt+prefix infill should still return a completion string"
     );
 }
 
@@ -1235,7 +1333,9 @@ async fn run_server_completions_suffix() {
         "suffix": " END"
     });
     let val = post_json(&format!("{base}/v1/completions"), &body);
-    let text = val["choices"][0]["text"].as_str().expect("should have text");
+    let text = val["choices"][0]["text"]
+        .as_str()
+        .expect("should have text");
     assert!(
         text.ends_with(" END"),
         "suffix should be appended to completion, got: {text}"
@@ -1422,8 +1522,7 @@ async fn run_server_retrieve_model() {
         .call()
         .expect("list models should succeed");
     let list_bytes = read_body(list).expect("read body");
-    let list_val: serde_json::Value =
-        serde_json::from_slice(&list_bytes).expect("parse json");
+    let list_val: serde_json::Value = serde_json::from_slice(&list_bytes).expect("parse json");
     let model_id = list_val["data"][0]["id"]
         .as_str()
         .expect("model id should be present");
@@ -1438,10 +1537,7 @@ async fn run_server_retrieve_model() {
     assert_eq!(val["owned_by"].as_str(), Some("modelc"));
 
     let not_found = http::get(&format!("{base}/v1/models/nonexistent")).call();
-    assert!(
-        not_found.is_err(),
-        "non-existent model should return error"
-    );
+    assert!(not_found.is_err(), "non-existent model should return error");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1634,7 +1730,8 @@ async fn run_server_chat_tool_choice_required() {
     assert_eq!(choices.len(), 1);
     // Should still get a valid response (tool injection happened)
     assert!(
-        choices[0]["message"]["content"].as_str().is_some() || choices[0]["message"]["tool_calls"].is_array(),
+        choices[0]["message"]["content"].as_str().is_some()
+            || choices[0]["message"]["tool_calls"].is_array(),
         "should return either content or tool_calls"
     );
 }
@@ -1777,7 +1874,10 @@ async fn run_server_serves_reranking() {
     assert!(val["model"].as_str().is_some(), "model field present");
     let results = val["results"].as_array().expect("results should be array");
     assert_eq!(results.len(), 2, "top_n=2 should return 2 results");
-    assert!(results[0]["index"].as_u64().is_some(), "index field present");
+    assert!(
+        results[0]["index"].as_u64().is_some(),
+        "index field present"
+    );
     assert!(
         results[0]["relevance_score"].as_f64().is_some(),
         "relevance_score field present"

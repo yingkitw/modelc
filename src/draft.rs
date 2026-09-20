@@ -202,7 +202,10 @@ mod tests {
     fn mlp_draft_model_from_runtime_requires_all_weights() {
         let runtime = Runtime::from_raw(&std::collections::HashMap::new());
         let model = MlpDraftModel::from_runtime(&runtime, 10, 4, 2, 0.0, 0.0);
-        assert!(model.is_none(), "empty runtime should not yield draft model");
+        assert!(
+            model.is_none(),
+            "empty runtime should not yield draft model"
+        );
     }
 
     #[test]

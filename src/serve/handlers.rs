@@ -17,8 +17,8 @@ use super::infer::{
 use super::{
     AppState, CancelOnDrop, ChatRequest, ChatResponse, CompleteRequest, CompleteResponse,
     DefaultGenerationProps, DetokenizeRequest, DetokenizeResponse, Document, EmbeddingEntry,
-    EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InfillRequest, InfillResponse,
-    InferRequest, InferResponse, LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message,
+    EmbeddingsRequest, EmbeddingsResponse, HealthResponse, InferRequest, InferResponse,
+    InfillRequest, InfillResponse, LoraLoadRequest, LoraLoadResponse, LoraUnloadResponse, Message,
     ModelInfo, RerankingRequest, RerankingResponse, RerankingResult, ServerProps, StreamChunk,
     SystemInfo, TokenizeRequest, TokenizeResponse, VersionInfo,
 };
@@ -268,10 +268,8 @@ pub(super) async fn chat(
             content: m.content.clone(),
         })
         .collect();
-    let prompt = crate::chat_template::apply_chat_template(
-        state.chat_template.as_deref(),
-        &messages,
-    );
+    let prompt =
+        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages);
     let gen_cfg = make_generation_config(
         &state.generation,
         req.max_tokens,
@@ -386,10 +384,8 @@ pub(super) async fn chat_stream(
             content: m.content.clone(),
         })
         .collect();
-    let prompt = crate::chat_template::apply_chat_template(
-        state.chat_template.as_deref(),
-        &messages,
-    );
+    let prompt =
+        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages);
     let mut gen_cfg = make_generation_config(
         &state.generation,
         req.max_tokens,
@@ -564,9 +560,7 @@ pub(super) async fn reranking(
             RerankingResult {
                 index: idx,
                 relevance_score: score,
-                document: Document {
-                    text: doc.clone(),
-                },
+                document: Document { text: doc.clone() },
             }
         })
         .collect();
@@ -736,9 +730,7 @@ pub(super) async fn api_tags() -> Json<super::ApiTagsResponse> {
     Json(super::ApiTagsResponse { models: tags })
 }
 
-pub(super) async fn api_show(
-    Json(req): Json<super::ApiShowRequest>,
-) -> axum::response::Response {
+pub(super) async fn api_show(Json(req): Json<super::ApiShowRequest>) -> axum::response::Response {
     match crate::store::resolve_model_path(&req.name) {
         Ok(path) => match crate::pack::read_header(&path) {
             Ok(header) => {
@@ -762,9 +754,46 @@ pub(super) async fn api_show(
                 })
                 .into_response()
             }
-            Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR
-                .into_response(),
+            Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
         Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// `GET /api/cache/stats` — return prefix cache stats for the running model.
+///
+/// Useful for ops dashboards: tracks entries, total tokens cached, and
+/// approximate KV-bytes consumed. Exempt from auth/backpressure so probes
+/// keep working under load.
+pub(super) async fn cache_stats(
+    State(state): State<Arc<AppState>>,
+) -> Json<super::CacheStatsResponse> {
+    let guard = state
+        .prefix_cache
+        .read()
+        .expect("prefix cache lock poisoned");
+    let s = guard.stats();
+    Json(super::CacheStatsResponse {
+        entries: s.entries,
+        capacity: s.capacity,
+        total_tokens: s.total_tokens,
+        total_kv_bytes: s.total_kv_bytes,
+        utilization: s.utilization,
+    })
+}
+
+/// `POST /api/cache/clear` — drop every cached prefix snapshot. Use after
+/// loading a new LoRA adapter, swapping runtime tensors, or recovering from
+/// a suspected cache-poisoning incident.
+pub(super) async fn cache_clear(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut guard = state
+        .prefix_cache
+        .write()
+        .expect("prefix cache lock poisoned");
+    let before = guard.len();
+    guard.clear();
+    Json(serde_json::json!({
+        "cleared_entries": before,
+        "message": "prefix cache cleared",
+    }))
 }

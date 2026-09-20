@@ -141,12 +141,12 @@ fn do_request(
     headers: &[(String, String)],
     body: Option<&[u8]>,
 ) -> Result<Response, HttpError> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| HttpError::Io(std::io::Error::new(
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        HttpError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "only http:// URLs are supported in tests",
-        )))?;
+        ))
+    })?;
     let (host_port, path) = match rest.split_once('/') {
         Some((h, p)) => (h, format!("/{}", p)),
         None => (rest, "/".to_string()),
@@ -181,13 +181,14 @@ fn do_request(
     let header_end = response
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| HttpError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "HTTP response missing header terminator",
-        )))?;
-    let headers_str = std::str::from_utf8(&response[..header_end]).map_err(|e| {
-        HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-    })?;
+        .ok_or_else(|| {
+            HttpError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP response missing header terminator",
+            ))
+        })?;
+    let headers_str = std::str::from_utf8(&response[..header_end])
+        .map_err(|e| HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     let status_line = headers_str.lines().next().ok_or_else(|| {
         HttpError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -216,9 +217,7 @@ fn do_request(
 pub fn read_body(resp: Response) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut buf = Vec::new();
-    resp.into_body()
-        .into_reader()
-        .read_to_end(&mut buf)?;
+    resp.into_body().into_reader().read_to_end(&mut buf)?;
     Ok(buf)
 }
 

@@ -256,3 +256,90 @@ fn test_linear_batched() {
     // [3+4, 3+4] = [7, 7]
     vec_approx_eq(&result.data, &[3.0, 3.0, 7.0, 7.0], 1e-5);
 }
+
+#[test]
+fn test_matmul_large_triggers_rayon_parallel_path() {
+    // m >= 8 enables the rayon `par_chunks_exact_mut` path (CPU fallback when
+    // SIMD is unavailable, and on aarch64 when AVX is not detected). Use a
+    // 16×16 matmul against a known-identity to verify the parallel branch
+    // produces the same result as the SIMD/scalar branches.
+    let n = 16;
+    let mut a_data = Vec::with_capacity(n * n);
+    for i in 0..(n * n) {
+        a_data.push((i as f32) * 0.01);
+    }
+    let a = Tensor::from_vec(a_data, vec![n, n]);
+    // Identity matrix as `b`.
+    let mut eye_data = vec![0.0f32; n * n];
+    for i in 0..n {
+        eye_data[i * n + i] = 1.0;
+    }
+    let eye = Tensor::from_vec(eye_data, vec![n, n]);
+    let result = ops::matmul(&a, &eye);
+    assert_eq!(result.shape, vec![n, n]);
+    vec_approx_eq(&result.data, &a.data, 1e-4);
+}
+
+#[test]
+fn test_softmax_3d_axis_last() {
+    // Verify the inner-loop indexing for softmax with non-trivial
+    // outer/inner dimensions (exercises the loop that's distinct from 1-D).
+    let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let result = ops::softmax(&t, 1);
+    assert_eq!(result.shape, vec![2, 3]);
+    // Each row should sum to 1.
+    for row in result.data.chunks_exact(3) {
+        let sum: f32 = row.iter().sum();
+        assert!(approx_eq(sum, 1.0, 1e-5), "row sum = {sum}");
+    }
+    // Row 0: [1,2,3] → exp(0,1,2) / (e^0 + e^1 + e^2)
+    let expected_row0 = {
+        let exps = [1.0_f32.exp(), 2.0_f32.exp(), 3.0_f32.exp()];
+        let sum: f32 = exps.iter().sum();
+        exps.iter().map(|e| e / sum).collect::<Vec<_>>()
+    };
+    vec_approx_eq(&result.data[..3], &expected_row0, 1e-5);
+}
+
+#[test]
+fn test_add_2d_plus_1d_broadcast() {
+    // Exercises the broadcast branch in `add` (a 2D + 1D, where bias has
+    // shape [cols]).
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let b = Tensor::from_vec(vec![10.0, 20.0], vec![2]);
+    let result = ops::add(&a, &b);
+    assert_eq!(result.shape, vec![2, 2]);
+    vec_approx_eq(&result.data, &[11.0, 22.0, 13.0, 24.0], 1e-6);
+}
+
+#[test]
+fn test_add_1d_plus_2d_broadcast_via_swap() {
+    // Exercises the symmetric branch: 1D + 2D where bias len == a's cols.
+    let b = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let a = Tensor::from_vec(vec![10.0, 20.0], vec![2]);
+    let result = ops::add(&a, &b);
+    assert_eq!(result.shape, vec![2, 2]);
+    vec_approx_eq(&result.data, &[11.0, 22.0, 13.0, 24.0], 1e-6);
+}
+
+#[test]
+fn test_relu_empty_tensor() {
+    let t = Tensor::from_vec(Vec::<f32>::new(), vec![0]);
+    let result = ops::relu(&t);
+    assert_eq!(result.shape, vec![0]);
+    assert!(result.data.is_empty());
+}
+
+#[test]
+fn test_layer_norm_zero_eps() {
+    // Layer norm with eps=0 should still produce finite output.
+    let a = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], vec![4]);
+    let w = Tensor::from_vec(vec![1.0_f32, 1.0, 1.0, 1.0], vec![4]);
+    let b = Tensor::from_vec(vec![0.0_f32, 0.0, 0.0, 0.0], vec![4]);
+    let result = ops::layer_norm(&a, &w, &b, 0.0);
+    assert_eq!(result.shape, vec![4]);
+    // Output should be approximately standardized (mean 0, unit variance
+    // *before* affine). With eps=0 the inv_std = 1/sqrt(var) is well-defined.
+    let mean: f32 = result.data.iter().sum::<f32>() / 4.0;
+    assert!(approx_eq(mean, 0.0, 1e-5), "mean = {mean}");
+}

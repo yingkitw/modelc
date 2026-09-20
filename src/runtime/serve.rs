@@ -291,4 +291,164 @@ mod tests {
         assert!(!view2.tensors.contains_key("a"));
         assert!(view2.tensors.contains_key("b"));
     }
+
+    // ---- bytes_to_f32_slice dtype coverage (via Runtime::from_raw) ----
+
+    #[test]
+    fn runtime_casts_every_numeric_dtype_to_f32() {
+        use half::bf16;
+        let raw = HashMap::from([
+            // F16: 1.0, 2.0
+            (
+                "f16_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::F16,
+                    data: [
+                        f16::from_f32(1.0).to_bits().to_le_bytes(),
+                        f16::from_f32(2.0).to_bits().to_le_bytes(),
+                    ]
+                    .concat(),
+                },
+            ),
+            // BF16: 1.0, 2.0
+            (
+                "bf16_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::BF16,
+                    data: [
+                        bf16::from_f32(1.0).to_bits().to_le_bytes(),
+                        bf16::from_f32(2.0).to_bits().to_le_bytes(),
+                    ]
+                    .concat(),
+                },
+            ),
+            // I64: -1, 7
+            (
+                "i64_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::I64,
+                    data: (-1i64)
+                        .to_le_bytes()
+                        .iter()
+                        .chain(7i64.to_le_bytes().iter())
+                        .copied()
+                        .collect(),
+                },
+            ),
+            // I32: -2, 8
+            (
+                "i32_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::I32,
+                    data: (-2i32)
+                        .to_le_bytes()
+                        .iter()
+                        .chain(8i32.to_le_bytes().iter())
+                        .copied()
+                        .collect(),
+                },
+            ),
+            // I16: -3, 9
+            (
+                "i16_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::I16,
+                    data: (-3i16)
+                        .to_le_bytes()
+                        .iter()
+                        .chain(9i16.to_le_bytes().iter())
+                        .copied()
+                        .collect(),
+                },
+            ),
+            // I8: -4, 10
+            (
+                "i8_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::I8,
+                    data: vec![(-4i8) as u8, 10],
+                },
+            ),
+            // U8: 0, 255
+            (
+                "u8_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::U8,
+                    data: vec![0, 255],
+                },
+            ),
+            // Bool: true, false
+            (
+                "bool_t".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::Bool,
+                    data: vec![1, 0],
+                },
+            ),
+        ]);
+
+        let rt = Runtime::from_raw(&raw);
+        assert_eq!(rt.get("f16_t").unwrap().data, vec![1.0, 2.0]);
+        assert_eq!(rt.get("bf16_t").unwrap().data, vec![1.0, 2.0]);
+        assert_eq!(rt.get("i64_t").unwrap().data, vec![-1.0, 7.0]);
+        assert_eq!(rt.get("i32_t").unwrap().data, vec![-2.0, 8.0]);
+        assert_eq!(rt.get("i16_t").unwrap().data, vec![-3.0, 9.0]);
+        assert_eq!(rt.get("i8_t").unwrap().data, vec![-4.0, 10.0]);
+        assert_eq!(rt.get("u8_t").unwrap().data, vec![0.0, 255.0]);
+        assert_eq!(rt.get("bool_t").unwrap().data, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn runtime_skips_tensors_with_truncated_data() {
+        // Data shorter than the declared element count → conversion returns
+        // None → the tensor is silently omitted from the runtime.
+        let raw = HashMap::from([
+            (
+                "short_f32".to_string(),
+                TensorData {
+                    shape: vec![4],
+                    dtype: DataType::F32,
+                    data: vec![0u8; 8], // needs 16
+                },
+            ),
+            (
+                "short_f16".to_string(),
+                TensorData {
+                    shape: vec![4],
+                    dtype: DataType::F16,
+                    data: vec![0u8; 4], // needs 8
+                },
+            ),
+            (
+                "short_i64".to_string(),
+                TensorData {
+                    shape: vec![2],
+                    dtype: DataType::I64,
+                    data: vec![0u8; 8], // needs 16
+                },
+            ),
+            (
+                "short_bool".to_string(),
+                TensorData {
+                    shape: vec![4],
+                    dtype: DataType::Bool,
+                    data: vec![0u8; 2], // needs 4
+                },
+            ),
+        ]);
+        let rt = Runtime::from_raw(&raw);
+        assert!(rt.get("short_f32").is_none());
+        assert!(rt.get("short_f16").is_none());
+        assert!(rt.get("short_i64").is_none());
+        assert!(rt.get("short_bool").is_none());
+        assert!(rt.tensor_names().is_empty());
+    }
 }

@@ -124,6 +124,24 @@ pub fn llama_hidden_dim(model: &Model, layers: &[u32]) -> usize {
         .unwrap_or(0)
 }
 
+/// Hidden size for GPT-2 / LLaMA artifacts, or `None` when the architecture is not a
+/// transformer or the size cannot be inferred. Shared by `modelc run` (HTTP) and
+/// `modelc prompt` (one-shot CLI) so both paths size the KV cache the same way.
+pub fn transformer_hidden_dim(model: &Model) -> Option<usize> {
+    let hidden = match model.architecture.as_str() {
+        "gpt2" => {
+            let layers = detect_layers(model, "transformer.h.");
+            gpt2_hidden_dim(model, &layers)
+        }
+        "llama" => {
+            let layers = llama_layers(model);
+            llama_hidden_dim(model, &layers)
+        }
+        _ => return None,
+    };
+    (hidden > 0).then_some(hidden)
+}
+
 /// Prefer an explicit `attention.head_count` metadata hint; otherwise default to hidden/64.
 pub fn llama_head_count(model: &Model, hidden: usize) -> usize {
     if let Some(h) = model

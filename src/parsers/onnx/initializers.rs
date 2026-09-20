@@ -234,3 +234,176 @@ pub(super) fn onnx_slice_bytes_to_ir(
     );
     Ok(slice.to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onnx_rs::ast::TensorProto;
+
+    // ---- onnx_initializer_bytes ----
+
+    #[test]
+    fn raw_data_passthrough_when_present() {
+        // When raw_data is present, it is returned verbatim regardless of the
+        // requested element type.
+        let raw = [42u8, 0, 0, 0, 43, 0, 0, 0];
+        let t = TensorProto::from_raw("w", vec![2], OnnxDt::Float, &raw);
+        let out = onnx_initializer_bytes(&t, DataType::F32).unwrap();
+        assert_eq!(out, raw.to_vec());
+    }
+
+    #[test]
+    fn f32_payload_serializes_to_le_bytes() {
+        let t = TensorProto::from_f32("w", vec![2], vec![1.0f32, -2.0]);
+        let out = onnx_initializer_bytes(&t, DataType::F32).unwrap();
+        let v: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(v, vec![1.0, -2.0]);
+    }
+
+    #[test]
+    fn f64_payload_downcasts_to_f32_when_f32_requested() {
+        let t = TensorProto::from_f64("w", vec![2], vec![3.5f64, -0.25]);
+        let out = onnx_initializer_bytes(&t, DataType::F32).unwrap();
+        let v: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(v, vec![3.5f32, -0.25]);
+    }
+
+    #[test]
+    fn f32_requested_but_no_payload_errors() {
+        let t = TensorProto::from_raw("empty", vec![1], OnnxDt::Float, &[]);
+        let err = onnx_initializer_bytes(&t, DataType::F32).unwrap_err();
+        assert!(format!("{err:#}").contains("missing float payload"));
+    }
+
+    #[test]
+    fn i32_and_i64_payloads_serialize() {
+        let t32 = TensorProto::from_i32("w", vec![2], vec![7i32, -8]);
+        let out32 = onnx_initializer_bytes(&t32, DataType::I32).unwrap();
+        let v32: Vec<i32> = out32
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(v32, vec![7, -8]);
+
+        let t64 = TensorProto::from_i64("w", vec![2], vec![1i64 << 40, -1]);
+        let out64 = onnx_initializer_bytes(&t64, DataType::I64).unwrap();
+        let v64: Vec<i64> = out64
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(v64, vec![1i64 << 40, -1]);
+    }
+
+    #[test]
+    fn missing_int_payloads_error() {
+        let t = TensorProto::from_raw("i", vec![1], OnnxDt::Int32, &[]);
+        assert!(
+            onnx_initializer_bytes(&t, DataType::I32)
+                .unwrap_err()
+                .to_string()
+                .contains("missing int32")
+        );
+
+        let t64 = TensorProto::from_raw("i", vec![1], OnnxDt::Int64, &[]);
+        assert!(
+            onnx_initializer_bytes(&t64, DataType::I64)
+                .unwrap_err()
+                .to_string()
+                .contains("missing int64")
+        );
+    }
+
+    #[test]
+    fn packed_dtypes_without_raw_error() {
+        let t = TensorProto::from_raw("p", vec![1], OnnxDt::Float16, &[]);
+        let err = onnx_initializer_bytes(&t, DataType::F16).unwrap_err();
+        assert!(format!("{err:#}").contains("missing raw_data for packed dtype"));
+    }
+
+    // ---- onnx_tensor_storage_width ----
+
+    #[test]
+    fn storage_widths_match_onnx_spec() {
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Float).unwrap(), 4);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Double).unwrap(), 8);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Float16).unwrap(), 2);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Bfloat16).unwrap(), 2);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Int32).unwrap(), 4);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Int64).unwrap(), 8);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Uint8).unwrap(), 1);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Int8).unwrap(), 1);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Uint16).unwrap(), 2);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Int16).unwrap(), 2);
+        assert_eq!(onnx_tensor_storage_width(OnnxDt::Bool).unwrap(), 1);
+        // Unsupported dtype errors with a named hint.
+        let err = onnx_tensor_storage_width(OnnxDt::Uint64).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be loaded from external initializer"));
+    }
+
+    // ---- onnx_external_bytes_to_ir ----
+
+    #[test]
+    fn external_float_passthrough_and_double_downcast() {
+        let floats = [1.0f32, 2.0];
+        let mut bytes = Vec::new();
+        for f in floats {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        let out = onnx_external_bytes_to_ir(&bytes, OnnxDt::Float, 2, "w").unwrap();
+        assert_eq!(out, bytes);
+
+        let doubles = [1.5f64, -2.5];
+        let mut dbytes = Vec::new();
+        for d in doubles {
+            dbytes.extend_from_slice(&d.to_le_bytes());
+        }
+        let out = onnx_external_bytes_to_ir(&dbytes, OnnxDt::Double, 2, "w").unwrap();
+        let v: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(v, vec![1.5f32, -2.5]);
+
+        // Int64 passthrough (IR keeps raw bytes; runtime casts).
+        let mut ibytes = Vec::new();
+        for i in [5i64, -6] {
+            ibytes.extend_from_slice(&i.to_le_bytes());
+        }
+        let out = onnx_external_bytes_to_ir(&ibytes, OnnxDt::Int64, 2, "w").unwrap();
+        assert_eq!(out, ibytes);
+    }
+
+    #[test]
+    fn external_length_mismatch_errors() {
+        let bytes = [0u8; 4];
+        let err = onnx_external_bytes_to_ir(&bytes, OnnxDt::Float, 2, "w").unwrap_err();
+        assert!(format!("{err:#}").contains("external ONNX raw length"));
+    }
+
+    #[test]
+    fn external_unsupported_dtype_errors() {
+        // Uint64 is unsupported for external decoding (width check passes at 8
+        // only for Int64; Uint64 falls into the bail arm).
+        let bytes = [0u8; 8];
+        let err = onnx_external_bytes_to_ir(&bytes, OnnxDt::Uint64, 1, "w");
+        assert!(err.is_err());
+    }
+
+    // ---- onnx_slice_bytes_to_ir ----
+
+    #[test]
+    fn slice_bytes_roundtrip_and_mismatch() {
+        let bytes = [1u8, 2, 3, 4];
+        let out = onnx_slice_bytes_to_ir(&bytes, DataType::F32, 1, "w").unwrap();
+        assert_eq!(out, bytes.to_vec());
+
+        let err = onnx_slice_bytes_to_ir(&bytes, DataType::F32, 2, "w").unwrap_err();
+        assert!(format!("{err:#}").contains("segmented slice length"));
+    }
+}

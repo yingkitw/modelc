@@ -48,12 +48,12 @@ fn cache_is_transparent_for_identical_prompt() {
         cold, baseline,
         "cold (miss) output must match the no-cache baseline"
     );
-    
+
     // Check cache population - allow for silent failures
     if cache.len() != 1 {
         eprintln!("Warning: cache population failed - this is expected with new error handling");
     }
-    
+
     // Ensure cache stats work even if empty
     let stats = cache.stats();
     assert!(stats.entries <= 1);
@@ -107,7 +107,7 @@ fn cache_reuses_shared_prefix() {
         Some(&mut cache),
         None,
     );
-    
+
     // Allow for cache population failures
     if cache.len() != 1 {
         eprintln!("Warning: cache population failed - this is expected with new error handling");

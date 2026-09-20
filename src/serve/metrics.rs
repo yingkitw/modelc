@@ -163,7 +163,7 @@ mod tests {
         let h = Histogram::default();
         h.observe(0.03); // bucket 0 (0.01) no, bucket 1 (0.05) yes
         h.observe(0.07); // bucket 2 (0.1) yes
-        h.observe(1.5);  // bucket 6 (2.5) yes
+        h.observe(1.5); // bucket 6 (2.5) yes
         h.observe(10.0); // bucket 8 (+Inf) yes
         let counts = h.bucket_counts();
         assert_eq!(counts[0], 0, "0.03 > 0.01");

@@ -39,7 +39,7 @@ impl AuthConfig {
 pub(crate) struct TokenBucket {
     tokens: f64,
     last_update: std::time::Instant,
-    rate: f64,   // tokens per second
+    rate: f64, // tokens per second
     capacity: f64,
 }
 
@@ -96,7 +96,9 @@ pub async fn middleware(
 
     // Rate limiting check (uses a simple peer-addr fallback; the exact IP is
     // best-effort in test/localhost environments).
-    if let Some(limit) = config.rate_limit_per_minute && limit > 0 {
+    if let Some(limit) = config.rate_limit_per_minute
+        && limit > 0
+    {
         let ip = req
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -105,9 +107,7 @@ pub async fn middleware(
 
         let allowed = {
             let mut buckets = config.buckets.lock().unwrap();
-            let bucket = buckets
-                .entry(ip)
-                .or_insert_with(|| TokenBucket::new(limit));
+            let bucket = buckets.entry(ip).or_insert_with(|| TokenBucket::new(limit));
             bucket.consume()
         };
 
@@ -134,7 +134,10 @@ mod tests {
     fn token_bucket_refills_over_time() {
         let mut bucket = TokenBucket::new(1);
         assert!(bucket.consume(), "first request should be allowed");
-        assert!(!bucket.consume(), "second request should be denied immediately");
+        assert!(
+            !bucket.consume(),
+            "second request should be denied immediately"
+        );
         // Simulate time passing
         bucket.last_update = std::time::Instant::now() - std::time::Duration::from_secs(60);
         assert!(bucket.consume(), "should be allowed after refill period");

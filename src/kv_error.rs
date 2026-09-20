@@ -16,10 +16,7 @@ pub enum KvError {
         operation: String,
     },
     /// Cache capacity exceeded.
-    CapacityExceeded {
-        requested: usize,
-        capacity: usize,
-    },
+    CapacityExceeded { requested: usize, capacity: usize },
     /// Invalid cache state or corruption.
     InvalidCacheState(String),
     /// Operation on empty cache.
@@ -32,10 +29,7 @@ pub enum KvError {
     /// Quantization error.
     QuantizationError(String),
     /// Layer index out of bounds.
-    LayerOutOfBounds {
-        index: usize,
-        total_layers: usize,
-    },
+    LayerOutOfBounds { index: usize, total_layers: usize },
     /// Position index out of bounds.
     PositionOutOfBounds {
         index: usize,
@@ -48,13 +42,26 @@ pub enum KvError {
 impl fmt::Display for KvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KvError::InvalidDimensions { expected, actual, operation } => {
-                write!(f, "Invalid dimensions for '{}': expected {}, got {}", 
-                       operation, expected, actual)
+            KvError::InvalidDimensions {
+                expected,
+                actual,
+                operation,
+            } => {
+                write!(
+                    f,
+                    "Invalid dimensions for '{}': expected {}, got {}",
+                    operation, expected, actual
+                )
             }
-            KvError::CapacityExceeded { requested, capacity } => {
-                write!(f, "Cache capacity exceeded: requested {}, capacity {}", 
-                       requested, capacity)
+            KvError::CapacityExceeded {
+                requested,
+                capacity,
+            } => {
+                write!(
+                    f,
+                    "Cache capacity exceeded: requested {}, capacity {}",
+                    requested, capacity
+                )
             }
             KvError::InvalidCacheState(msg) => {
                 write!(f, "Invalid cache state: {}", msg)
@@ -72,13 +79,25 @@ impl fmt::Display for KvError {
             KvError::QuantizationError(msg) => {
                 write!(f, "Quantization error: {}", msg)
             }
-            KvError::LayerOutOfBounds { index, total_layers } => {
-                write!(f, "Layer index {} out of bounds (total layers: {})", 
-                       index, total_layers)
+            KvError::LayerOutOfBounds {
+                index,
+                total_layers,
+            } => {
+                write!(
+                    f,
+                    "Layer index {} out of bounds (total layers: {})",
+                    index, total_layers
+                )
             }
-            KvError::PositionOutOfBounds { index, total_positions } => {
-                write!(f, "Position index {} out of bounds (total positions: {})", 
-                       index, total_positions)
+            KvError::PositionOutOfBounds {
+                index,
+                total_positions,
+            } => {
+                write!(
+                    f,
+                    "Position index {} out of bounds (total positions: {})",
+                    index, total_positions
+                )
             }
             KvError::MixedPrecisionError(msg) => {
                 write!(f, "Mixed precision operation error: {}", msg)
@@ -92,12 +111,10 @@ impl std::error::Error for KvError {}
 impl From<CacheValidationError> for KvError {
     fn from(err: CacheValidationError) -> Self {
         match err {
-            CacheValidationError::EmptySequence => {
-                KvError::InvalidTokenSequence {
-                    reason: "Empty token sequence".to_string(),
-                    position: None,
-                }
-            }
+            CacheValidationError::EmptySequence => KvError::InvalidTokenSequence {
+                reason: "Empty token sequence".to_string(),
+                position: None,
+            },
             CacheValidationError::SequenceTooLong { length, max_length } => {
                 KvError::InvalidTokenSequence {
                     reason: format!("Sequence too long: {} (max {})", length, max_length),
@@ -110,13 +127,15 @@ impl From<CacheValidationError> for KvError {
                     position: Some(position),
                 }
             }
-            CacheValidationError::DimensionMismatch { layer, expected, actual } => {
-                KvError::InvalidDimensions {
-                    expected,
-                    actual,
-                    operation: format!("layer {} KV cache", layer),
-                }
-            }
+            CacheValidationError::DimensionMismatch {
+                layer,
+                expected,
+                actual,
+            } => KvError::InvalidDimensions {
+                expected,
+                actual,
+                operation: format!("layer {} KV cache", layer),
+            },
         }
     }
 }
@@ -130,15 +149,9 @@ pub enum CacheValidationError {
     /// Token sequence is empty.
     EmptySequence,
     /// Token sequence too long for cache.
-    SequenceTooLong {
-        length: usize,
-        max_length: usize,
-    },
+    SequenceTooLong { length: usize, max_length: usize },
     /// Invalid token ID.
-    InvalidTokenId {
-        token_id: u32,
-        position: usize,
-    },
+    InvalidTokenId { token_id: u32, position: usize },
     /// KV state dimensions don't match.
     DimensionMismatch {
         layer: usize,
@@ -154,14 +167,25 @@ impl fmt::Display for CacheValidationError {
                 write!(f, "Token sequence cannot be empty")
             }
             CacheValidationError::SequenceTooLong { length, max_length } => {
-                write!(f, "Token sequence too long: {} (max {})", length, max_length)
+                write!(
+                    f,
+                    "Token sequence too long: {} (max {})",
+                    length, max_length
+                )
             }
             CacheValidationError::InvalidTokenId { token_id, position } => {
                 write!(f, "Invalid token ID {} at position {}", token_id, position)
             }
-            CacheValidationError::DimensionMismatch { layer, expected, actual } => {
-                write!(f, "Dimension mismatch in layer {}: expected {}, got {}", 
-                       layer, expected, actual)
+            CacheValidationError::DimensionMismatch {
+                layer,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Dimension mismatch in layer {}: expected {}, got {}",
+                    layer, expected, actual
+                )
             }
         }
     }
@@ -216,9 +240,15 @@ impl KvContext {
 
     pub fn out_of_bounds_error(&self, index: usize, total: usize, is_layer: bool) -> KvError {
         if is_layer {
-            KvError::LayerOutOfBounds { index, total_layers: total }
+            KvError::LayerOutOfBounds {
+                index,
+                total_layers: total,
+            }
         } else {
-            KvError::PositionOutOfBounds { index, total_positions: total }
+            KvError::PositionOutOfBounds {
+                index,
+                total_positions: total,
+            }
         }
     }
 }

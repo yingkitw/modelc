@@ -103,7 +103,9 @@ fn relu_inplace(xs: &mut [f32]) {
     for v in xs {
         *v = v.max(0.0);
     }
-}"#.trim_end().to_string();
+}"#
+    .trim_end()
+    .to_string();
     format!("{}\n\n{body}", emitted_gemv_kernel())
 }
 
@@ -192,7 +194,9 @@ fn add(a: &[f32], b: &[f32]) -> Vec<f32> {
 /// full QKV projection structure while remaining within the codegen GEMV (single-vector) contract.
 fn single_token_attention(_q: &[f32], _k: &[f32], v: &[f32], _n_heads: usize) -> Vec<f32> {
     v.to_vec()
-}"#.trim_end().to_string();
+}"#
+    .trim_end()
+    .to_string();
     format!("{}\n\n{body}", emitted_gemv_kernel())
 }
 
@@ -285,6 +289,8 @@ fn rope(x: &[f32], pos: usize, n_heads: usize) -> Vec<f32> {
 /// Single-token causal attention; collapses to `V` for sequence length one (see gpt2 helper).
 fn single_token_attention(_q: &[f32], _k: &[f32], v: &[f32], _n_heads: usize) -> Vec<f32> {
     v.to_vec()
-}"#.trim_end().to_string();
+}"#
+    .trim_end()
+    .to_string();
     format!("{}\n\n{body}", emitted_gemv_kernel())
 }

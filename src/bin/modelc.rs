@@ -184,7 +184,12 @@ fn main() -> Result<()> {
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(modelc::serve::run_server(
-                model, addr, *profile, generation, auth_opt, *max_concurrent,
+                model,
+                addr,
+                *profile,
+                generation,
+                auth_opt,
+                *max_concurrent,
             ))?;
         }
         modelc::cli::Commands::List => {
@@ -333,6 +338,40 @@ fn main() -> Result<()> {
         }
         modelc::cli::Commands::Rm { name, all, force } => {
             modelc::store::remove_model(name, *all, *force)?;
+        }
+        modelc::cli::Commands::Prompt {
+            input,
+            prompt,
+            max_tokens,
+            temperature,
+            seed,
+            top_p,
+            min_p,
+        } => {
+            let path = modelc::store::resolve_model_path(input)?;
+            let mut model = modelc::pack::unpack(&path)?;
+            model.dequantize_in_place();
+            let mut generation = modelc::generate::GenerationConfig::default();
+            if let Some(n) = max_tokens {
+                generation.max_tokens = *n;
+            }
+            if let Some(t) = temperature {
+                generation.temperature = *t;
+            }
+            if let Some(s) = seed {
+                generation.seed = Some(*s);
+            }
+            if let Some(p) = top_p {
+                generation.top_p = *p;
+            }
+            if let Some(p) = min_p {
+                generation.min_p = *p;
+            }
+            let output = modelc::compiler::prompt_model(&model, prompt, &generation);
+            print!("{output}");
+            if !output.ends_with('\n') {
+                println!();
+            }
         }
     }
 

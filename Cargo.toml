@@ -1,6 +1,6 @@
 [package]
 name = "modelc"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 authors = ["Ying Kit WONG"]
 description = "Rust CLI that compiles LLM weights (GGUF, Safetensors, ONNX, PyTorch) into a single .modelc artifact and serves a local OpenAI-compatible inference API with Metal GPU and CPU SIMD acceleration."
@@ -18,24 +18,48 @@ name = "modelc"
 path = "src/bin/modelc.rs"
 
 [dependencies]
+# CLI: derive macro is the only required feature. `color`/`suggestions` are
+# optional and omitted to slim the binary; clap's `std`/`help`/`usage`/
+# `error-context` defaults stay enabled for `--help` output.
 clap = { version = "4", features = ["derive"] }
+# Parallel CPU ops for large matmuls (`src/runtime/ops.rs`).
 rayon = "1"
+# Serialization for the `Model` IR + `.modelc` artifact header.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` (default) pulls in `indexmap` for ordered JSON objects;
+# we never iterate object keys in any order-dependent way, so drop it.
+serde_json = { version = "1", default-features = false, features = ["std"] }
 anyhow = "1"
+# Format parser for direct binary weights; default `std` feature is required
+# for `SafeTensors::deserialize`.
 safetensors = "0.4"
+# FP16/BF16 → FP32 casts in `Runtime::from_raw`.
 half = "2"
+# ONNX parser; minimal, no optional features to drop.
 onnx-rs = "0.1.2"
+# PyTorch ZIP / Safetensors-in-ZIP parser. `deflate` is the only compression
+# format actually used by `.pt` archives.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-axum = "0.8"
+# HTTP server. We only use `Json` body extraction + `http1` transport;
+# `form`, `matched-path`, `original-uri`, `query`, `tracing` are unused and
+# dropped to shrink the binary.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+# Async runtime: `rt-multi-thread` for parallel handlers, `signal` for
+# SIGINT/SIGTERM graceful shutdown, `sync` for `Semaphore` backpressure.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 tokio-stream = "0.1"
+# Platform-specific model store + config paths.
 dirs = "6"
+# `~/.modelc/config.toml` round-trip.
 toml = "0.8"
-regex = "1"
+# `RegexConstraint` token masking. Need `unicode-perl` for `\d`, `\s`, `\w`
+# to be recognized by the regex parser.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode", "unicode-perl"] }
+# zstd compression for the `.modelc` v2 artifact format.
 zstd = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Apple Silicon GPU acceleration (`src/metal.rs`, `src/compute/shaders.metal`).
 metal = "0.29"
 
 # Optimized release profile: thin LTO + single codegen unit for whole-program

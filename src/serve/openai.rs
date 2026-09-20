@@ -11,7 +11,27 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::AppState;
 use super::CancelOnDrop;
-use super::infer::{run_embeddings, run_text_inference_with_config, run_text_inference_with_logprobs};
+use super::infer::{
+    run_embeddings, run_text_inference_with_config, run_text_inference_with_logprobs,
+};
+
+/// Current Unix timestamp in seconds. OpenAI's `created` field on every
+/// response object is "The Unix timestamp (in seconds) of when the completion
+/// was created" — client libraries and logging pipelines rely on it being a
+/// plausible timestamp, not the epoch placeholder.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Stable `system_fingerprint` suffix derived from the crate version + git SHA.
+/// OpenAI includes this field on chat/completion responses; some clients log it
+/// or use it to detect backend changes.
+fn system_fingerprint() -> String {
+    format!("fp_modelc_{}", crate::GIT_SHA)
+}
 
 // ---------------------------------------------------------------------------
 // /v1/models
@@ -37,7 +57,7 @@ pub(super) async fn list_models(State(state): State<Arc<AppState>>) -> Json<Mode
         data: vec![ModelEntry {
             id: state.name.clone(),
             object: "model",
-            created: 0,
+            created: unix_now(),
             owned_by: "modelc",
         }],
     })
@@ -63,7 +83,7 @@ pub(super) async fn retrieve_model(
     Json(ModelEntry {
         id: state.name.clone(),
         object: "model",
-        created: 0,
+        created: unix_now(),
         owned_by: "modelc",
     })
     .into_response()
@@ -214,6 +234,8 @@ pub(super) struct ChatCompletionResponse {
     model: String,
     choices: Vec<Choice>,
     usage: Usage,
+    /// OpenAI-compatible fingerprint identifying the backend build.
+    system_fingerprint: String,
 }
 
 #[derive(Serialize)]
@@ -269,6 +291,8 @@ pub(super) struct ChatCompletionChunk {
     choices: Vec<ChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_fingerprint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -360,7 +384,9 @@ pub(super) async fn chat_completion(
         let tool_desc = build_tool_description(&req.tools);
         let mut content = tool_desc;
         if tool_choice_required {
-            content.push_str("\nYou must call one of the available tools. Do not respond with text only.");
+            content.push_str(
+                "\nYou must call one of the available tools. Do not respond with text only.",
+            );
         }
         if let Some(ref name) = tool_choice_specific {
             content.push_str(&format!(
@@ -386,7 +412,10 @@ pub(super) async fn chat_completion(
         })
         .or_else(|| state.generation.constraint.clone());
     let gen_cfg = crate::generate::GenerationConfig {
-        max_tokens: req.max_completion_tokens.or(req.max_tokens).unwrap_or(state.generation.max_tokens),
+        max_tokens: req
+            .max_completion_tokens
+            .or(req.max_tokens)
+            .unwrap_or(state.generation.max_tokens),
         temperature: req.temperature.unwrap_or(state.generation.temperature),
         top_p: req.top_p.unwrap_or(state.generation.top_p),
         min_p: req.min_p.unwrap_or(state.generation.min_p),
@@ -454,7 +483,7 @@ pub(super) async fn chat_completion(
                         let chunk = ChatCompletionChunk {
                             id: id.clone(),
                             object: "chat.completion.chunk",
-                            created: 0,
+                            created: unix_now(),
                             model: model_name.clone(),
                             choices: vec![ChunkChoice {
                                 index: 0,
@@ -469,6 +498,7 @@ pub(super) async fn chat_completion(
                                 finish_reason: None,
                             }],
                             usage: None,
+                            system_fingerprint: Some(system_fingerprint()),
                         };
                         // If the client is gone, stop dripping (generation has already
                         // been cancelled via the flag).
@@ -491,7 +521,7 @@ pub(super) async fn chat_completion(
             let final_chunk = ChatCompletionChunk {
                 id: id.clone(),
                 object: "chat.completion.chunk",
-                created: 0,
+                created: unix_now(),
                 model: model_name.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
@@ -499,6 +529,7 @@ pub(super) async fn chat_completion(
                     finish_reason: Some("stop"),
                 }],
                 usage: None,
+                system_fingerprint: Some(system_fingerprint()),
             };
             let _ = tx
                 .send(Ok(
@@ -512,7 +543,7 @@ pub(super) async fn chat_completion(
                 let usage_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
-                    created: 0,
+                    created: unix_now(),
                     model: model_name.clone(),
                     choices: vec![],
                     usage: Some(Usage {
@@ -520,6 +551,7 @@ pub(super) async fn chat_completion(
                         completion_tokens: token_ids.len(),
                         total_tokens: prompt_ids.len() + token_ids.len(),
                     }),
+                    system_fingerprint: Some(system_fingerprint()),
                 };
                 let _ = tx
                     .send(Ok(
@@ -557,7 +589,12 @@ pub(super) async fn chat_completion(
                 }
                 None => {
                     let text = run_text_inference_with_config(&state, &prompt, &gen_cfg);
-                    (text, Some(Logprobs { content: Vec::new() }))
+                    (
+                        text,
+                        Some(Logprobs {
+                            content: Vec::new(),
+                        }),
+                    )
                 }
             }
         } else {
@@ -634,7 +671,7 @@ pub(super) async fn chat_completion(
     Json(ChatCompletionResponse {
         id,
         object: "chat.completion",
-        created: 0,
+        created: unix_now(),
         model: model_name,
         choices,
         usage: Usage {
@@ -642,6 +679,7 @@ pub(super) async fn chat_completion(
             completion_tokens: total_completion_tokens,
             total_tokens: prompt_tokens + total_completion_tokens,
         },
+        system_fingerprint: system_fingerprint(),
     })
     .into_response()
 }
@@ -800,6 +838,8 @@ pub(super) struct CompletionResponse {
     model: String,
     choices: Vec<CompletionChoice>,
     usage: Usage,
+    /// OpenAI-compatible fingerprint identifying the backend build.
+    system_fingerprint: String,
 }
 
 #[derive(Serialize)]
@@ -819,6 +859,8 @@ pub(super) struct CompletionChunk {
     choices: Vec<CompletionChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_fingerprint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -845,7 +887,10 @@ pub(super) async fn completions(
         })
         .or_else(|| state.generation.constraint.clone());
     let gen_cfg = crate::generate::GenerationConfig {
-        max_tokens: req.max_completion_tokens.or(req.max_tokens).unwrap_or(state.generation.max_tokens),
+        max_tokens: req
+            .max_completion_tokens
+            .or(req.max_tokens)
+            .unwrap_or(state.generation.max_tokens),
         temperature: req.temperature.unwrap_or(state.generation.temperature),
         top_p: req.top_p.unwrap_or(state.generation.top_p),
         min_p: req.min_p.unwrap_or(state.generation.min_p),
@@ -908,7 +953,7 @@ pub(super) async fn completions(
                 let chunk = CompletionChunk {
                     id: id.clone(),
                     object: "text_completion",
-                    created: 0,
+                    created: unix_now(),
                     model: model_name.clone(),
                     choices: vec![CompletionChunkChoice {
                         index: 0,
@@ -916,6 +961,7 @@ pub(super) async fn completions(
                         finish_reason: None,
                     }],
                     usage: None,
+                    system_fingerprint: Some(system_fingerprint()),
                 };
                 if tx
                     .send(Ok(
@@ -946,7 +992,7 @@ pub(super) async fn completions(
                         let chunk = CompletionChunk {
                             id: id.clone(),
                             object: "text_completion",
-                            created: 0,
+                            created: unix_now(),
                             model: model_name.clone(),
                             choices: vec![CompletionChunkChoice {
                                 index: 0,
@@ -954,6 +1000,7 @@ pub(super) async fn completions(
                                 finish_reason: None,
                             }],
                             usage: None,
+                            system_fingerprint: Some(system_fingerprint()),
                         };
                         if tx
                             .send(Ok(
@@ -972,7 +1019,7 @@ pub(super) async fn completions(
             let final_chunk = CompletionChunk {
                 id: id.clone(),
                 object: "text_completion",
-                created: 0,
+                created: unix_now(),
                 model: model_name.clone(),
                 choices: vec![CompletionChunkChoice {
                     index: 0,
@@ -980,6 +1027,7 @@ pub(super) async fn completions(
                     finish_reason: Some("stop"),
                 }],
                 usage: None,
+                system_fingerprint: Some(system_fingerprint()),
             };
             let _ = tx
                 .send(Ok(
@@ -993,7 +1041,7 @@ pub(super) async fn completions(
                 let usage_chunk = CompletionChunk {
                     id: id.clone(),
                     object: "text_completion",
-                    created: 0,
+                    created: unix_now(),
                     model: model_name.clone(),
                     choices: vec![],
                     usage: Some(Usage {
@@ -1001,6 +1049,7 @@ pub(super) async fn completions(
                         completion_tokens: token_ids.len(),
                         total_tokens: prompt_ids.len() + token_ids.len(),
                     }),
+                    system_fingerprint: Some(system_fingerprint()),
                 };
                 let _ = tx
                     .send(Ok(
@@ -1047,7 +1096,12 @@ pub(super) async fn completions(
                     }
                     None => {
                         let text = run_text_inference_with_config(&state, p, &gen_cfg);
-                        (text, Some(Logprobs { content: Vec::new() }))
+                        (
+                            text,
+                            Some(Logprobs {
+                                content: Vec::new(),
+                            }),
+                        )
                     }
                 }
             } else {
@@ -1083,7 +1137,7 @@ pub(super) async fn completions(
     Json(CompletionResponse {
         id,
         object: "text_completion",
-        created: 0,
+        created: unix_now(),
         model: model_name,
         choices,
         usage: Usage {
@@ -1091,6 +1145,7 @@ pub(super) async fn completions(
             completion_tokens: total_completion_tokens,
             total_tokens: total_prompt_tokens + total_completion_tokens,
         },
+        system_fingerprint: system_fingerprint(),
     })
     .into_response()
 }
@@ -1186,8 +1241,7 @@ fn default_encoding_format() -> String {
 /// Standard base64 encoder (RFC 4648, no padding-stripping).
 /// Inline to avoid pulling in the `base64` crate.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
@@ -1246,10 +1300,7 @@ pub(super) async fn v1_embeddings(
         let dimensions = embedding.len();
 
         let embedding_value = if use_base64 {
-            let bytes: Vec<u8> = embedding
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = embedding.iter().flat_map(|v| v.to_le_bytes()).collect();
             serde_json::Value::String(base64_encode(&bytes))
         } else {
             serde_json::to_value(embedding).unwrap_or(serde_json::Value::Null)

@@ -110,7 +110,10 @@ mod tests {
         let x: Vec<f32> = (0..12).map(|i| (i as f32) * 0.5).collect();
         let expected: f32 = w.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
         let got = gemv_dot(&w, &x);
-        assert!((got - expected).abs() < 1e-5, "got {got}, expected {expected}");
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "got {got}, expected {expected}"
+        );
     }
 
     #[test]
@@ -120,6 +123,9 @@ mod tests {
         let x: Vec<f32> = (0..13).map(|i| (i as f32) + 1.0).collect();
         let expected: f32 = w.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
         let got = gemv_dot(&w, &x);
-        assert!((got - expected).abs() < 1e-4, "got {got}, expected {expected}");
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "got {got}, expected {expected}"
+        );
     }
 }

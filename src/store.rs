@@ -175,8 +175,8 @@ fn http_get(url: &str) -> Result<Vec<u8>> {
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .context("invalid HTTP response: missing header terminator")?;
-    let headers = std::str::from_utf8(&response[..header_end])
-        .context("HTTP headers are not valid UTF-8")?;
+    let headers =
+        std::str::from_utf8(&response[..header_end]).context("HTTP headers are not valid UTF-8")?;
 
     let status_line = headers.lines().next().context("empty HTTP response")?;
     let status: u16 = status_line

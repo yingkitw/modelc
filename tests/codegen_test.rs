@@ -222,16 +222,25 @@ fn emitted_helpers_share_simd_gemv_kernel() {
     // MLP and GPT-2 emitted binaries must embed the shared `gemv_dot` kernel so that
     // `modelc run` and `modelc compile` share one source of truth (bit-identical logits).
     let mlp = emitted_main(&common::create_test_model());
-    assert!(mlp.contains("fn gemv_dot"), "MLP emit must include shared gemv_dot");
+    assert!(
+        mlp.contains("fn gemv_dot"),
+        "MLP emit must include shared gemv_dot"
+    );
     assert!(
         mlp.contains("bias[r] + gemv_dot("),
         "MLP matmul_bias must route through gemv_dot"
     );
     // The module-doc `//!` lines must be stripped (they'd be invalid mid-file).
-    assert!(!mlp.contains("//!"), "emitted source must not contain `//!` doc lines");
+    assert!(
+        !mlp.contains("//!"),
+        "emitted source must not contain `//!` doc lines"
+    );
 
     let gpt2 = emitted_main(&common::create_gpt2_test_model());
-    assert!(gpt2.contains("fn gemv_dot"), "GPT-2 emit must include shared gemv_dot");
+    assert!(
+        gpt2.contains("fn gemv_dot"),
+        "GPT-2 emit must include shared gemv_dot"
+    );
     assert!(
         gpt2.contains("bias[r] + gemv_dot("),
         "GPT-2 linear must route through gemv_dot"

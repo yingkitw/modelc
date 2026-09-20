@@ -66,7 +66,10 @@ mod tests {
             role: "user".to_string(),
             content: "hi".to_string(),
         }];
-        let with = apply_chat_template(Some("{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"), &messages);
+        let with = apply_chat_template(
+            Some("{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"),
+            &messages,
+        );
         let without = apply_chat_template(None, &messages);
         assert_eq!(with, without);
     }

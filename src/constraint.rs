@@ -9,7 +9,12 @@ use regex::Regex;
 pub trait Constraint: Send + Sync {
     /// Given the decoded text so far, return a boolean mask of length `vocab_size`
     /// where `mask[i] == true` means token `i` is a valid next token.
-    fn valid_mask(&self, prefix: &str, vocab_size: usize, token_bytes: &[Option<Vec<u8>>]) -> Vec<bool>;
+    fn valid_mask(
+        &self,
+        prefix: &str,
+        vocab_size: usize,
+        token_bytes: &[Option<Vec<u8>>],
+    ) -> Vec<bool>;
 }
 
 /// Regex-based constraint: only tokens whose decoded text matches the regex prefix are allowed.
@@ -26,7 +31,12 @@ impl RegexConstraint {
 }
 
 impl Constraint for RegexConstraint {
-    fn valid_mask(&self, prefix: &str, vocab_size: usize, token_bytes: &[Option<Vec<u8>>]) -> Vec<bool> {
+    fn valid_mask(
+        &self,
+        prefix: &str,
+        vocab_size: usize,
+        token_bytes: &[Option<Vec<u8>>],
+    ) -> Vec<bool> {
         let mut mask = vec![false; vocab_size];
         for (i, maybe_bytes) in token_bytes.iter().enumerate().take(vocab_size) {
             if let Some(bytes) = maybe_bytes {
@@ -37,7 +47,8 @@ impl Constraint for RegexConstraint {
                 // OR if there exists some suffix that would make it match.
                 // For this minimal implementation, we allow tokens whose candidate
                 // is itself a prefix of some regex match.
-                mask[i] = self.pattern.is_match(&candidate) || could_match_prefix(&self.pattern, &candidate);
+                mask[i] = self.pattern.is_match(&candidate)
+                    || could_match_prefix(&self.pattern, &candidate);
             }
         }
         mask
@@ -53,7 +64,9 @@ fn could_match_prefix(pattern: &Regex, candidate: &str) -> bool {
     }
     // Try a few common continuation strings to see if any extension matches.
     // Includes longer numeric strings so patterns like \d{4} are handled.
-    for suffix in ["", " ", "a", "0", "00", "000", "0000", "1", "-", "-0", "{", "\"", "\n"] {
+    for suffix in [
+        "", " ", "a", "0", "00", "000", "0000", "1", "-", "-0", "{", "\"", "\n",
+    ] {
         let extended = format!("{candidate}{suffix}");
         if pattern.is_match(&extended) {
             return true;
@@ -70,9 +83,7 @@ pub fn build_token_bytes_lookup<F>(vocab_size: usize, decode_fn: F) -> Vec<Optio
 where
     F: FnMut(u32) -> Option<Vec<u8>>,
 {
-    (0..vocab_size as u32)
-        .map(decode_fn)
-        .collect()
+    (0..vocab_size as u32).map(decode_fn).collect()
 }
 
 #[cfg(test)]

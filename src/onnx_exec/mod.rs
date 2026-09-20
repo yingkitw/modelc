@@ -14,6 +14,9 @@ use crate::runtime::tensor::Tensor;
 
 mod helpers;
 
+#[cfg(test)]
+mod helpers_tests;
+
 /// A single operation in the ONNX execution plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Op {
