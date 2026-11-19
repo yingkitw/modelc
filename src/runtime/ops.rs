@@ -7,9 +7,7 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
     // Try GPU acceleration on macOS
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new()
-            && let Some(result) = backend.matmul_gpu(a, b)
-        {
+        if let Some(result) = MetalBackend::new().and_then(|mb| mb.matmul_gpu(a, b)) {
             return result;
         }
     }
@@ -135,9 +133,7 @@ unsafe fn matmul_neon(a: &Tensor, b: &Tensor, out: &mut [f32]) {
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new()
-            && let Some(result) = backend.add_gpu(a, b)
-        {
+        if let Some(result) = MetalBackend::new().and_then(|mb| mb.add_gpu(a, b)) {
             return result;
         }
     }
@@ -164,9 +160,7 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
 pub fn mul_scalar(a: &Tensor, s: f32) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new()
-            && let Some(result) = backend.mul_scalar_gpu(a, s)
-        {
+        if let Some(result) = MetalBackend::new().and_then(|mb| mb.mul_scalar_gpu(a, s)) {
             return result;
         }
     }
@@ -178,9 +172,7 @@ pub fn mul_scalar(a: &Tensor, s: f32) -> Tensor {
 pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new()
-            && let Some(result) = backend.softmax_gpu(a, axis)
-        {
+        if let Some(result) = MetalBackend::new().and_then(|mb| mb.softmax_gpu(a, axis)) {
             return result;
         }
     }
@@ -228,9 +220,7 @@ pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
 pub fn relu(a: &Tensor) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new()
-            && let Some(result) = backend.relu_gpu(a)
-        {
+        if let Some(result) = MetalBackend::new().and_then(|mb| mb.relu_gpu(a)) {
             return result;
         }
     }
@@ -242,8 +232,8 @@ pub fn relu(a: &Tensor) -> Tensor {
 pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
     #[cfg(target_os = "macos")]
     {
-        if let Some(backend) = MetalBackend::new()
-            && let Some(result) = backend.layer_norm_gpu(a, weight, bias, eps)
+        if let Some(result) =
+            MetalBackend::new().and_then(|mb| mb.layer_norm_gpu(a, weight, bias, eps))
         {
             return result;
         }

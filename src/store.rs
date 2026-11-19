@@ -70,16 +70,17 @@ pub fn list_models() -> Result<Vec<InstalledModel>> {
             }
 
             // Determine compression by reading flags (version 2+ has flags at offset 10).
-            if let Ok(meta) = std::fs::metadata(&path)
-                && meta.len() > 14
-                && let Ok(mut file) = std::fs::File::open(&path)
-            {
-                use std::io::{Read, Seek};
-                let _ = file.seek(std::io::SeekFrom::Start(10));
-                let mut flags_bytes = [0u8; 4];
-                if file.read_exact(&mut flags_bytes).is_ok() {
-                    let flags = u32::from_le_bytes(flags_bytes);
-                    compressed = flags & 1 != 0;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() > 14 {
+                    if let Ok(mut file) = std::fs::File::open(&path) {
+                        use std::io::{Read, Seek};
+                        let _ = file.seek(std::io::SeekFrom::Start(10));
+                        let mut flags_bytes = [0u8; 4];
+                        if file.read_exact(&mut flags_bytes).is_ok() {
+                            let flags = u32::from_le_bytes(flags_bytes);
+                            compressed = flags & 1 != 0;
+                        }
+                    }
                 }
             }
 
@@ -326,11 +327,13 @@ pub fn list_versions(name: &str) -> Result<Vec<(u32, PathBuf)>> {
     for entry in std::fs::read_dir(&dir).context("failed to read store directory")? {
         let entry = entry.context("failed to read directory entry")?;
         let path = entry.path();
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && let Some(tail) = stem.strip_prefix(&prefix)
-            && let Some(ver_str) = tail.split('.').next()
-            && let Ok(ver) = ver_str.parse::<u32>()
-        {
+        let ver = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|stem| stem.strip_prefix(&prefix))
+            .and_then(|tail| tail.split('.').next())
+            .and_then(|s| s.parse::<u32>().ok());
+        if let Some(ver) = ver {
             versions.push((ver, path));
         }
     }
@@ -393,9 +396,11 @@ pub fn remove_model(name: &str, all: bool, force: bool) -> Result<()> {
         for entry in std::fs::read_dir(&dir).context("failed to read store directory")? {
             let entry = entry.context("failed to read directory entry")?;
             let path = entry.path();
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                && stem.starts_with(&prefix)
-                && path.is_file()
+            if path.is_file()
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| stem.starts_with(&prefix))
             {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("failed to remove {:?}", path))?;

@@ -260,9 +260,7 @@ pub fn generate_token_ids_with_cache(
         } else {
             Vec::new()
         };
-        if let Some(ref mut c) = cache
-            && let Some(kv) = maybe_kv
-        {
+        if let (Some(c), Some(kv)) = (cache.as_mut(), maybe_kv) {
             let _ = c.insert(
                 all_ids,
                 CachedPrefix {
@@ -285,9 +283,7 @@ pub fn generate_token_ids_with_cache(
         false,
         0,
     );
-    if let Some(ref mut c) = cache
-        && let Some(kv) = maybe_kv
-    {
+    if let (Some(c), Some(kv)) = (cache.as_mut(), maybe_kv) {
         let mut full_ids = prompt_ids.clone();
         full_ids.extend_from_slice(&ids);
         let _ = c.insert(
@@ -373,9 +369,7 @@ pub fn generate_with_logprobs_with_cache(
         true,
         top_logprobs,
     );
-    if let Some(ref mut c) = cache
-        && let Some(kv) = maybe_kv
-    {
+    if let (Some(c), Some(kv)) = (cache.as_mut(), maybe_kv) {
         let mut full_ids = prompt_ids.clone();
         full_ids.extend_from_slice(&ids);
         let _ = c.insert(
@@ -497,16 +491,16 @@ pub(crate) fn generate_core(
             }
         }
 
-        if let Some(max_ctx) = config.max_context
-            && token_ids.len() > max_ctx
-        {
-            context_shift(
-                &mut token_ids,
-                &mut prompt_len,
-                &mut kv_cache_opt,
-                max_ctx,
-                config.anchor_tokens,
-            );
+        if let Some(max_ctx) = config.max_context {
+            if token_ids.len() > max_ctx {
+                context_shift(
+                    &mut token_ids,
+                    &mut prompt_len,
+                    &mut kv_cache_opt,
+                    max_ctx,
+                    config.anchor_tokens,
+                );
+            }
         }
 
         if tokenizer.vocab_size() > 0 && next_token as usize >= tokenizer.vocab_size() {
@@ -675,16 +669,16 @@ pub(crate) fn speculative_generate(
             token_ids.push(next_token);
             ngram_index = update_ngram_index(&ngram_index, &token_ids, n);
 
-            if let Some(max_ctx) = config.max_context
-                && token_ids.len() > max_ctx
-            {
-                context_shift(
-                    &mut token_ids,
-                    &mut prompt_len,
-                    &mut kv_cache_opt,
-                    max_ctx,
-                    config.anchor_tokens,
-                );
+            if let Some(max_ctx) = config.max_context {
+                if token_ids.len() > max_ctx {
+                    context_shift(
+                        &mut token_ids,
+                        &mut prompt_len,
+                        &mut kv_cache_opt,
+                        max_ctx,
+                        config.anchor_tokens,
+                    );
+                }
             }
 
             if tokenizer.vocab_size() > 0 && next_token as usize >= tokenizer.vocab_size() {
@@ -742,16 +736,16 @@ pub(crate) fn speculative_generate(
             break;
         }
 
-        if let Some(max_ctx) = config.max_context
-            && token_ids.len() > max_ctx
-        {
-            context_shift(
-                &mut token_ids,
-                &mut prompt_len,
-                &mut kv_cache_opt,
-                max_ctx,
-                config.anchor_tokens,
-            );
+        if let Some(max_ctx) = config.max_context {
+            if token_ids.len() > max_ctx {
+                context_shift(
+                    &mut token_ids,
+                    &mut prompt_len,
+                    &mut kv_cache_opt,
+                    max_ctx,
+                    config.anchor_tokens,
+                );
+            }
         }
 
         // Stop if we've hit max tokens or an out-of-vocab token was emitted.
@@ -878,8 +872,10 @@ fn count_layers(runtime: &Runtime, arch: &str) -> usize {
 
     let mut max = 0usize;
     for name in runtime.tensor_names() {
-        if let Some(rest) = name.strip_prefix(prefix)
-            && let Some(n) = rest.split('.').next().and_then(|s| s.parse::<usize>().ok())
+        if let Some(n) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|s| s.parse::<usize>().ok())
         {
             max = max.max(n);
         }

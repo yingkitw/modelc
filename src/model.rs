@@ -152,8 +152,7 @@ impl Model {
                 continue;
             }
             let scale_key = format!("quant_scale.{}", name);
-            if let Some(scale_str) = self.metadata.get(&scale_key)
-                && let Ok(scale) = scale_str.parse::<f32>()
+            if let Some(Ok(scale)) = self.metadata.get(&scale_key).map(|s| s.parse::<f32>())
             {
                 let mode_key = format!("quant_mode.{}", name);
                 let is_int4 = self

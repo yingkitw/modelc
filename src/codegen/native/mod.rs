@@ -262,10 +262,10 @@ fn layered_mlp_pairs(model: &Model) -> Option<Vec<(String, String)>> {
         let bias_name = format!("layer{id}.bias");
         let (rows, cols) = affine_pair_shape(model, &weight_name, &bias_name)?;
 
-        if let Some(out_prev) = prev_out_rows
-            && out_prev != cols
-        {
-            return None;
+        if let Some(out_prev) = prev_out_rows {
+            if out_prev != cols {
+                return None;
+            }
         }
 
         seq.push((weight_name, bias_name));

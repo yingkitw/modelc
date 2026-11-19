@@ -169,8 +169,9 @@ fn main() -> Result<()> {
             if let Some(a) = anchor_tokens {
                 generation.anchor_tokens = *a;
             }
-            if let Some(g) = grammar
-                && let Some(c) = modelc::constraint::RegexConstraint::new(g)
+            if let Some(c) = grammar
+                .as_deref()
+                .and_then(modelc::constraint::RegexConstraint::new)
             {
                 generation.constraint = Some(std::sync::Arc::new(c));
             }
@@ -487,9 +488,11 @@ fn benchmark_inference(
     }
 
     // Fallback: simple matmul with first 2D tensor
-    if let Some(name) = runtime.tensor_names().first()
-        && let Some(t) = runtime.get(name)
-        && t.shape.len() == 2
+    if let Some(t) = runtime
+        .tensor_names()
+        .first()
+        .and_then(|name| runtime.get(name))
+        .filter(|t| t.shape.len() == 2)
     {
         let x = Tensor::from_vec(input.to_vec(), vec![1, input.len()]);
         let out = ops::matmul(&x, t);

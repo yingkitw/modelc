@@ -69,16 +69,16 @@ pub fn gpt2_hidden_dim(model: &Model, layers: &[u32]) -> usize {
             ),
             (format!("{p}ln_1.weight"), format!("{p}ln_1.bias")),
         ] {
-            if let Some(t) = model.tensors.get(&w).or_else(|| model.tensors.get(&b))
-                && let Some(cols) = tensor_cols(t).or_else(|| tensor_rows(t))
-            {
-                // c_attn is [3H, H] → use cols; ln_1 is [H] → use rows.
-                if w.ends_with("c_attn.weight")
-                    && let Some(c) = tensor_cols(t)
-                {
-                    return c;
+            if let Some(t) = model.tensors.get(&w).or_else(|| model.tensors.get(&b)) {
+                if let Some(cols) = tensor_cols(t).or_else(|| tensor_rows(t)) {
+                    // c_attn is [3H, H] → use cols; ln_1 is [H] → use rows.
+                    if w.ends_with("c_attn.weight") {
+                        if let Some(c) = tensor_cols(t) {
+                            return c;
+                        }
+                    }
+                    return cols;
                 }
-                return cols;
             }
         }
     }
@@ -105,10 +105,10 @@ pub fn llama_hidden_dim(model: &Model, layers: &[u32]) -> usize {
             format!("{p}input_layernorm.weight"),
         ] {
             if let Some(t) = model.tensors.get(&key) {
-                if key.ends_with("q_proj.weight")
-                    && let Some(c) = tensor_cols(t)
-                {
-                    return c;
+                if key.ends_with("q_proj.weight") {
+                    if let Some(c) = tensor_cols(t) {
+                        return c;
+                    }
                 }
                 if let Some(r) = tensor_rows(t) {
                     return r;

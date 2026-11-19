@@ -79,11 +79,11 @@ impl BpeTokenizer {
                         .merges
                         .iter()
                         .position(|(a, b, _)| *a == key.0 && *b == key.1);
-                    if let Some(r) = rank
-                        && best_rank.is_none_or(|br| r < br)
-                    {
-                        best_rank = Some(r);
-                        best_idx = Some((i, merged));
+                    if let Some(r) = rank {
+                        if best_rank.is_none_or(|br| r < br) {
+                            best_rank = Some(r);
+                            best_idx = Some((i, merged));
+                        }
                     }
                 }
             }

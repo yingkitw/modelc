@@ -96,9 +96,7 @@ pub async fn middleware(
 
     // Rate limiting check (uses a simple peer-addr fallback; the exact IP is
     // best-effort in test/localhost environments).
-    if let Some(limit) = config.rate_limit_per_minute
-        && limit > 0
-    {
+    if let Some(limit) = config.rate_limit_per_minute.filter(|limit| *limit > 0) {
         let ip = req
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()

@@ -1,7 +1,8 @@
 [package]
 name = "modelc"
-version = "0.1.10"
-edition = "2024"
+version = "0.1.11"
+edition = "2021"
+rust-version = "1.90"
 authors = ["Ying Kit WONG"]
 description = "Rust CLI that compiles LLM weights (GGUF, Safetensors, ONNX, PyTorch) into a single .modelc artifact and serves a local OpenAI-compatible inference API with Metal GPU and CPU SIMD acceleration."
 license = "Apache-2.0"

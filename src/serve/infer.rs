@@ -61,15 +61,15 @@ fn run_transformer(state: &AppState, runtime: &Runtime, input: &[f32]) -> Option
         "llama" => crate::runtime::transformer::forward_llama(runtime, &resized, state.profile),
         _ => None,
     };
-    if state.profile
-        && let Some(o) = &out
-    {
-        eprintln!(
-            "  transformer forward ({}): {} out dims in {:.3} ms",
-            state.architecture,
-            o.len(),
-            start.elapsed().as_secs_f64() * 1000.0
-        );
+    if state.profile {
+        if let Some(o) = &out {
+            eprintln!(
+                "  transformer forward ({}): {} out dims in {:.3} ms",
+                state.architecture,
+                o.len(),
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
     out
 }
@@ -106,8 +106,9 @@ pub(super) fn run_text_inference_with_config(
     let input: Vec<f32> = prompt.bytes().map(|b| b as f32 / 255.0).collect();
 
     // For transformer models, use autoregressive generation (with the prefix cache).
-    if (state.architecture == "gpt2" || state.architecture == "llama")
-        && let Some(hidden) = state.transformer_hidden
+    if let Some(hidden) = state
+        .transformer_hidden
+        .filter(|_| state.architecture == "gpt2" || state.architecture == "llama")
     {
         let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
         let prompt_ids = tokenizer.encode(prompt);
@@ -206,8 +207,9 @@ pub(super) fn run_text_inference_token_ids(
     prompt: &str,
     config: &crate::generate::GenerationConfig,
 ) -> Vec<u32> {
-    if (state.architecture == "gpt2" || state.architecture == "llama")
-        && let Some(hidden) = state.transformer_hidden
+    if let Some(hidden) = state
+        .transformer_hidden
+        .filter(|_| state.architecture == "gpt2" || state.architecture == "llama")
     {
         let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
         let prompt_ids = tokenizer.encode(prompt);

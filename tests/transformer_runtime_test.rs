@@ -102,11 +102,12 @@ fn ephemeral_addr() -> SocketAddr {
 /// binding the listener when we first try).
 fn wait_for_server(url: &str) -> serde_json::Value {
     for _ in 0..50 {
-        if let Ok(resp) = http::get(url).call()
-            && let Ok(bytes) = read_body(resp)
-            && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        {
-            return val;
+        if let Ok(resp) = http::get(url).call() {
+            if let Ok(bytes) = read_body(resp) {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    return val;
+                }
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

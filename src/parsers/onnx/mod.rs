@@ -43,9 +43,7 @@ fn parse_onnx_bytes(bytes: &[u8], path: &Path) -> Result<Model> {
 
         let nelem_expected = elem.element_count(&shape_usize);
 
-        let blob = if let Some(raw) = init.as_raw()
-            && !raw.is_empty()
-        {
+        let blob = if let Some(raw) = init.as_raw().filter(|raw| !raw.is_empty()) {
             if let Some(seg) = init.segment() {
                 let begin = usize::try_from(seg.begin)
                     .with_context(|| format!("{name}: segment begin overflow"))?;

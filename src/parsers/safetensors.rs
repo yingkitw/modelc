@@ -30,11 +30,11 @@ impl WeightParser for SafetensorsParser {
         let mut tensors = HashMap::new();
         let mut metadata = HashMap::new();
 
-        if let Some((_, hdr)) = &header_meta
-            && let Some(hm) = hdr.metadata().as_ref()
-        {
-            for (k, v) in hm {
-                metadata.insert(k.clone(), v.clone());
+        if let Some((_, hdr)) = &header_meta {
+            if let Some(hm) = hdr.metadata().as_ref() {
+                for (k, v) in hm {
+                    metadata.insert(k.clone(), v.clone());
+                }
             }
         }
 

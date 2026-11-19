@@ -404,9 +404,9 @@ pub fn prompt_model(
     prompt: &str,
     config: &crate::generate::GenerationConfig,
 ) -> String {
-    if let Some(hidden) = crate::arch::transformer_hidden_dim(model)
-        && (model.architecture == "gpt2" || model.architecture == "llama")
-    {
+    if let Some(hidden) = crate::arch::transformer_hidden_dim(model).filter(|_| {
+        model.architecture == "gpt2" || model.architecture == "llama"
+    }) {
         let runtime = crate::runtime::serve::Runtime::from_raw(&model.tensors);
         let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
         return crate::generate::generate(

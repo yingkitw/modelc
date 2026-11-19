@@ -9,9 +9,7 @@ use onnx_rs::ast::{DataType as OnnxDt, TensorProto};
 use crate::model::DataType;
 
 pub(super) fn onnx_initializer_bytes(t: &TensorProto<'_>, elem: DataType) -> Result<Vec<u8>> {
-    if let Some(raw) = t.as_raw()
-        && !raw.is_empty()
-    {
+    if let Some(raw) = t.as_raw().filter(|raw| !raw.is_empty()) {
         return Ok(raw.to_vec());
     }
 
