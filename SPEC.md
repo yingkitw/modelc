@@ -77,11 +77,21 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 ### `pull`
 
-**Input:** model identifier (e.g., `username/model-name`); optional `--version`.
+**Input:** `http://`/`https://` URL (or local file path); optional `--name`, `--version`, `--token`.
 
 **Output:** downloaded `.modelc` artifact stored locally.
 
-**Errors:** network failure; invalid model identifier.
+- `https://` is delegated to the system `curl` (present on macOS/Linux/Windows 10+).
+- `--token <t>` or env `MODELC_TOKEN` sends `Authorization: Bearer <t>` — required for token-gated endpoints (e.g. modelc-web).
+- When the server sends `X-Modelc-Digest` (or `ETag`) as `sha256:<hex>`, the downloaded bytes are verified against it — a mismatch fails the pull.
+
+**Errors:** network failure; digest mismatch; missing `curl` for `https://`.
+
+### `diff`
+
+**Input:** two artifact identifiers (path or store name); optional `--json`.
+
+**Output:** structural diff of the artifact headers — tensors added/removed/changed (shape/dtype/bytes), architecture, parameter and size deltas, metadata diff. Compares headers only, never tensor data.
 
 ### `search`
 
@@ -185,8 +195,8 @@ Created by `pack`, consumed by `run`.
 - **`POST /tokenize`** — encode text to token IDs using the model's byte-level BPE tokenizer (the same one `/chat` and `/complete` use). Request JSON `{ "input": "..." }` (single) or `{ "inputs": ["...", "..."] }` (batch). Single response: `{ "tokens": [id, ...], "count": N }`. Batch response: `{ "tokens_batch": [[id, ...], ...], "count": N }` where `count` is the total across all inputs. Useful for prompt budgeting and prompt management.
 - **`POST /detokenize`** — decode token IDs back to text using the model's byte-level BPE tokenizer. Request JSON `{ "tokens": [id, ...] }`. Response `{ "text": "..." }`. Complements `/tokenize` for round-trip token management.
 - **`GET /api/version`** — exposes CLI version and git SHA for orchestration/health checks. JSON: `{ "version": "<CARGO_PKG_VERSION>", "git_sha": "abc123" }`. `version` is captured at compile time via `env!("CARGO_PKG_VERSION")`; `git_sha` is captured at compile time by `build.rs` via `git rev-parse --short HEAD` (or `"unknown"` when git is unavailable).
-- **`GET /api/tags`** — Ollama-compatible endpoint that lists all `.modelc` artifacts in the local model store via `store::list_models()`. Response: `{ "models": [{ "name": "...", "size": N, "details": { "architecture": "...", "parameter_size": "...", "quantization": "..." } }, ...] }`. Enables Ollama client libraries to discover locally installed models. Covered by `run_server_serves_api_tags` test.
-- **`POST /api/show`** — Ollama-compatible endpoint that queries model details by name without loading the model. Request JSON: `{ "name": "..." }`. Reads the `.modelc` artifact header via `pack::read_header()` and returns `{ "name": "...", "architecture": "...", "size_bytes": N, "parameter_size": "...", "quantization": "...", "tensor_count": N }`. Returns 404 for nonexistent models. Covered by `run_server_serves_api_show` test.
+- **`GET /api/tags`** — Ollama-ecosystem endpoint listing `.modelc` artifacts in the local store. Response: `{ "models": [{ "name": "...", "model": "...", "modified_at": "<RFC3339>", "size": N, "digest": "sha256:<hex>", "details": { "format": "...", "family": "...", "families": ["..."], "parameter_size": "8.0B", "quantization_level": "Q4_0" }, "architecture": "...", "tensor_count": N, "compressed": bool }, ...] }`. Field names match what real Ollama clients parse (`serve/ollama.rs`); `architecture`/`tensor_count`/`compressed` are modelc extras. Covered by `run_server_serves_api_tags` test.
+- **`POST /api/show`** — Ollama-ecosystem endpoint for model details. Accepts `{ "model": "..." }` (Ollama) or `{ "name": "..." }` (legacy). Returns `{ "model": "...", "modified_at": "...", "size": N, "digest": "sha256:<hex>", "details": {...}, "model_info": { "general.architecture": "...", "general.parameter_count": N, "general.file_type": N }, "capabilities": ["completion","embedding","insert","tools"], "license": "...", "modelfile": "", "parameters": "", "template": "", "name": "...", "architecture": "...", "size_bytes": N, "parameter_size": "...", "quantization": "...", "tensor_count": N }`. Returns 404 for nonexistent models. Covered by `run_server_serves_api_show` test.
 - **`GET /props`** — llama.cpp-compatible server properties. JSON: `{ "model": "...", "architecture": "...", "total_params": N, "total_bytes": N, "chat_template": "..." | null, "default_generation": { "max_tokens": N, "temperature": F, "top_p": F, "min_p": F, "repetition_penalty": F, "presence_penalty": F, "frequency_penalty": F, "gamma": N } }`. Exempt from auth and backpressure so clients can discover server capabilities without credentials.
 - **`GET /v1/system`** — best-effort system/hardware info for orchestration and debugging. JSON: `model`, `architecture`, `total_params`, `total_bytes`, `cpu_cores` (logical cores via `available_parallelism`), `os`, `cpu_arch`, `pointer_width`, `metal_available` (true on Apple Silicon), and `memory_total_bytes` (`null` if unavailable; reads `/proc/meminfo` on Linux and `sysctl hw.memsize` on macOS — no added dependencies).
 - **`POST /lora/load`** — request JSON `{ "path": "/path/to/adapter.safetensors", "alpha": 1.0 }`. Clones the base model tensors, applies the Safetensors LoRA adapter (`src/lora.rs`), and atomically swaps the runtime via `RwLock<Runtime>`. Response `{ "applied": <usize>, "skipped": <usize>, "message": "..." }`. On failure (e.g., file not found), `applied` and `skipped` are 0 and `message` contains the error.
@@ -283,7 +293,7 @@ Created by `pack`, consumed by `run`.
 - **Parse time** — the GGUF parser (`src/parsers/gguf/mod.rs`) preserves the raw quantized bytes and stores them with `DataType::Q4_0` / `Q5_0` / `Q8_0` / `Q4_K` / `Q6_K` in the IR. This keeps `.modelc` artifacts compact (~4.5 bits/element for Q4_0 vs 32 for F32).
 - **Runtime dequantization** — `Runtime::from_raw` detects quantized dtypes and transparently dequantizes via `dequantize_gguf_tensor()` before building the in-memory `Tensor` objects. The transformer forward pass (`src/runtime/transformer.rs`) therefore always sees FP32 weights without any code changes.
 - **Codegen path** — `modelc compile` calls `Model::dequantize_in_place()` before generating the server, so the emitted binary embeds FP32 weights (matching the current codegen contract).
-- **Export** — `modelc export` to Safetensors requires FP32 tensors; quantized tensors must be dequantized first (`dequantize_in_place`).
+- **Export** — `modelc export` dequantizes GGUF block-quant tensors to F32 automatically (`dequantize_in_place`) since Safetensors has no block-quant dtype.
 
 ### Pack-time quantization (`--quantize`)
 

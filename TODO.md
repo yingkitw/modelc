@@ -1,6 +1,6 @@
 # TODO — Plan
 
-> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **230 inline unit tests** · **363 integration tests**.
+> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **250 inline unit tests** · **367 integration tests**.
 
 ### Scorecard history (continued)
 
@@ -12,6 +12,14 @@
   - **Correctness & coverage**: +26 tests (dtype casts + truncated-data skip in `runtime/serve.rs`; `list_versions` / `switch_version` / metadata enrichment / `download` over a real local TCP HTTP server in `store_test.rs`; F16 adapters / no-match skip / `list_lora_adapters` in `lora_test.rs`; 12 inline `initializers.rs` tests covering raw passthrough, f64→f32 downcast, missing payloads, storage widths, external length mismatch, segmented slice validation). Coverage 84.0 % → **86.0 %**. Test counts 558 → **584** (226 inline + 358 integration).
 
 ## Implemented
+
+Learnings ported back from **modelc-web** (the TS port + hosted store found real upstream gaps):
+
+- [x] **Ollama ecosystem schema on `/api/tags` + `/api/show`** — the endpoints used modelc-specific field names and were only superficially Ollama-compatible. Now return real Ollama fields: `model`, `modified_at` (RFC3339 mtime), `size`, `digest` (`sha256:<hex>`), `details.{format,family,families,parameter_size,quantization_level}`, plus `model_info` (`general.architecture/parameter_count/file_type`) and `capabilities` on `/api/show`. `/api/show` accepts both `{"model": ...}` (Ollama) and `{"name": ...}` (legacy). Port of modelc-web `api/_ollama.ts` → `src/serve/ollama.rs`.
+- [x] **`modelc pull` over HTTPS + bearer auth + digest verify** — `store::download` was `http://`-only and sent no `Authorization` header, so the CLI could not pull from modelc-web (`https://www.modelc.net`). Now: `https://` via the system `curl` (no TLS deps), `--token` flag / `MODELC_TOKEN` env → `Authorization: Bearer`, and `X-Modelc-Digest`/`ETag` `sha256:<hex>` verification on every download (verified end-to-end against the real store).
+- [x] **`modelc export` dequantizes GGUF block-quants** — `export_to_safetensors` used to `panic!` on Q4_0/Q5_0/Q8_0/Q4_K/Q6_K tensors; now calls `dequantize_in_place` and writes F32 (a converted file that loads beats an error).
+- [x] **`modelc diff <a> <b>`** — structural diff between two artifact headers (tensors added/removed/changed, architecture, params/size deltas, metadata diff), text or `--json`. Port of modelc-web `api/_diff.ts` → `src/diff.rs`.
+- [x] **sha256 digest plumbing** — `src/digest.rs` (streaming SHA-256 + RFC3339, stdlib-only, no new deps); `verify` prints `digest: sha256:<hex>` matching the store convention.
 
 - [x] **Parsers** — GGUF (F32/F16/BF16/I8/I16/I32/I64/F64, Q4_0/Q5_0/Q8_0/Q4_K/Q6_K dequant), ONNX (inline/external/segmented initializers), PyTorch (Safetensors-in-ZIP), Safetensors (`src/parsers/`).
 - [x] **ONNX graph execution** — parses ops (MatMul, Gemm, Add, Mul, Div, Sub, Relu, Softmax, LayerNorm, Transpose, Reshape, Sigmoid, Tanh, Identity, Cast) into a JSON execution plan stored in metadata (`src/onnx_exec/`).

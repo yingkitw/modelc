@@ -52,15 +52,21 @@ pub fn list_models() -> Result<Vec<InstalledModel>> {
             let mut architecture = None;
             let mut params = None;
             let mut compressed = false;
+            let mut format = None;
+            let mut quantization = None;
+            let mut tensor_count = 0usize;
 
             if let Ok(header) = crate::pack::read_header(&path) {
-                architecture = Some(header.architecture);
+                tensor_count = header.tensors.len();
+                architecture = Some(header.architecture.clone());
                 let p: usize = header
                     .tensors
                     .iter()
                     .map(|t| t.shape.iter().product::<usize>())
                     .sum();
                 params = Some(p);
+                format = header.metadata.get("format").cloned();
+                quantization = Some(crate::pack::infer_quantization(&header));
             }
 
             // Determine compression by reading flags (version 2+ has flags at offset 10).
@@ -84,6 +90,9 @@ pub fn list_models() -> Result<Vec<InstalledModel>> {
                 architecture,
                 params,
                 compressed,
+                format,
+                quantization,
+                tensor_count,
             });
         }
     }
@@ -120,30 +129,90 @@ pub fn install(source: &Path, name: &str) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Download a `.modelc` file from an `http://` URL into the store with the given name.
+/// Download a `.modelc` file from an `http://` or `https://` URL into the store.
 ///
-/// Only plain HTTP is supported (HTTPS hosts should be downloaded with `curl`/`wget`
-/// and then installed via `modelc install <path>`).
+/// - `https://` is delegated to the system `curl` (present on macOS, Linux and
+///   Windows 10+) — keeps the binary free of a TLS stack.
+/// - Authentication: `Authorization: Bearer <token>` is sent when a token is
+///   provided (`download_auth`) or via the `MODELC_TOKEN` env var — needed to
+///   pull from token-gated endpoints like modelc-web.
+/// - Integrity: when the server sends `X-Modelc-Digest` (or an `ETag`) of the
+///   form `sha256:<hex>` — the modelc-web store convention — the downloaded
+///   bytes are verified against it; a mismatch is an error.
 pub fn download(url: &str, name: &str) -> Result<PathBuf> {
+    download_auth(url, name, None)
+}
+
+/// Like [`download`], with an explicit bearer token (env `MODELC_TOKEN` as fallback).
+pub fn download_auth(url: &str, name: &str, token: Option<&str>) -> Result<PathBuf> {
     let dir = store_dir()?;
     let dest = dir.join(format!("{}.modelc", name));
 
-    let body = http_get(url)?;
+    let token = token
+        .map(str::to_string)
+        .or_else(|| std::env::var("MODELC_TOKEN").ok())
+        .filter(|t| !t.is_empty());
+
+    let (body, digest_hdr) = if url.starts_with("https://") {
+        https_get(url, token.as_deref())?
+    } else {
+        http_get(url, token.as_deref())?
+    };
+
+    verify_response_digest(&body, digest_hdr.as_deref())?;
+
     std::fs::write(&dest, &body)
         .with_context(|| format!("failed to write downloaded data to {:?}", dest))?;
 
     Ok(dest)
 }
 
+/// Verify the downloaded blob against a `sha256:<hex>` digest header, when present.
+/// No header → nothing to check. Unparseable header → warn, don't fail.
+fn verify_response_digest(body: &[u8], digest_hdr: Option<&str>) -> Result<()> {
+    let Some(expected) = digest_hdr else { return Ok(()) };
+    match crate::digest::verify_digest(body, expected) {
+        Ok(true) => {
+            eprintln!("digest verified: {expected}");
+            Ok(())
+        }
+        Ok(false) => anyhow::bail!(
+            "download corrupted: server digest {expected} != sha256 of downloaded bytes"
+        ),
+        Err(e) => {
+            eprintln!("warning: could not verify digest header {expected:?}: {e}");
+            Ok(())
+        }
+    }
+}
+
+/// Extract a `sha256:<hex>` digest from response headers — `X-Modelc-Digest`
+/// first, then `ETag` (which may be quoted). Case-insensitive names.
+fn extract_digest_header(headers: &str) -> Option<String> {
+    let mut etag = None;
+    for line in headers.lines().skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            let v = v.trim();
+            match k.trim().to_ascii_lowercase().as_str() {
+                "x-modelc-digest" => return Some(v.to_string()),
+                "etag" => etag = Some(v.trim_matches('"').to_string()),
+                _ => {}
+            }
+        }
+    }
+    etag.filter(|e| e.starts_with("sha256:"))
+}
+
 /// Minimal HTTP/1.1 GET over `std::net::TcpStream`. Supports plain `http://` only.
-fn http_get(url: &str) -> Result<Vec<u8>> {
+/// Returns (body, digest-header-if-any).
+fn http_get(url: &str, token: Option<&str>) -> Result<(Vec<u8>, Option<String>)> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
     let rest = url
         .strip_prefix("http://")
-        .context("only http:// URLs are supported; use curl for https://")?;
+        .context("unsupported URL scheme (use http:// or https://)")?;
     let (host_port, path) = match rest.split_once('/') {
         Some((h, p)) => (h, format!("/{}", p)),
         None => (rest, "/".to_string()),
@@ -159,8 +228,11 @@ fn http_get(url: &str) -> Result<Vec<u8>> {
         .set_read_timeout(Some(Duration::from_secs(300)))
         .context("failed to set read timeout")?;
 
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: modelc/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: modelc/0.1\r\nAccept: */*\r\n{auth}Connection: close\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())
@@ -188,7 +260,61 @@ fn http_get(url: &str) -> Result<Vec<u8>> {
         anyhow::bail!("HTTP request failed with status {}", status);
     }
 
-    Ok(response[header_end + 4..].to_vec())
+    let digest = extract_digest_header(headers);
+    Ok((response[header_end + 4..].to_vec(), digest))
+}
+
+/// HTTPS GET via the system `curl`: `curl` writes the body to a temp file and
+/// dumps response headers to another. Returns (body, digest-header-if-any).
+fn https_get(url: &str, token: Option<&str>) -> Result<(Vec<u8>, Option<String>)> {
+    use std::process::Command;
+
+    let hdr_path = std::env::temp_dir().join(format!(
+        "modelc-hdr-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let out_path = hdr_path.with_extension("bin");
+
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        "1800",
+        "-A",
+        concat!("modelc/", env!("CARGO_PKG_VERSION")),
+        "-D",
+    ])
+    .arg(&hdr_path)
+    .arg("-o")
+    .arg(&out_path);
+    if let Some(t) = token {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {t}"));
+    }
+    cmd.arg(url);
+
+    let output = cmd.output().context(
+        "curl not found — needed for https:// pulls; install curl or download manually and use `modelc install`",
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_file(&hdr_path);
+        let _ = std::fs::remove_file(&out_path);
+        anyhow::bail!("https download failed (curl exit {:?}): {}", output.status.code(), stderr.trim());
+    }
+
+    let headers = std::fs::read_to_string(&hdr_path).unwrap_or_default();
+    let body = std::fs::read(&out_path)
+        .with_context(|| format!("curl produced no output file {:?}", out_path))?;
+    let _ = std::fs::remove_file(&hdr_path);
+    let _ = std::fs::remove_file(&out_path);
+
+    Ok((body, extract_digest_header(&headers)))
 }
 
 /// List versioned copies of a model (files matching `<name>.v<N>.modelc`).
@@ -310,4 +436,10 @@ pub struct InstalledModel {
     pub architecture: Option<String>,
     pub params: Option<usize>,
     pub compressed: bool,
+    /// Source weight format (`safetensors`/`gguf`/…) from artifact metadata.
+    pub format: Option<String>,
+    /// Quantization label inferred from the artifact (`pack::infer_quantization`).
+    pub quantization: Option<String>,
+    /// Number of tensors in the artifact header.
+    pub tensor_count: usize,
 }

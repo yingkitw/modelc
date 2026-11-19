@@ -713,43 +713,112 @@ promptEl.focus();
     axum::response::Html(html)
 }
 
+/// `GET /api/tags` — Ollama-compatible model list over the local store.
+///
+/// Uses the real Ollama field names (`details.format/family/families/
+/// parameter_size/quantization_level`, `digest`, `modified_at`) so Ollama
+/// clients can enumerate the store; modelc extras are additive.
 pub(super) async fn api_tags() -> Json<super::ApiTagsResponse> {
     let models = crate::store::list_models().unwrap_or_default();
     let tags: Vec<super::ApiTag> = models
         .iter()
-        .map(|m| super::ApiTag {
-            name: m.name.clone(),
-            size: m.size_bytes,
-            details: super::ApiTagDetails {
+        .map(|m| {
+            let family = m.architecture.clone().unwrap_or_else(|| "generic".to_string());
+            super::ApiTag {
+                name: m.name.clone(),
+                model: m.name.clone(),
+                modified_at: crate::digest::file_mtime_rfc3339(&m.path),
+                size: m.size_bytes,
+                digest: crate::digest::digest_file(&m.path).unwrap_or_default(),
+                details: super::OllamaDetails {
+                    format: m.format.clone().unwrap_or_else(|| "modelc".to_string()),
+                    family: family.clone(),
+                    families: vec![family],
+                    parameter_size: super::ollama::format_parameter_size(
+                        m.params.unwrap_or(0) as u64
+                    ),
+                    quantization_level: super::ollama::quantization_level(
+                        m.quantization.as_deref().unwrap_or("f32"),
+                    ),
+                },
                 architecture: m.architecture.clone().unwrap_or_default(),
-                parameter_size: format!("{}", m.params.unwrap_or(0)),
-                quantization: if m.compressed { "compressed" } else { "f32" }.to_string(),
-            },
+                tensor_count: m.tensor_count,
+                compressed: m.compressed,
+            }
         })
         .collect();
     Json(super::ApiTagsResponse { models: tags })
 }
 
+/// `POST /api/show` — Ollama-compatible model details.
+///
+/// Accepts both `{"model": "..."}` (Ollama) and `{"name": "..."}` (legacy).
 pub(super) async fn api_show(Json(req): Json<super::ApiShowRequest>) -> axum::response::Response {
-    match crate::store::resolve_model_path(&req.name) {
+    let requested = req.model.or(req.name).unwrap_or_default();
+    if requested.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "model is required" })),
+        )
+            .into_response();
+    }
+    match crate::store::resolve_model_path(&requested) {
         Ok(path) => match crate::pack::read_header(&path) {
             Ok(header) => {
-                let params: usize = header
+                let params: u64 = header
                     .tensors
                     .iter()
-                    .map(|t| t.shape.iter().product::<usize>())
+                    .map(|t| t.shape.iter().product::<usize>() as u64)
                     .sum();
                 let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let quantization = crate::pack::infer_quantization(&header);
+                let format = super::ollama::artifact_format(&header);
+                let family = if header.architecture.is_empty() {
+                    "generic".to_string()
+                } else {
+                    header.architecture.clone()
+                };
+                let model_name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(header.name.as_str())
+                    .to_string();
                 Json(super::ApiShowResponse {
+                    model: model_name,
+                    modified_at: crate::digest::file_mtime_rfc3339(&path),
+                    size: size_bytes,
+                    digest: crate::digest::digest_file(&path).unwrap_or_default(),
+                    details: super::OllamaDetails {
+                        format,
+                        family: family.clone(),
+                        families: vec![family],
+                        parameter_size: super::ollama::format_parameter_size(params),
+                        quantization_level: super::ollama::quantization_level(&quantization),
+                    },
+                    model_info: serde_json::json!({
+                        "general.architecture": header.architecture,
+                        "general.parameter_count": params,
+                        "general.file_type": super::ollama::ollama_file_type(&quantization),
+                    }),
+                    capabilities: vec![
+                        "completion".to_string(),
+                        "embedding".to_string(),
+                        "insert".to_string(),
+                        "tools".to_string(),
+                    ],
+                    license: header
+                        .metadata
+                        .get("license")
+                        .cloned()
+                        .unwrap_or_default(),
+                    modelfile: String::new(),
+                    parameters: String::new(),
+                    template: String::new(),
                     name: header.name,
                     architecture: header.architecture,
                     size_bytes,
-                    parameter_size: format!("{}", params),
-                    quantization: header
-                        .metadata
-                        .get("quantization")
-                        .cloned()
-                        .unwrap_or_else(|| "f32".to_string()),
+                    parameter_size: super::ollama::format_parameter_size(params),
+                    quantization,
                     tensor_count: header.tensors.len(),
                 })
                 .into_response()

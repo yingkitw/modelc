@@ -175,6 +175,38 @@ fn export_to_safetensors_writes_valid_file() {
     assert!(st.names().iter().any(|n| n.as_str() == "bias"));
 }
 
+/// Safetensors has no GGUF block-quant dtype: export must dequantize to F32
+/// instead of panicking (learned from the modelc-web TS port).
+#[test]
+fn export_dequantizes_gguf_quant_tensors() {
+    let dir = common::tempdir().unwrap();
+    let artifact = dir.path().join("quant.modelc");
+    let out = dir.path().join("quant.safetensors");
+
+    // One Q4_0 block = f16 delta (2B) + 16 nibble bytes -> 32 elements.
+    let mut block = half::f16::from_f32(1.0).to_le_bytes().to_vec();
+    block.extend_from_slice(&[0u8; 16]);
+
+    let mut model = tiny_model();
+    model.tensors.insert(
+        "w_q4".to_string(),
+        TensorData {
+            shape: vec![32],
+            dtype: DataType::Q4_0,
+            data: block,
+        },
+    );
+    pack::pack(&model, &artifact, false).unwrap();
+
+    pack::export_to_safetensors(&artifact, &out).unwrap();
+
+    let data = fs::read(&out).unwrap();
+    let st = safetensors::SafeTensors::deserialize(&data).unwrap();
+    let view = st.tensor("w_q4").unwrap();
+    assert_eq!(view.dtype(), safetensors::Dtype::F32);
+    assert_eq!(view.shape(), vec![32]);
+}
+
 #[test]
 fn unpack_rejects_truncated_artifact() {
     let dir = common::tempdir().unwrap();

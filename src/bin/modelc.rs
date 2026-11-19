@@ -205,10 +205,15 @@ fn main() -> Result<()> {
                 print_model_list(&models);
             }
         }
+        modelc::cli::Commands::Diff { source, target, json } => {
+            modelc::diff::diff_command(source, target, *json)?;
+        }
+
         modelc::cli::Commands::Pull {
             source,
             name,
             version,
+            token,
         } => {
             let is_url = source.starts_with("http://") || source.starts_with("https://");
 
@@ -230,7 +235,7 @@ fn main() -> Result<()> {
             });
 
             let dest = if is_url {
-                modelc::store::download(source, &model_name)?
+                modelc::store::download_auth(source, &model_name, token.as_deref())?
             } else {
                 let source_path = PathBuf::from(source);
                 if !source_path.is_file() {
@@ -508,9 +513,15 @@ fn print_model_list(models: &[modelc::store::InstalledModel]) {
             .map(|p| format!("{} params", p))
             .unwrap_or_default();
         let comp = if m.compressed { " [zstd]" } else { "" };
+        let quant = m
+            .quantization
+            .as_deref()
+            .filter(|q| !q.eq_ignore_ascii_case("f32"))
+            .map(|q| format!(" [{q}]"))
+            .unwrap_or_default();
         println!(
-            "  {:20} {:>8.2} MB  {:12} {:>14}{}",
-            m.name, size_mb, arch, params, comp
+            "  {:20} {:>8.2} MB  {:12} {:>14}{}{}",
+            m.name, size_mb, arch, params, comp, quant
         );
     }
 }

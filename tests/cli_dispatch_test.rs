@@ -77,6 +77,7 @@ fn cli_help_lists_subcommands() {
         "rm",
         "search",
         "prompt",
+        "diff",
     ] {
         assert!(
             stdout.contains(sub),
@@ -353,6 +354,41 @@ fn cli_export_writes_safetensors_file() {
     assert_eq!(code, 0, "export should succeed");
     let meta = std::fs::metadata(&exported).unwrap();
     assert!(meta.len() > 0, "exported safetensors should not be empty");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `modelc diff a b --json` emits the structural header diff (added/removed/
+/// changed tensors, params delta, metadata diff).
+#[test]
+fn cli_diff_reports_structural_changes() {
+    let dir = unique_tmp("diff");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("a.safetensors");
+    write_minimal_safetensors(&src);
+    let a = dir.join("a.modelc");
+    let b = dir.join("b.modelc");
+    let (code_a, _, _) = run(&["pack", src.to_str().unwrap(), "-o", a.to_str().unwrap()]);
+    assert_eq!(code_a, 0);
+    // Same weights pruned (same tensors, same shapes -> likely identical header);
+    // a second pack of the same source should be structurally identical.
+    let (code_b, _, _) = run(&["pack", src.to_str().unwrap(), "-o", b.to_str().unwrap()]);
+    assert_eq!(code_b, 0);
+
+    let (code, stdout, _) = run(&[
+        "diff",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "diff should succeed");
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("diff --json emits JSON");
+    assert_eq!(val["identical"].as_bool(), Some(true));
+
+    // Text mode works too.
+    let (code2, stdout2, _) = run(&["diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+    assert_eq!(code2, 0);
+    assert!(stdout2.contains("identical"));
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

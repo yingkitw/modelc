@@ -139,6 +139,8 @@ modelc list
 modelc rm my-model [--all|--force]
 modelc cp my-model my-model-copy
 modelc pull username/model-name --version 2
+modelc pull https://www.modelc.net/api/modelc/download?slug=demo-py   # HTTPS + sha256 digest verify
+modelc pull https://host/model.modelc --token $TOKEN                  # or env MODELC_TOKEN
 modelc switch my-model 2
 ```
 
@@ -148,8 +150,9 @@ modelc switch my-model 2
 modelc inspect model.safetensors
 modelc inspect model.safetensors --quant-sizes   # preview fp32/fp16/int8/int4/q4_0 sizes
 modelc inspect model.modelc --readme              # generate a Markdown model card
-modelc export model.modelc -o out.safetensors
-modelc verify model.modelc
+modelc export model.modelc -o out.safetensors    # GGUF quants dequantize to F32 automatically
+modelc verify model.modelc                        # header check + sha256 digest
+modelc diff a.modelc b.modelc [--json]           # structural diff (tensors/arch/params/metadata)
 modelc bench model.modelc --iterations 50
 modelc search llama
 ```
@@ -209,8 +212,8 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `GET` | `/metrics` | Prometheus text (request count, latency histogram, active gauge, tokens counter) |
 | `GET` | `/props` | llama.cpp-compatible server properties |
 | `GET` | `/api/version` | `{ version, git_sha }` |
-| `GET` | `/api/tags` | **Ollama-compatible** local model store listing |
-| `POST` | `/api/show` | **Ollama-compatible** model details by name (no load) |
+| `GET` | `/api/tags` | **Ollama-ecosystem** store listing (`details.*`, `digest`, `modified_at`) — works with real Ollama clients |
+| `POST` | `/api/show` | **Ollama-ecosystem** model details (`{"model"}` or `{"name"}`; `model_info`, `capabilities`) |
 | `GET` | `/v1/system` | CPU/GPU/memory/core info |
 | `GET` | `/v1/models` · `/v1/models/:id` | OpenAI model list / retrieval |
 | `POST` | `/infer` | Raw tensor inference (`input` or batch `inputs`) |

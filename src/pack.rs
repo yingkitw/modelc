@@ -351,13 +351,64 @@ pub fn verify(path: &Path) -> Result<()> {
     println!("  tensors: {}", header.tensors.len());
     println!("  total tensor bytes: {}", total_claimed);
     println!("  blob size: {} bytes", data_blob.len());
+    if let Ok(d) = crate::digest::digest_file(path) {
+        println!("  digest: {d}");
+    }
 
     Ok(())
 }
 
+/// Infer the artifact's quantization label from its header — for reporting
+/// (Ollama `quantization_level`). Checks, in order:
+/// `metadata["quantization"]`, `quant_mode.* == "int4"`, `quant_scale.*`,
+/// then any GGUF block-quant tensor dtype. Defaults to `"f32"`.
+pub fn infer_quantization(header: &ArtifactHeader) -> String {
+    if let Some(q) = header.metadata.get("quantization") {
+        return q.clone();
+    }
+    if header
+        .metadata
+        .iter()
+        .any(|(k, v)| k.starts_with("quant_mode.") && v == "int4")
+    {
+        return "int4".to_string();
+    }
+    if header.metadata.keys().any(|k| k.starts_with("quant_scale.")) {
+        return "int8".to_string();
+    }
+    if let Some(t) = header.tensors.iter().find(|t| {
+        matches!(
+            t.dtype.to_ascii_lowercase().as_str(),
+            "q4_0" | "q5_0" | "q8_0" | "q4_k" | "q6_k"
+        )
+    }) {
+        return t.dtype.clone();
+    }
+    "f32".to_string()
+}
+
 /// Export a `.modelc` artifact to a Safetensors file.
+///
+/// Safetensors has no GGUF block-quant dtype, so Q4_0/Q5_0/Q8_0/Q4_K/Q6_K
+/// tensors are dequantized to F32 before writing (same as `compile`) —
+/// a converted file that loads beats an error.
 pub fn export_to_safetensors(path: &Path, output: &Path) -> Result<()> {
-    let model = unpack(path)?;
+    let mut model = unpack(path)?;
+
+    let n_quant = model
+        .tensors
+        .values()
+        .filter(|t| {
+            matches!(
+                t.dtype,
+                DataType::Q4_0 | DataType::Q5_0 | DataType::Q8_0 | DataType::Q4_K | DataType::Q6_K
+            )
+        })
+        .count();
+    model.dequantize_in_place();
+    if n_quant > 0 {
+        eprintln!("Dequantized {n_quant} GGUF block-quant tensors to F32 for export");
+    }
 
     let mut metadata = std::collections::HashMap::new();
     for (k, v) in &model.metadata {

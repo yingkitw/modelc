@@ -1931,6 +1931,12 @@ async fn run_server_serves_api_tags() {
     let addr = ephemeral_addr();
     let base = format!("http://{addr}");
 
+    // Install a model so /api/tags has an entry with full Ollama fields.
+    let tmp = common::tempfile().unwrap();
+    modelc::pack::pack(&model, tmp.path(), false).unwrap();
+    let test_name = "__modelc_test_api_tags__";
+    modelc::store::install(tmp.path(), test_name).unwrap();
+
     tokio::spawn(async move {
         let _ = run_server(
             model,
@@ -1950,7 +1956,28 @@ async fn run_server_serves_api_tags() {
         .expect("GET /api/tags should succeed");
     let bytes = read_body(resp).expect("read body");
     let val: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
-    assert!(val["models"].is_array(), "models should be an array");
+    let models = val["models"].as_array().expect("models should be an array");
+    let entry = models
+        .iter()
+        .find(|m| m["name"].as_str() == Some(test_name))
+        .expect("installed model should appear in /api/tags");
+
+    // Ollama ecosystem fields (learned from modelc-web): real clients parse these.
+    assert!(entry["model"].as_str().is_some(), "model field present");
+    assert!(
+        entry["modified_at"].as_str().is_some_and(|s| s.ends_with('Z')),
+        "modified_at RFC3339 present"
+    );
+    assert!(
+        entry["digest"].as_str().is_some_and(|s| s.starts_with("sha256:")),
+        "digest sha256:<hex> present"
+    );
+    let details = &entry["details"];
+    for key in ["format", "family", "families", "parameter_size", "quantization_level"] {
+        assert!(details[key].is_string() || details[key].is_array(),
+            "details.{key} present");
+    }
+    modelc::store::remove_model(test_name, false, true).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1979,7 +2006,8 @@ async fn run_server_serves_api_show() {
 
     wait_for_server(&format!("{base}/info"));
 
-    let body = serde_json::json!({ "name": test_name });
+    // Ollama clients send {"model": "..."}; legacy tooling sends {"name": "..."}.
+    let body = serde_json::json!({ "model": test_name });
     let val = post_json(&format!("{base}/api/show"), &body);
     assert!(val["name"].as_str().is_some(), "name field present");
     assert!(
@@ -1994,6 +2022,26 @@ async fn run_server_serves_api_show() {
         val["tensor_count"].as_u64().is_some(),
         "tensor_count field present"
     );
+    // Ollama ecosystem fields.
+    assert!(val["model"].as_str().is_some(), "model field present");
+    assert!(
+        val["digest"].as_str().is_some_and(|s| s.starts_with("sha256:")),
+        "digest sha256:<hex> present"
+    );
+    let details = &val["details"];
+    for key in ["format", "family", "families", "parameter_size", "quantization_level"] {
+        assert!(details[key].is_string() || details[key].is_array(),
+            "details.{key} present");
+    }
+    let info = &val["model_info"];
+    assert!(info["general.architecture"].is_string(), "model_info.architecture");
+    assert!(info["general.parameter_count"].is_number(), "model_info.parameter_count");
+    assert!(info["general.file_type"].is_number(), "model_info.file_type");
+    assert!(val["capabilities"].is_array(), "capabilities array present");
+
+    // Legacy {"name": ...} still works.
+    let val2 = post_json(&format!("{base}/api/show"), &serde_json::json!({ "name": test_name }));
+    assert!(val2["model"].as_str().is_some(), "name-keyed request still works");
 
     // Clean up.
     modelc::store::remove_model(test_name, false, true).unwrap();

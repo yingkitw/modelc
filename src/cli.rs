@@ -237,6 +237,18 @@ pub enum Commands {
         query: String,
     },
 
+    #[command(about = "Structural diff between two .modelc artifacts (tensors, architecture, params, metadata)")]
+    Diff {
+        #[arg(help = "Source artifact (path or store name)")]
+        source: String,
+
+        #[arg(help = "Target artifact (path or store name)")]
+        target: String,
+
+        #[arg(long, help = "Emit JSON instead of text")]
+        json: bool,
+    },
+
     #[command(about = "Pull a model package from a URL or path into the local store")]
     Pull {
         #[arg(help = "Source URL or file path")]
@@ -247,6 +259,9 @@ pub enum Commands {
 
         #[arg(short, long, help = "Version tag (saves as <name>.v<version>.modelc)")]
         version: Option<u32>,
+
+        #[arg(long, help = "Bearer token for authenticated pulls (env MODELC_TOKEN as fallback)")]
+        token: Option<String>,
     },
 
     #[command(about = "Benchmark inference latency on a .modelc artifact")]

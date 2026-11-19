@@ -6,6 +6,8 @@ pub mod compiler;
 pub mod config;
 pub mod constraint;
 pub mod containerize;
+pub mod diff;
+pub mod digest;
 pub mod draft;
 pub mod generate;
 pub mod json_schema;

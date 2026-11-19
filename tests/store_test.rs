@@ -300,12 +300,100 @@ fn test_download_http_error_status_propagates() -> Result<()> {
 }
 
 #[test]
-fn test_download_rejects_https_urls() -> Result<()> {
-    let result = modelc::store::download("https://example.com/x.modelc", "__x__");
+fn test_download_https_unreachable_errors() -> Result<()> {
+    // https is now delegated to the system curl — a refused port fails fast
+    // whether curl exists (connection refused) or not (curl-not-found error).
+    let result = modelc::store::download("https://127.0.0.1:1/x.modelc", "__x__");
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("http://"),
-        "error should mention http-only support, got: {err}"
+        err.contains("curl") || err.contains("https") || err.contains("refused"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+/// The modelc-web store sends `X-Modelc-Digest: sha256:<hex>` — a correct
+/// digest verifies, a wrong one must fail the download.
+#[test]
+fn test_download_verifies_x_modelc_digest() -> Result<()> {
+    let model = common::create_test_model();
+    let tmp = common::tempfile()?;
+    modelc::pack::pack(&model, tmp.path(), false)?;
+    let payload = std::fs::read(tmp.path())?;
+
+    let good = modelc::digest::digest_bytes(&payload);
+
+    // Correct digest → download succeeds.
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Modelc-Digest: {good}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    let mut response = header.into_bytes();
+    response.extend_from_slice(&payload);
+    let response: &'static [u8] = Box::leak(response.into_boxed_slice());
+    let addr = serve_one_http_response(response);
+    let name = "__modelc_test_digest__";
+    let dest = modelc::store::download(&format!("http://{addr}/m.modelc"), name)?;
+    assert_eq!(std::fs::read(&dest)?, payload);
+    modelc::store::remove_model(name, false, true)?;
+
+    // Wrong digest → error, nothing left in the store.
+    let bad = modelc::digest::digest_bytes(b"different-bytes");
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Modelc-Digest: {bad}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    let mut response = header.into_bytes();
+    response.extend_from_slice(&payload);
+    let response: &'static [u8] = Box::leak(response.into_boxed_slice());
+    let addr = serve_one_http_response(response);
+    let result = modelc::store::download(&format!("http://{addr}/m.modelc"), "__x_bad__");
+    assert!(result.is_err(), "digest mismatch must fail the download");
+    Ok(())
+}
+
+/// `download_auth` must send `Authorization: Bearer <token>` so the CLI can
+/// pull from token-gated endpoints like modelc-web.
+#[test]
+fn test_download_sends_bearer_token() -> Result<()> {
+    use std::io::Read;
+
+    let payload = b"artifact-body".to_vec();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    let mut response = header.into_bytes();
+    response.extend_from_slice(&payload);
+    let response: &'static [u8] = Box::leak(response.into_boxed_slice());
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let captured2 = captured.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            if let Ok(n) = stream.read(&mut buf) {
+                captured2.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+            let _ = std::io::Write::write_all(&mut stream, response);
+        }
+    });
+
+    let name = "__modelc_test_auth__";
+    let dest = modelc::store::download_auth(
+        &format!("http://{addr}/m.modelc"),
+        name,
+        Some("tok123"),
+    )?;
+    assert_eq!(std::fs::read(&dest)?, payload);
+    modelc::store::remove_model(name, false, true)?;
+
+    let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+    assert!(
+        req.to_lowercase().contains("authorization: bearer tok123"),
+        "request missing bearer header:\n{req}"
     );
     Ok(())
 }

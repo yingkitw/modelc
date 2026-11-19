@@ -20,6 +20,7 @@ pub mod auth;
 mod handlers;
 mod infer;
 mod metrics;
+mod ollama;
 mod openai;
 
 /// A `Stream` wrapper that sets a cancellation flag when dropped.
@@ -526,6 +527,11 @@ struct Document {
     text: String,
 }
 
+/// `GET /api/tags` — Ollama-compatible model list.
+///
+/// Real Ollama clients parse `name`, `model`, `modified_at`, `size`, `digest`
+/// and `details.*` (see `serve/ollama.rs`). The extra modelc fields
+/// (`architecture`, `compressed`, `tensor_count`) are ignored by clients.
 #[derive(Serialize)]
 struct ApiTagsResponse {
     models: Vec<ApiTag>,
@@ -534,24 +540,50 @@ struct ApiTagsResponse {
 #[derive(Serialize)]
 struct ApiTag {
     name: String,
+    model: String,
+    modified_at: String,
     size: u64,
-    details: ApiTagDetails,
-}
-
-#[derive(Serialize)]
-struct ApiTagDetails {
+    digest: String,
+    details: OllamaDetails,
+    // modelc extras
     architecture: String,
-    parameter_size: String,
-    quantization: String,
+    tensor_count: usize,
+    compressed: bool,
 }
 
+/// Ollama `details` block (same shape for `/api/tags` and `/api/show`).
+#[derive(Serialize)]
+struct OllamaDetails {
+    format: String,
+    family: String,
+    families: Vec<String>,
+    parameter_size: String,
+    quantization_level: String,
+}
+
+/// `POST /api/show` request — Ollama clients send `{"model": "..."}`, older
+/// tooling (and previous modelc versions) send `{"name": "..."}`; accept both.
 #[derive(Deserialize)]
 struct ApiShowRequest {
-    name: String,
+    name: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Serialize)]
 struct ApiShowResponse {
+    // Ollama schema
+    model: String,
+    modified_at: String,
+    size: u64,
+    digest: String,
+    details: OllamaDetails,
+    model_info: serde_json::Value,
+    capabilities: Vec<String>,
+    license: String,
+    modelfile: String,
+    parameters: String,
+    template: String,
+    // modelc extras
     name: String,
     architecture: String,
     size_bytes: u64,

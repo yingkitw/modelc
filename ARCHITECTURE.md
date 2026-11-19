@@ -27,6 +27,8 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/prefix_cache.rs` | LRU `PrefixCache` of KV snapshots keyed by token sequence (longest-prefix reuse across requests). |
 | `src/draft.rs` | `DraftModel` trait + `MlpDraftModel` neural draft for EAGLE3-style speculative decoding + `PromptLookupDraftModel` weight-free draft (context substring matching fallback). |
 | `src/containerize.rs` | `containerize` command — emits Dockerfile + entrypoint for an artifact. |
+| `src/diff.rs` | `diff` command — structural diff between two artifact headers (tensors/architecture/params/metadata; port of modelc-web `api/_diff.ts`). |
+| `src/digest.rs` | SHA-256 (streaming, stdlib-only) + epoch→RFC3339. `sha256:<hex>` digest convention shared with the modelc-web store (`X-Modelc-Digest`, Ollama `digest` fields). |
 | `src/compiler.rs` | Parser selection, `apply_arch_hint`, `compile`, `inspect`, `pack`; `print_quant_sizes` (`--quant-sizes`); `prompt_model` (one-shot generation used by `modelc prompt`). |
 | `src/pack.rs` | `.modelc` artifact writer: JSON header + raw tensor blob, optional zstd compression, quantization, pruning. |
 | `src/store.rs` | Local model store management; platform-specific paths via `dirs` crate; search, versioning, pull, `rm`, `cp`. |
@@ -42,7 +44,7 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/codegen/native/` | `mod.rs` (codegen entry, `generate_cargo_toml`, `generate_main_rs`, MLP plan detection), `forward.rs` (MLP/GPT2/LLaMA forward generation), `helpers.rs` (decode_f32, matmul_bias, relu_inplace). |
 | `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`, `gemv`); `transformer.rs` runs GPT-2/LLaMA forward passes + KV cache (`KvCache`/`KvLayer` FP32/INT8/Mixed, context shifting, anchor preservation). |
 | `src/runtime/gemv.rs` | Shared SIMD GEMV row dot-product (`gemv_dot`, NEON/AVX with scalar fallback). Compiled into `modelc` AND emitted verbatim into `modelc compile` binaries so `run` and `compile` produce bit-identical logits. |
-| `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `handlers.rs` (Axum endpoints incl. `/tokenize`, `/v1/system`, `/reranking`, `/` web UI, `/api/tags`, `/api/show`), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
+| `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `handlers.rs` (Axum endpoints incl. `/tokenize`, `/v1/system`, `/reranking`, `/` web UI, `/api/tags`, `/api/show`), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints), `ollama.rs` (Ollama ecosystem schema for `/api/tags` + `/api/show`), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
 | `src/metal.rs` | Apple Silicon Metal acceleration: matmul, relu, add, mul_scalar, softmax, layer_norm kernels (macOS only). |
 | `src/compute/` | Metal compute shaders (`shaders.metal`). |
 
