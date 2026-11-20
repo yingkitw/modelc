@@ -448,7 +448,7 @@ pub(super) async fn chat_stream(
 
 /// Build a generation config, applying per-request overrides on top of server defaults.
 #[allow(clippy::too_many_arguments)]
-fn make_generation_config(
+pub(super) fn make_generation_config(
     base: &crate::generate::GenerationConfig,
     max_tokens: Option<usize>,
     temperature: Option<f32>,

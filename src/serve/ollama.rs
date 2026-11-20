@@ -1,4 +1,6 @@
-//! Ollama ecosystem schema helpers for `/api/tags` + `/api/show`.
+//! Ollama ecosystem schema helpers for `/api/tags` + `/api/show`, plus the
+//! inference endpoints `/api/generate` + `/api/chat` that real Ollama client
+//! libraries drive.
 //!
 //! Port of modelc-web's `api/_ollama.ts`. The upstream endpoints previously
 //! used modelc-specific field names which made them only *superficially*
@@ -6,6 +8,23 @@
 //! parameter_size/quantization_level`, `digest` and `model_info`. Keep
 //! modelc extras alongside: Ollama clients ignore unknown keys.
 
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio_stream::wrappers::ReceiverStream;
+
+use super::infer::{run_text_inference_token_ids, run_text_inference_with_config};
+use super::{AppState, CancelOnDrop, Message};
+use crate::generate::GenerationConfig;
 use crate::pack::ArtifactHeader;
 
 /// Human-readable parameter count, matching Ollama's formatting
@@ -60,6 +79,459 @@ pub fn artifact_format(header: &ArtifactHeader) -> String {
         .get("format")
         .cloned()
         .unwrap_or_else(|| "modelc".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// `/api/generate` + `/api/chat` — Ollama inference endpoints
+// ---------------------------------------------------------------------------
+
+/// Ollama `options` sub-object. Only fields with a modelc equivalent are
+/// declared; serde ignores the rest (`top_k`, `mirostat`, `keep_alive`, …).
+#[derive(Default, Deserialize)]
+pub struct OllamaOptions {
+    #[serde(default)]
+    pub num_predict: Option<i64>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub repeat_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    /// Stop sequences — Ollama accepts a string or an array of strings.
+    #[serde(default)]
+    pub stop: Option<Value>,
+    #[serde(default)]
+    pub num_ctx: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct OllamaGenerateRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub prompt: String,
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub raw: Option<bool>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub format: Option<Value>,
+    #[serde(default)]
+    pub options: Option<OllamaOptions>,
+}
+
+#[derive(Deserialize)]
+pub struct OllamaChatRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub format: Option<Value>,
+    #[serde(default)]
+    pub options: Option<OllamaOptions>,
+}
+
+/// Ollama `/api/generate` final response shape (also the last NDJSON line
+/// when streaming).
+#[derive(Serialize)]
+pub struct OllamaGenerateResponse {
+    pub model: String,
+    pub created_at: String,
+    pub response: String,
+    pub done: bool,
+    pub done_reason: String,
+    pub context: Vec<u32>,
+    pub total_duration: u64,
+    pub load_duration: u64,
+    pub prompt_eval_count: usize,
+    pub prompt_eval_duration: u64,
+    pub eval_count: usize,
+    pub eval_duration: u64,
+}
+
+/// Ollama `/api/chat` final response shape.
+#[derive(Serialize)]
+pub struct OllamaChatResponse {
+    pub model: String,
+    pub created_at: String,
+    pub message: Message,
+    pub done: bool,
+    pub done_reason: String,
+    pub context: Vec<u32>,
+    pub total_duration: u64,
+    pub load_duration: u64,
+    pub prompt_eval_count: usize,
+    pub prompt_eval_duration: u64,
+    pub eval_count: usize,
+    pub eval_duration: u64,
+}
+
+fn stop_strings(v: &Value) -> Vec<String> {
+    match v {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Map an Ollama `options` object onto a `GenerationConfig`, layered on the
+/// server defaults (same precedence as the `/chat` + `/complete` handlers).
+fn options_config(base: &GenerationConfig, opts: Option<&OllamaOptions>) -> GenerationConfig {
+    let mut cfg = base.clone();
+    let Some(o) = opts else { return cfg };
+    if let Some(n) = o.num_predict {
+        // Ollama uses -1 for "unbounded"; our usize needs a concrete cap.
+        if n > 0 {
+            cfg.max_tokens = n as usize;
+        }
+    }
+    if let Some(v) = o.temperature {
+        cfg.temperature = v;
+    }
+    if let Some(v) = o.top_p {
+        cfg.top_p = v;
+    }
+    if let Some(v) = o.min_p {
+        cfg.min_p = v;
+    }
+    cfg.seed = o.seed.or(cfg.seed);
+    if let Some(v) = o.repeat_penalty {
+        cfg.repetition_penalty = v;
+    }
+    if let Some(v) = o.presence_penalty {
+        cfg.presence_penalty = v;
+    }
+    if let Some(v) = o.frequency_penalty {
+        cfg.frequency_penalty = v;
+    }
+    if let Some(v) = &o.stop {
+        let stop = stop_strings(v);
+        if !stop.is_empty() {
+            cfg.stop = stop;
+        }
+    }
+    if let Some(n) = o.num_ctx {
+        cfg.max_context = Some(n as usize);
+    }
+    cfg
+}
+
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    crate::digest::rfc3339(secs)
+}
+
+/// `format: "json"` → object schema; `format: {…}` → the supplied schema.
+fn schema_for(format: Option<&Value>) -> Option<Value> {
+    match format {
+        Some(Value::String(s)) if s == "json" => Some(serde_json::json!({"type": "object"})),
+        Some(v @ Value::Object(_)) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// `/api/generate` prompt assembly: `raw: true` sends the prompt verbatim
+/// (unless a `system` override is present); otherwise messages pass through
+/// the same chat template as `/chat`.
+fn generate_prompt(state: &AppState, req: &OllamaGenerateRequest) -> String {
+    if req.raw.unwrap_or(false) && req.system.is_none() {
+        return req.prompt.clone();
+    }
+    let mut msgs = Vec::new();
+    if let Some(system) = &req.system {
+        msgs.push(crate::chat_template::ChatMessage {
+            role: "system".to_string(),
+            content: system.clone(),
+        });
+    }
+    msgs.push(crate::chat_template::ChatMessage {
+        role: "user".to_string(),
+        content: req.prompt.clone(),
+    });
+    crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &msgs)
+}
+
+struct GenResult {
+    text: String,
+    prompt_eval_count: usize,
+    eval_count: usize,
+    context: Vec<u32>,
+    prompt_eval_ns: u64,
+    eval_ns: u64,
+}
+
+/// Blocking generation shared by the non-streaming handlers and the
+/// format-locked streaming fallback. Returns real token counts and
+/// nanosecond durations for Ollama's stats fields.
+fn run_generation(
+    state: &AppState,
+    prompt: &str,
+    cfg: &GenerationConfig,
+    format: Option<&Value>,
+) -> GenResult {
+    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+    let t0 = Instant::now();
+    let prompt_ids = tokenizer.encode(prompt);
+    let prompt_eval_ns = t0.elapsed().as_nanos() as u64;
+
+    let t1 = Instant::now();
+    let (text, gen_ids) = if let Some(schema) = schema_for(format) {
+        let text = crate::json_schema::generate_with_schema(
+            |c| run_text_inference_with_config(state, prompt, c),
+            &schema,
+            cfg,
+            3,
+        );
+        (text, Vec::new())
+    } else {
+        let ids = run_text_inference_token_ids(state, prompt, cfg);
+        let full = tokenizer.decode(&[prompt_ids.as_slice(), &ids].concat());
+        let base = tokenizer.decode(&prompt_ids);
+        (full.strip_prefix(&base).unwrap_or(&full).to_string(), ids)
+    };
+    let eval_ns = t1.elapsed().as_nanos() as u64;
+    let eval_count = if gen_ids.is_empty() {
+        tokenizer.encode(&text).len()
+    } else {
+        gen_ids.len()
+    };
+    GenResult {
+        text,
+        prompt_eval_count: prompt_ids.len(),
+        eval_count,
+        context: [prompt_ids.as_slice(), &gen_ids].concat(),
+        prompt_eval_ns,
+        eval_ns,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Generate,
+    Chat,
+}
+
+fn chunk_line(
+    model: &str,
+    created: &str,
+    kind: StreamKind,
+    delta: &str,
+    done: bool,
+    stats: Option<Value>,
+) -> String {
+    let mut v = match kind {
+        StreamKind::Generate => serde_json::json!({
+            "model": model,
+            "created_at": created,
+            "response": delta,
+            "done": done,
+        }),
+        StreamKind::Chat => serde_json::json!({
+            "model": model,
+            "created_at": created,
+            "message": {"role": "assistant", "content": delta},
+            "done": done,
+        }),
+    };
+    if done {
+        v["done_reason"] = Value::String("stop".to_string());
+        if let Some(s) = stats {
+            for (k, val) in s.as_object().into_iter().flatten() {
+                v[k] = val.clone();
+            }
+        }
+    }
+    format!("{}\n", serde_json::to_string(&v).unwrap_or_default())
+}
+
+/// NDJSON streaming (Ollama's wire format — newline-delimited JSON, not SSE).
+fn ndjson_stream(
+    state: Arc<AppState>,
+    prompt: String,
+    mut cfg: GenerationConfig,
+    model: String,
+    kind: StreamKind,
+    format: Option<Value>,
+) -> Response {
+    let cancel = Arc::new(AtomicBool::new(false));
+    cfg.cancel = Some(cancel.clone());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, Infallible>>(8);
+
+    tokio::spawn(async move {
+        let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+        let prompt_ids = tokenizer.encode(&prompt);
+        let created = now_rfc3339();
+        let start = Instant::now();
+
+        if let Some(schema) = schema_for(format.as_ref()) {
+            // Schema-locked generation is whole-string; emit it as one chunk.
+            let text = crate::json_schema::generate_with_schema(
+                |c| run_text_inference_with_config(&state, &prompt, c),
+                &schema,
+                &cfg,
+                3,
+            );
+            let eval_ns = start.elapsed().as_nanos() as u64;
+            let _ = tx
+                .send(Ok(chunk_line(&model, &created, kind, &text, false, None)))
+                .await;
+            let stats = serde_json::json!({
+                "total_duration": start.elapsed().as_nanos() as u64,
+                "load_duration": 0u64,
+                "prompt_eval_count": prompt_ids.len(),
+                "prompt_eval_duration": 0u64,
+                "eval_count": tokenizer.encode(&text).len(),
+                "eval_duration": eval_ns,
+                "context": prompt_ids,
+            });
+            let _ = tx
+                .send(Ok(chunk_line(&model, &created, kind, "", true, Some(stats))))
+                .await;
+            return;
+        }
+
+        let token_ids = run_text_inference_token_ids(&state, &prompt, &cfg);
+        let eval_ns = start.elapsed().as_nanos() as u64;
+        let mut prev = String::new();
+        for idx in 0..token_ids.len() {
+            let text = tokenizer.decode(&[prompt_ids.as_slice(), &token_ids[..=idx]].concat());
+            if let Some(delta) = text.strip_prefix(&prev) {
+                if !delta.is_empty()
+                    && tx
+                        .send(Ok(chunk_line(&model, &created, kind, delta, false, None)))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+                prev = text;
+            }
+        }
+        let context: Vec<u32> = [prompt_ids.as_slice(), &token_ids].concat();
+        let stats = serde_json::json!({
+            "total_duration": start.elapsed().as_nanos() as u64,
+            "load_duration": 0u64,
+            "prompt_eval_count": prompt_ids.len(),
+            "prompt_eval_duration": 0u64,
+            "eval_count": token_ids.len(),
+            "eval_duration": eval_ns,
+            "context": context,
+        });
+        let _ = tx
+            .send(Ok(chunk_line(&model, &created, kind, "", true, Some(stats))))
+            .await;
+    });
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .body(Body::from_stream(CancelOnDrop::new(
+            ReceiverStream::new(rx),
+            cancel,
+        )))
+        .unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "stream").into_response())
+}
+
+pub(super) async fn api_generate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OllamaGenerateRequest>,
+) -> Response {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+    let prompt = generate_prompt(&state, &req);
+    let cfg = options_config(&state.generation, req.options.as_ref());
+    let model = req.model.clone().unwrap_or_else(|| state.name.clone());
+
+    if req.stream.unwrap_or(true) {
+        return ndjson_stream(
+            state.clone(),
+            prompt,
+            cfg,
+            model,
+            StreamKind::Generate,
+            req.format,
+        );
+    }
+
+    let start = Instant::now();
+    let r = run_generation(&state, &prompt, &cfg, req.format.as_ref());
+    Json(OllamaGenerateResponse {
+        model,
+        created_at: now_rfc3339(),
+        response: r.text,
+        done: true,
+        done_reason: "stop".to_string(),
+        context: r.context,
+        total_duration: start.elapsed().as_nanos() as u64,
+        load_duration: 0,
+        prompt_eval_count: r.prompt_eval_count,
+        prompt_eval_duration: r.prompt_eval_ns,
+        eval_count: r.eval_count,
+        eval_duration: r.eval_ns,
+    })
+    .into_response()
+}
+
+pub(super) async fn api_chat(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OllamaChatRequest>,
+) -> Response {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+    let messages: Vec<crate::chat_template::ChatMessage> = req
+        .messages
+        .iter()
+        .map(|m| crate::chat_template::ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+    let prompt =
+        crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages);
+    let cfg = options_config(&state.generation, req.options.as_ref());
+    let model = req.model.clone().unwrap_or_else(|| state.name.clone());
+
+    if req.stream.unwrap_or(true) {
+        return ndjson_stream(state.clone(), prompt, cfg, model, StreamKind::Chat, req.format);
+    }
+
+    let start = Instant::now();
+    let r = run_generation(&state, &prompt, &cfg, req.format.as_ref());
+    Json(OllamaChatResponse {
+        model,
+        created_at: now_rfc3339(),
+        message: Message {
+            role: "assistant".to_string(),
+            content: r.text,
+        },
+        done: true,
+        done_reason: "stop".to_string(),
+        context: r.context,
+        total_duration: start.elapsed().as_nanos() as u64,
+        load_duration: 0,
+        prompt_eval_count: r.prompt_eval_count,
+        prompt_eval_duration: r.prompt_eval_ns,
+        eval_count: r.eval_count,
+        eval_duration: r.eval_ns,
+    })
+    .into_response()
 }
 
 #[cfg(test)]

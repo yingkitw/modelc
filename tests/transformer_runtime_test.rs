@@ -2047,3 +2047,133 @@ async fn run_server_serves_api_show() {
     // Clean up.
     modelc::store::remove_model(test_name, false, true).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_generate() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/api/generate"),
+        &serde_json::json!({
+            "model": "fixture",
+            "prompt": "hello",
+            "stream": false,
+            "options": { "num_predict": 4, "seed": 7 }
+        }),
+    );
+    assert!(val["response"].is_string(), "response text present");
+    assert_eq!(val["done"].as_bool(), Some(true), "done flag");
+    assert_eq!(val["done_reason"].as_str(), Some("stop"), "done_reason");
+    assert_eq!(val["model"].as_str(), Some("fixture"), "model echo");
+    assert!(val["created_at"].as_str().is_some_and(|s| s.ends_with('Z')), "created_at RFC3339");
+    assert!(val["context"].is_array(), "context token ids present");
+    for key in [
+        "total_duration",
+        "load_duration",
+        "prompt_eval_duration",
+        "eval_duration",
+    ] {
+        assert!(val[key].is_number(), "{key} present");
+    }
+    assert_eq!(val["eval_count"].as_u64(), Some(4), "num_predict honored");
+    assert!(
+        val["prompt_eval_count"].as_u64().is_some_and(|n| n > 0),
+        "prompt_eval_count > 0"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_generate_streams_ndjson() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    // Ollama defaults to streaming: omitting `stream` must yield NDJSON lines.
+    let resp = http::post(&format!("{base}/api/generate"))
+        .content_type("application/json")
+        .send(&serde_json::json!({
+            "prompt": "hi",
+            "options": { "num_predict": 3 }
+        }).to_string())
+        .expect("POST /api/generate");
+    let bytes = read_body(resp).expect("read body");
+    let text = String::from_utf8(bytes).expect("utf8 body");
+    // Body arrives chunked-transfer encoded; chunk-size headers are bare hex
+    // lines — keep only the JSON payload lines.
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('{'))
+        .map(|l| serde_json::from_str(l).expect("each NDJSON line parses"))
+        .collect();
+    assert!(lines.len() >= 2, "at least one chunk + final line");
+    for line in &lines[..lines.len() - 1] {
+        assert_eq!(line["done"].as_bool(), Some(false), "intermediate done:false");
+        assert!(line["response"].is_string(), "chunk response field");
+    }
+    let last = lines.last().unwrap();
+    assert_eq!(last["done"].as_bool(), Some(true), "final done:true");
+    assert!(last["eval_count"].is_number(), "final eval_count");
+    assert!(last["total_duration"].is_number(), "final total_duration");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_chat() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/api/chat"),
+        &serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false,
+            "options": { "num_predict": 3 }
+        }),
+    );
+    assert_eq!(val["done"].as_bool(), Some(true), "done flag");
+    assert_eq!(val["message"]["role"].as_str(), Some("assistant"), "assistant role");
+    assert!(val["message"]["content"].is_string(), "message content");
+    assert!(val["eval_count"].is_number(), "eval_count present");
+    assert!(val["prompt_eval_count"].as_u64().is_some_and(|n| n > 0));
+}

@@ -252,6 +252,8 @@ pub fn build_router_from_state(state: std::sync::Arc<AppState>) -> Router {
         .route("/api/version", get(handlers::version_info))
         .route("/api/tags", get(handlers::api_tags))
         .route("/api/show", post(handlers::api_show))
+        .route("/api/generate", post(ollama::api_generate))
+        .route("/api/chat", post(ollama::api_chat))
         .route("/health", get(handlers::health))
         .route("/chat", post(handlers::chat))
         .route("/chat/stream", post(handlers::chat_stream))

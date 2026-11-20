@@ -214,6 +214,8 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `GET` | `/api/version` | `{ version, git_sha }` |
 | `GET` | `/api/tags` | **Ollama-ecosystem** store listing (`details.*`, `digest`, `modified_at`) — works with real Ollama clients |
 | `POST` | `/api/show` | **Ollama-ecosystem** model details (`{"model"}` or `{"name"}`; `model_info`, `capabilities`) |
+| `POST` | `/api/generate` | **Ollama-ecosystem** generation (`options`→sampling, `format`, NDJSON streaming) |
+| `POST` | `/api/chat` | **Ollama-ecosystem** chat generation (`messages`, `options`, NDJSON streaming) |
 | `GET` | `/v1/system` | CPU/GPU/memory/core info |
 | `GET` | `/v1/models` · `/v1/models/:id` | OpenAI model list / retrieval |
 | `POST` | `/infer` | Raw tensor inference (`input` or batch `inputs`) |
