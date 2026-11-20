@@ -1,9 +1,12 @@
 # TODO — Plan
 
-> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **250 inline unit tests** · **372 integration tests**.
+> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **252 inline unit tests** · **372 integration tests**.
 
 ### Scorecard history (continued)
 
+- 2026-11-20 — **29 / 30** (audit + weakest-dimension pass). Changes:
+  - **API fidelity**: fixed a latent streaming bug found by the audit — all four streaming endpoints (`/chat/stream`, `/v1/chat/completions`, `/v1/completions`, `/api/generate`/`/api/chat`) emitted the full prompt text as the first delta (`prev` seeded `""`, so `strip_prefix` returned the whole cumulative decode). Extracted `BpeTokenizer::decode_deltas` which seeds from `decode(prefix_ids)` — deltas now contain generated text only, matching OpenAI/Ollama semantics. Regression test: `run_server_serves_api_generate_streams_ndjson` asserts prompt markers never appear in chunks.
+  - **Maintainability**: `chat_completion` 373 → 246 lines, `completions` 279 → 230 — shared `SamplingParams` (serde-flattened into both request structs, identical JSON surface) + `to_generation_config` removed ~90 lines of duplicated field decls/gen_cfg literals; `ChatFlags::from_request` + `templated_chat_messages` extracted the structured-output/tool assembly. 4× duplicated decode-delta loops collapsed to `tokenizer.rs`. Remaining 4s: `generate.rs` (frozen, Mature Module Policy), openai.rs handlers still ~230 lines of distinct stream/response logic.
 - 2026-09-20 — **29 / 30** (wiring & ergonomics pass). Changes:
   - **Wiring & ergonomics 4 → 5**: added `modelc prompt` (Ollama-style one-shot generation, no HTTP server) sharing `arch::transformer_hidden_dim` with `run`; closed the untested `POST /infill` hole; CLI dispatch now covers `prompt`, `inspect --readme`, and `compile_listen` IPv6/override/invalid. 17 clap subcommands; every HTTP route in `build_router_from_state` has an integration test.
   - Test counts 584 → **593** (230 inline + 363 integration). Remaining 4s: Maintainability (`generate.rs` size, frozen by Mature Module Policy) and Footprint (deps already trimmed).

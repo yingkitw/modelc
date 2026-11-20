@@ -117,6 +117,27 @@ impl BpeTokenizer {
         self.vocab.get(id as usize).map(Vec::as_slice)
     }
 
+    /// Decode `prefix_ids + token_ids` incrementally and return the text
+    /// produced per generated position — the "deltas" emitted by streaming
+    /// endpoints (`/chat/stream`, `/v1/*` streams, `/api/generate`, `/api/chat`).
+    /// Byte-level merges can cross the prefix boundary, so each delta is found
+    /// by decoding the cumulative sequence and stripping the decoded prefix.
+    /// The deltas therefore contain generated text only — never prompt text.
+    pub fn decode_deltas(&self, prefix_ids: &[u32], token_ids: &[u32]) -> Vec<String> {
+        let mut deltas = Vec::new();
+        let mut prev = self.decode(prefix_ids);
+        for idx in 0..token_ids.len() {
+            let text = self.decode(&[prefix_ids, &token_ids[..=idx]].concat());
+            if let Some(delta) = text.strip_prefix(&prev) {
+                if !delta.is_empty() {
+                    deltas.push(delta.to_string());
+                }
+                prev = text;
+            }
+        }
+        deltas
+    }
+
     /// Pre-computed `Option<Vec<u8>>` for every vocab entry.
     /// Eliminates rebuilding this on every constrained sampling step.
     pub fn cached_token_bytes(&self) -> &[Option<Vec<u8>>] {
@@ -190,6 +211,33 @@ mod tests {
         assert!(!ids.is_empty());
         let decoded = tok.decode(&ids);
         assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn decode_deltas_excludes_prompt_and_emits_generated() {
+        let tok = BpeTokenizer::byte_fallback();
+        let prompt = "the capital of France is";
+        let prompt_ids = tok.encode(prompt);
+        // Fake generated tokens: encode each word separately so deltas are
+        // predictable text chunks.
+        let gen_ids: Vec<u32> = [" Paris", " is", " great"]
+            .iter()
+            .flat_map(|w| tok.encode(w))
+            .collect();
+        let deltas = tok.decode_deltas(&prompt_ids, &gen_ids);
+        assert_eq!(deltas.concat(), " Paris is great");
+        assert!(!deltas.is_empty());
+        assert!(
+            deltas.iter().all(|d| !d.contains("France")),
+            "prompt text must not leak into deltas: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn decode_deltas_empty_generation_is_empty() {
+        let tok = BpeTokenizer::byte_fallback();
+        let prompt_ids = tok.encode("x");
+        assert!(tok.decode_deltas(&prompt_ids, &[]).is_empty());
     }
 
     #[test]

@@ -93,20 +93,10 @@ pub(super) async fn retrieve_model(
 // /v1/chat/completions
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-pub(super) struct ChatCompletionRequest {
-    #[serde(default)]
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(default)]
-    stream: bool,
-    #[serde(default)]
-    response_format: Option<ResponseFormat>,
-    #[serde(default)]
-    tools: Vec<Tool>,
-    /// Optional tool choice: "auto", "none", or {"type":"function","function":{"name":"..."}}
-    #[serde(default)]
-    tool_choice: Option<serde_json::Value>,
+/// Sampling parameters shared by `/v1/chat/completions` and `/v1/completions`.
+/// Serde-flattened into both request structs, so the JSON surface is unchanged.
+#[derive(Deserialize, Default)]
+pub(super) struct SamplingParams {
     #[serde(default)]
     max_tokens: Option<usize>,
     /// Newer OpenAI parameter name for max_tokens (preferred if both given).
@@ -120,18 +110,9 @@ pub(super) struct ChatCompletionRequest {
     /// least `min_p` fraction of the max probability.
     #[serde(default)]
     min_p: Option<f32>,
-    /// Whether to return log probabilities of the output tokens.
-    #[serde(default)]
-    logprobs: Option<bool>,
-    /// How many (0–20) top tokens to return per output position. Requires `logprobs: true`.
-    #[serde(default)]
-    top_logprobs: Option<u8>,
     /// Optional regex grammar constraint applied during sampling.
     #[serde(default)]
     grammar: Option<String>,
-    /// Optional JSON Schema object to validate generated output against.
-    #[serde(default)]
-    json_schema: Option<serde_json::Value>,
     /// Optional stop sequences that halt generation.
     #[serde(default)]
     stop: Vec<String>,
@@ -150,6 +131,78 @@ pub(super) struct ChatCompletionRequest {
     /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
     #[serde(default)]
     logit_bias: Option<HashMap<u32, f32>>,
+}
+
+impl SamplingParams {
+    /// Layer the request's sampling overrides onto the server defaults.
+    fn to_generation_config(
+        &self,
+        base: &crate::generate::GenerationConfig,
+    ) -> crate::generate::GenerationConfig {
+        crate::generate::GenerationConfig {
+            max_tokens: self
+                .max_completion_tokens
+                .or(self.max_tokens)
+                .unwrap_or(base.max_tokens),
+            temperature: self.temperature.unwrap_or(base.temperature),
+            top_p: self.top_p.unwrap_or(base.top_p),
+            min_p: self.min_p.unwrap_or(base.min_p),
+            gamma: base.gamma,
+            use_int8_kv: base.use_int8_kv,
+            use_mixed_kv: base.use_mixed_kv,
+            constraint: self
+                .grammar
+                .as_ref()
+                .and_then(|pat| {
+                    crate::constraint::RegexConstraint::new(pat).map(|c| {
+                        std::sync::Arc::new(c)
+                            as std::sync::Arc<dyn crate::constraint::Constraint>
+                    })
+                })
+                .or_else(|| base.constraint.clone()),
+            max_context: base.max_context,
+            anchor_tokens: base.anchor_tokens,
+            stop: if self.stop.is_empty() {
+                base.stop.clone()
+            } else {
+                self.stop.clone()
+            },
+            seed: self.seed.or(base.seed),
+            repetition_penalty: self.repetition_penalty.unwrap_or(base.repetition_penalty),
+            presence_penalty: self.presence_penalty.unwrap_or(base.presence_penalty),
+            frequency_penalty: self.frequency_penalty.unwrap_or(base.frequency_penalty),
+            logit_bias: self
+                .logit_bias
+                .clone()
+                .unwrap_or_else(|| base.logit_bias.clone()),
+            cancel: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct ChatCompletionRequest {
+    #[serde(default)]
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    response_format: Option<ResponseFormat>,
+    #[serde(default)]
+    tools: Vec<Tool>,
+    /// Optional tool choice: "auto", "none", or {"type":"function","function":{"name":"..."}}
+    #[serde(default)]
+    tool_choice: Option<serde_json::Value>,
+    /// Whether to return log probabilities of the output tokens.
+    #[serde(default)]
+    logprobs: Option<bool>,
+    /// How many (0–20) top tokens to return per output position. Requires `logprobs: true`.
+    #[serde(default)]
+    top_logprobs: Option<u8>,
+    /// Optional JSON Schema object to validate generated output against.
+    #[serde(default)]
+    json_schema: Option<serde_json::Value>,
     /// How many chat completions to generate. Defaults to 1.
     #[serde(default)]
     n: Option<u32>,
@@ -160,6 +213,8 @@ pub(super) struct ChatCompletionRequest {
     #[serde(default)]
     #[allow(dead_code)]
     user: Option<String>,
+    #[serde(flatten)]
+    params: SamplingParams,
 }
 
 #[derive(Deserialize)]
@@ -310,46 +365,66 @@ pub(super) struct ChunkDelta {
     content: Option<String>,
 }
 
-pub(super) async fn chat_completion(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<ChatCompletionRequest>,
-) -> axum::response::Response {
-    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
-    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
-    let is_json_mode = req
-        .response_format
-        .as_ref()
-        .is_some_and(|rf| rf.format_type == "json_object");
-    let is_json_schema_mode = req
-        .response_format
-        .as_ref()
-        .is_some_and(|rf| rf.format_type == "json_schema");
-    let response_schema = req
-        .response_format
-        .as_ref()
-        .and_then(|rf| rf.json_schema.as_ref())
-        .and_then(|js| js.schema.clone());
-    let has_tools = !req.tools.is_empty();
-    let tool_choice_none = req
-        .tool_choice
-        .as_ref()
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| s == "none");
-    let tool_choice_required = req
-        .tool_choice
-        .as_ref()
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| s == "required");
-    let tool_choice_specific = req
-        .tool_choice
-        .as_ref()
-        .and_then(|v| v.get("function"))
-        .and_then(|f| f.get("name"))
-        .and_then(|n| n.as_str())
-        .map(|s| s.to_string());
-    let effective_has_tools = has_tools && !tool_choice_none;
-    let stream = req.stream;
+/// Request-derived flags for `/v1/chat/completions`: which structured-output
+/// modes and tool constraints apply.
+struct ChatFlags {
+    json_mode: bool,
+    json_schema_mode: bool,
+    response_schema: Option<serde_json::Value>,
+    has_tools: bool,
+    tool_choice_required: bool,
+    tool_choice_specific: Option<String>,
+}
 
+impl ChatFlags {
+    fn from_request(req: &ChatCompletionRequest) -> Self {
+        let json_mode = req
+            .response_format
+            .as_ref()
+            .is_some_and(|rf| rf.format_type == "json_object");
+        let json_schema_mode = req
+            .response_format
+            .as_ref()
+            .is_some_and(|rf| rf.format_type == "json_schema");
+        let response_schema = req
+            .response_format
+            .as_ref()
+            .and_then(|rf| rf.json_schema.as_ref())
+            .and_then(|js| js.schema.clone());
+        let tool_choice_none = req
+            .tool_choice
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == "none");
+        let tool_choice_required = req
+            .tool_choice
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == "required");
+        let tool_choice_specific = req
+            .tool_choice
+            .as_ref()
+            .and_then(|v| v.get("function"))
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string());
+        ChatFlags {
+            json_mode,
+            json_schema_mode,
+            response_schema,
+            has_tools: !req.tools.is_empty() && !tool_choice_none,
+            tool_choice_required,
+            tool_choice_specific,
+        }
+    }
+}
+
+/// Messages + injected system prompts (JSON mode, JSON schema, tool
+/// descriptions) ready for the chat template.
+fn templated_chat_messages(
+    req: &ChatCompletionRequest,
+    flags: &ChatFlags,
+) -> Vec<crate::chat_template::ChatMessage> {
     let mut messages: Vec<crate::chat_template::ChatMessage> = req
         .messages
         .iter()
@@ -359,15 +434,16 @@ pub(super) async fn chat_completion(
         })
         .collect();
 
-    if is_json_mode {
+    if flags.json_mode {
         messages.push(crate::chat_template::ChatMessage {
             role: "system".to_string(),
             content: "Respond with valid JSON only. Do not include any explanatory text before or after the JSON.".to_string(),
         });
     }
 
-    if is_json_schema_mode {
-        let schema_str = response_schema
+    if flags.json_schema_mode {
+        let schema_str = flags
+            .response_schema
             .as_ref()
             .map(|s| serde_json::to_string_pretty(s).unwrap_or_default())
             .unwrap_or_default();
@@ -380,15 +456,14 @@ pub(super) async fn chat_completion(
         });
     }
 
-    if effective_has_tools {
-        let tool_desc = build_tool_description(&req.tools);
-        let mut content = tool_desc;
-        if tool_choice_required {
+    if flags.has_tools {
+        let mut content = build_tool_description(&req.tools);
+        if flags.tool_choice_required {
             content.push_str(
                 "\nYou must call one of the available tools. Do not respond with text only.",
             );
         }
-        if let Some(ref name) = tool_choice_specific {
+        if let Some(ref name) = flags.tool_choice_specific {
             content.push_str(&format!(
                 "\nYou must call the tool named \"{}\". Do not call any other tool.",
                 name
@@ -400,51 +475,23 @@ pub(super) async fn chat_completion(
         });
     }
 
+    messages
+}
+
+pub(super) async fn chat_completion(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChatCompletionRequest>,
+) -> axum::response::Response {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+    let flags = ChatFlags::from_request(&req);
+    let stream = req.stream;
+
+    let messages = templated_chat_messages(&req, &flags);
     let prompt =
         crate::chat_template::apply_chat_template(state.chat_template.as_deref(), &messages);
 
-    let constraint = req
-        .grammar
-        .and_then(|pat| {
-            crate::constraint::RegexConstraint::new(&pat).map(|c| {
-                std::sync::Arc::new(c) as std::sync::Arc<dyn crate::constraint::Constraint>
-            })
-        })
-        .or_else(|| state.generation.constraint.clone());
-    let gen_cfg = crate::generate::GenerationConfig {
-        max_tokens: req
-            .max_completion_tokens
-            .or(req.max_tokens)
-            .unwrap_or(state.generation.max_tokens),
-        temperature: req.temperature.unwrap_or(state.generation.temperature),
-        top_p: req.top_p.unwrap_or(state.generation.top_p),
-        min_p: req.min_p.unwrap_or(state.generation.min_p),
-        gamma: state.generation.gamma,
-        use_int8_kv: state.generation.use_int8_kv,
-        use_mixed_kv: state.generation.use_mixed_kv,
-        constraint,
-        max_context: state.generation.max_context,
-        anchor_tokens: state.generation.anchor_tokens,
-        stop: if req.stop.is_empty() {
-            state.generation.stop.clone()
-        } else {
-            req.stop
-        },
-        seed: req.seed.or(state.generation.seed),
-        repetition_penalty: req
-            .repetition_penalty
-            .unwrap_or(state.generation.repetition_penalty),
-        presence_penalty: req
-            .presence_penalty
-            .unwrap_or(state.generation.presence_penalty),
-        frequency_penalty: req
-            .frequency_penalty
-            .unwrap_or(state.generation.frequency_penalty),
-        logit_bias: req
-            .logit_bias
-            .unwrap_or_else(|| state.generation.logit_bias.clone()),
-        cancel: None,
-    };
+    let gen_cfg = req.params.to_generation_config(&state.generation);
 
     let model_name = if req.model.is_empty() {
         state.name.clone()
@@ -472,48 +519,42 @@ pub(super) async fn chat_completion(
                 super::infer::run_text_inference_token_ids(&state_clone, &prompt, &gen_cfg);
             let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
             let prompt_ids = tokenizer.encode(&prompt);
-            let mut prev_text = String::new();
-            let mut first = true;
 
-            for (idx, &_token_id) in token_ids.iter().enumerate() {
-                let cumulative = [prompt_ids.as_slice(), &token_ids[..=idx]].concat();
-                let text = tokenizer.decode(&cumulative);
-                if let Some(delta) = text.strip_prefix(&prev_text) {
-                    if !delta.is_empty() {
-                        let chunk = ChatCompletionChunk {
-                            id: id.clone(),
-                            object: "chat.completion.chunk",
-                            created: unix_now(),
-                            model: model_name.clone(),
-                            choices: vec![ChunkChoice {
-                                index: 0,
-                                delta: ChunkDelta {
-                                    role: if first {
-                                        Some("assistant".to_string())
-                                    } else {
-                                        None
-                                    },
-                                    content: Some(delta.to_string()),
-                                },
-                                finish_reason: None,
-                            }],
-                            usage: None,
-                            system_fingerprint: Some(system_fingerprint()),
-                        };
-                        // If the client is gone, stop dripping (generation has already
-                        // been cancelled via the flag).
-                        if tx
-                            .send(Ok(
-                                Event::default().data(serde_json::to_string(&chunk).unwrap())
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        first = false;
-                    }
-                    prev_text = text;
+            for (i, delta) in tokenizer
+                .decode_deltas(&prompt_ids, &token_ids)
+                .into_iter()
+                .enumerate()
+            {
+                let chunk = ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created: unix_now(),
+                    model: model_name.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: ChunkDelta {
+                            role: if i == 0 {
+                                Some("assistant".to_string())
+                            } else {
+                                None
+                            },
+                            content: Some(delta),
+                        },
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: Some(system_fingerprint()),
+                };
+                // If the client is gone, stop dripping (generation has already
+                // been cancelled via the flag).
+                if tx
+                    .send(Ok(
+                        Event::default().data(serde_json::to_string(&chunk).unwrap())
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
 
@@ -605,8 +646,8 @@ pub(super) async fn chat_completion(
                     &gen_cfg,
                     3,
                 )
-            } else if is_json_schema_mode {
-                if let Some(ref schema) = response_schema {
+            } else if flags.json_schema_mode {
+                if let Some(ref schema) = flags.response_schema {
                     crate::json_schema::generate_with_schema(
                         |cfg| run_text_inference_with_config(&state, &prompt, cfg),
                         schema,
@@ -622,7 +663,7 @@ pub(super) async fn chat_completion(
             (text, None)
         };
 
-        let (message, finish_reason) = if effective_has_tools {
+        let (message, finish_reason) = if flags.has_tools {
             if let Some(tool_calls) = parse_tool_calls(&raw_output) {
                 (
                     ChatMessage {
@@ -634,7 +675,7 @@ pub(super) async fn chat_completion(
                     "tool_calls",
                 )
             } else {
-                let content = extract_content(&raw_output, is_json_mode);
+                let content = extract_content(&raw_output, flags.json_mode);
                 (
                     ChatMessage {
                         role: "assistant".to_string(),
@@ -646,7 +687,7 @@ pub(super) async fn chat_completion(
                 )
             }
         } else {
-            let content = extract_content(&raw_output, is_json_mode);
+            let content = extract_content(&raw_output, flags.json_mode);
             (
                 ChatMessage {
                     role: "assistant".to_string(),
@@ -766,46 +807,12 @@ pub(super) struct CompletionRequest {
     /// Prompt can be a single string or an array of strings (batch mode).
     #[serde(default)]
     prompt: PromptInput,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    /// Newer OpenAI parameter name for max_tokens (preferred if both given).
-    #[serde(default)]
-    max_completion_tokens: Option<usize>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    top_p: Option<f32>,
-    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
-    /// least `min_p` fraction of the max probability.
-    #[serde(default)]
-    min_p: Option<f32>,
     /// Whether to return log probabilities of the output tokens.
     #[serde(default)]
     logprobs: Option<bool>,
     /// How many (0–20) top tokens to return per output position. Requires `logprobs: true`.
     #[serde(default)]
     top_logprobs: Option<u8>,
-    /// Optional regex grammar constraint applied during sampling.
-    #[serde(default)]
-    grammar: Option<String>,
-    /// Optional stop sequences that halt generation.
-    #[serde(default)]
-    stop: Vec<String>,
-    /// Optional seed for reproducible sampling.
-    #[serde(default)]
-    seed: Option<u64>,
-    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
-    #[serde(default)]
-    repetition_penalty: Option<f32>,
-    /// OpenAI-style presence penalty. Positive values discourage token reuse.
-    #[serde(default)]
-    presence_penalty: Option<f32>,
-    /// OpenAI-style frequency penalty. Scales with token occurrence count.
-    #[serde(default)]
-    frequency_penalty: Option<f32>,
-    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
-    #[serde(default)]
-    logit_bias: Option<HashMap<u32, f32>>,
     /// Echo back the prompt in addition to the completion.
     #[serde(default)]
     echo: Option<bool>,
@@ -828,6 +835,8 @@ pub(super) struct CompletionRequest {
     user: Option<String>,
     #[serde(default)]
     stream: bool,
+    #[serde(flatten)]
+    params: SamplingParams,
 }
 
 #[derive(Serialize)]
@@ -877,49 +886,7 @@ pub(super) async fn completions(
     let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
     let _timer = super::metrics::InferenceTimer::new(&state.metrics);
     let stream = req.stream;
-
-    let constraint = req
-        .grammar
-        .and_then(|pat| {
-            crate::constraint::RegexConstraint::new(&pat).map(|c| {
-                std::sync::Arc::new(c) as std::sync::Arc<dyn crate::constraint::Constraint>
-            })
-        })
-        .or_else(|| state.generation.constraint.clone());
-    let gen_cfg = crate::generate::GenerationConfig {
-        max_tokens: req
-            .max_completion_tokens
-            .or(req.max_tokens)
-            .unwrap_or(state.generation.max_tokens),
-        temperature: req.temperature.unwrap_or(state.generation.temperature),
-        top_p: req.top_p.unwrap_or(state.generation.top_p),
-        min_p: req.min_p.unwrap_or(state.generation.min_p),
-        gamma: state.generation.gamma,
-        use_int8_kv: state.generation.use_int8_kv,
-        use_mixed_kv: state.generation.use_mixed_kv,
-        constraint,
-        max_context: state.generation.max_context,
-        anchor_tokens: state.generation.anchor_tokens,
-        stop: if req.stop.is_empty() {
-            state.generation.stop.clone()
-        } else {
-            req.stop
-        },
-        seed: req.seed.or(state.generation.seed),
-        repetition_penalty: req
-            .repetition_penalty
-            .unwrap_or(state.generation.repetition_penalty),
-        presence_penalty: req
-            .presence_penalty
-            .unwrap_or(state.generation.presence_penalty),
-        frequency_penalty: req
-            .frequency_penalty
-            .unwrap_or(state.generation.frequency_penalty),
-        logit_bias: req
-            .logit_bias
-            .unwrap_or_else(|| state.generation.logit_bias.clone()),
-        cancel: None,
-    };
+    let gen_cfg = req.params.to_generation_config(&state.generation);
 
     let model_name = if req.model.is_empty() {
         state.name.clone()
@@ -978,41 +945,28 @@ pub(super) async fn completions(
                 super::infer::run_text_inference_token_ids(&state_clone, &prompt_clone, &gen_cfg);
             let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
             let prompt_ids = tokenizer.encode(&prompt_clone);
-            let mut prev_text = if echo_prompt {
-                prompt_clone.clone()
-            } else {
-                String::new()
-            };
-
-            for (idx, &_token_id) in token_ids.iter().enumerate() {
-                let cumulative = [prompt_ids.as_slice(), &token_ids[..=idx]].concat();
-                let text = tokenizer.decode(&cumulative);
-                if let Some(delta) = text.strip_prefix(&prev_text) {
-                    if !delta.is_empty() {
-                        let chunk = CompletionChunk {
-                            id: id.clone(),
-                            object: "text_completion",
-                            created: unix_now(),
-                            model: model_name.clone(),
-                            choices: vec![CompletionChunkChoice {
-                                index: 0,
-                                text: delta.to_string(),
-                                finish_reason: None,
-                            }],
-                            usage: None,
-                            system_fingerprint: Some(system_fingerprint()),
-                        };
-                        if tx
-                            .send(Ok(
-                                Event::default().data(serde_json::to_string(&chunk).unwrap())
-                            ))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    prev_text = text;
+            for delta in tokenizer.decode_deltas(&prompt_ids, &token_ids) {
+                let chunk = CompletionChunk {
+                    id: id.clone(),
+                    object: "text_completion",
+                    created: unix_now(),
+                    model: model_name.clone(),
+                    choices: vec![CompletionChunkChoice {
+                        index: 0,
+                        text: delta,
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: Some(system_fingerprint()),
+                };
+                if tx
+                    .send(Ok(
+                        Event::default().data(serde_json::to_string(&chunk).unwrap())
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
 

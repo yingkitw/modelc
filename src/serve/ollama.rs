@@ -410,19 +410,13 @@ fn ndjson_stream(
 
         let token_ids = run_text_inference_token_ids(&state, &prompt, &cfg);
         let eval_ns = start.elapsed().as_nanos() as u64;
-        let mut prev = String::new();
-        for idx in 0..token_ids.len() {
-            let text = tokenizer.decode(&[prompt_ids.as_slice(), &token_ids[..=idx]].concat());
-            if let Some(delta) = text.strip_prefix(&prev) {
-                if !delta.is_empty()
-                    && tx
-                        .send(Ok(chunk_line(&model, &created, kind, delta, false, None)))
-                        .await
-                        .is_err()
-                {
-                    return;
-                }
-                prev = text;
+        for delta in tokenizer.decode_deltas(&prompt_ids, &token_ids) {
+            if tx
+                .send(Ok(chunk_line(&model, &created, kind, &delta, false, None)))
+                .await
+                .is_err()
+            {
+                return;
             }
         }
         let context: Vec<u32> = [prompt_ids.as_slice(), &token_ids].concat();

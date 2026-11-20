@@ -20,7 +20,7 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/kv_error.rs` | `KvError` + `CacheValidationError` + `KvResult` types — rich error context for KV cache operations (`KvLayer`/`KvCache` shift, quantization, dimension, capacity). |
 | `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers; auto architecture inference from tensor names; `QuantPreview` for `--quant-sizes`. |
 | `src/generate.rs` | Autoregressive text generation (`generate`, `generate_core`, `speculative_generate`), samplers (greedy/temperature/top-p/min-p), penalties (repetition/presence/frequency), logit bias, grammar constraint application, and cooperative cancellation (`GenerationConfig.cancel`). |
-| `src/tokenizer.rs` | Byte-level BPE tokenizer (encode/decode, greedy merge; `from_gguf`, `byte_fallback`). |
+| `src/tokenizer.rs` | Byte-level BPE tokenizer (encode/decode, greedy merge; `from_gguf`, `byte_fallback`, `decode_deltas` shared by all streaming endpoints). |
 | `src/chat_template.rs` | Chat message formatting (`role: content\n` fallback). Jinja2 templates are accepted for API stability but ignored — render complex prompts client-side. |
 | `src/constraint.rs` | Grammar-based constrained decoding (`Constraint` trait, `RegexConstraint` token masking). |
 | `src/json_schema.rs` | JSON-Schema-shaped generation validation (parse JSON + check top-level `type`, retry up to 3 times with increasing temperature). |

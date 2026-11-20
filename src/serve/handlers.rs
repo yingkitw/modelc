@@ -411,24 +411,16 @@ pub(super) async fn chat_stream(
         let token_ids = run_text_inference_token_ids(&state, &prompt, &gen_cfg);
         let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
         let prompt_ids = tokenizer.encode(&prompt);
-        let mut prev_text = String::new();
 
-        for (idx, &_token_id) in token_ids.iter().enumerate() {
-            let cumulative = [prompt_ids.as_slice(), &token_ids[..=idx]].concat();
-            let text = tokenizer.decode(&cumulative);
-            if let Some(delta) = text.strip_prefix(&prev_text) {
-                if !delta.is_empty() {
-                    let chunk = serde_json::to_string(&StreamChunk {
-                        delta: delta.to_string(),
-                        done: false,
-                    })
-                    .unwrap();
-                    // Stop dripping once the client is gone.
-                    if tx.send(Ok(Event::default().data(chunk))).await.is_err() {
-                        break;
-                    }
-                }
-                prev_text = text;
+        for delta in tokenizer.decode_deltas(&prompt_ids, &token_ids) {
+            let chunk = serde_json::to_string(&StreamChunk {
+                delta,
+                done: false,
+            })
+            .unwrap();
+            // Stop dripping once the client is gone.
+            if tx.send(Ok(Event::default().data(chunk))).await.is_err() {
+                break;
             }
         }
 

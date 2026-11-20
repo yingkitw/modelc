@@ -2117,10 +2117,12 @@ async fn run_server_serves_api_generate_streams_ndjson() {
     wait_for_server(&format!("{base}/info"));
 
     // Ollama defaults to streaming: omitting `stream` must yield NDJSON lines.
+    // A distinctive prompt guards the delta path: prompt text must never
+    // appear in `response` chunks (regression — deltas used to start with it).
     let resp = http::post(&format!("{base}/api/generate"))
         .content_type("application/json")
         .send(&serde_json::json!({
-            "prompt": "hi",
+            "prompt": "__prompt_marker_12345__",
             "options": { "num_predict": 3 }
         }).to_string())
         .expect("POST /api/generate");
@@ -2137,6 +2139,12 @@ async fn run_server_serves_api_generate_streams_ndjson() {
     for line in &lines[..lines.len() - 1] {
         assert_eq!(line["done"].as_bool(), Some(false), "intermediate done:false");
         assert!(line["response"].is_string(), "chunk response field");
+        assert!(
+            !line["response"]
+                .as_str()
+                .is_some_and(|s| s.contains("prompt_marker")),
+            "delta must not contain prompt text: {line}"
+        );
     }
     let last = lines.last().unwrap();
     assert_eq!(last["done"].as_bool(), Some(true), "final done:true");
