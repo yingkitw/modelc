@@ -48,28 +48,25 @@ fn matmul_cpu(a: &Tensor, b: &Tensor) -> Tensor {
         use rayon::prelude::*;
         out.par_chunks_exact_mut(n)
             .enumerate()
-            .for_each(|(i, row_out)| {
-                for (j, out_cell) in row_out.iter_mut().enumerate() {
-                    let mut sum = 0.0f32;
-                    for p in 0..k {
-                        sum += a.data[i * k + p] * b.data[p * n + j];
-                    }
-                    *out_cell = sum;
-                }
-            });
+            .for_each(|(i, row_out)| matmul_row(a, b, i, n, k, row_out));
     } else {
-        // Fallback scalar implementation
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = 0.0f32;
-                for p in 0..k {
-                    sum += a.data[i * k + p] * b.data[p * n + j];
-                }
-                out[i * n + j] = sum;
-            }
+        for (i, row_out) in out.chunks_exact_mut(n).enumerate() {
+            matmul_row(a, b, i, n, k, row_out);
         }
     }
     Tensor::from_vec(out, vec![m, n])
+}
+
+/// Compute one output row of `a @ b`: `out[j] = Σ_p a[i,p]·b[p,j]`.
+/// Shared by the rayon parallel path and the small-matrix serial fallback.
+fn matmul_row(a: &Tensor, b: &Tensor, i: usize, n: usize, k: usize, out: &mut [f32]) {
+    for (j, out_cell) in out.iter_mut().enumerate() {
+        let mut sum = 0.0f32;
+        for p in 0..k {
+            sum += a.data[i * k + p] * b.data[p * n + j];
+        }
+        *out_cell = sum;
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -137,7 +134,10 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
             return result;
         }
     }
+    add_cpu(a, b)
+}
 
+fn add_cpu(a: &Tensor, b: &Tensor) -> Tensor {
     if a.shape == b.shape {
         let data: Vec<f32> = a.data.iter().zip(&b.data).map(|(x, y)| x + y).collect();
         Tensor::from_vec(data, a.shape.clone())
@@ -151,7 +151,7 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
             .collect();
         Tensor::from_vec(data, a.shape.clone())
     } else if a.shape.len() == 1 && b.shape.len() == 2 && a.shape[0] == b.shape[1] {
-        add(b, a)
+        add_cpu(b, a)
     } else {
         panic!("add: incompatible shapes {:?} and {:?}", a.shape, b.shape);
     }
@@ -164,7 +164,10 @@ pub fn mul_scalar(a: &Tensor, s: f32) -> Tensor {
             return result;
         }
     }
+    mul_scalar_cpu(a, s)
+}
 
+fn mul_scalar_cpu(a: &Tensor, s: f32) -> Tensor {
     let data: Vec<f32> = a.data.iter().map(|x| x * s).collect();
     Tensor::from_vec(data, a.shape.clone())
 }
@@ -176,7 +179,10 @@ pub fn softmax(a: &Tensor, axis: usize) -> Tensor {
             return result;
         }
     }
+    softmax_cpu(a, axis)
+}
 
+fn softmax_cpu(a: &Tensor, axis: usize) -> Tensor {
     let rank = a.shape.len();
     assert!(axis < rank);
 
@@ -224,7 +230,10 @@ pub fn relu(a: &Tensor) -> Tensor {
             return result;
         }
     }
+    relu_cpu(a)
+}
 
+fn relu_cpu(a: &Tensor) -> Tensor {
     let data: Vec<f32> = a.data.iter().map(|x| x.max(0.0)).collect();
     Tensor::from_vec(data, a.shape.clone())
 }
@@ -238,7 +247,10 @@ pub fn layer_norm(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tenso
             return result;
         }
     }
+    layer_norm_cpu(a, weight, bias, eps)
+}
 
+fn layer_norm_cpu(a: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
     assert!(!a.shape.is_empty());
     let last_dim = *a.shape.last().unwrap();
     let n_elements = a.data.len();
@@ -271,4 +283,126 @@ pub fn linear(x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
         out = add(&out, b);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(data: &[f32], shape: &[usize]) -> Tensor {
+        Tensor::from_vec(data.to_vec(), shape.to_vec())
+    }
+
+    /// Reference result for `[[1,2,3],[4,5,6]] @ [[7,8,9,10],[11,12,13,14],[15,16,17,18]]`
+    /// = [[74,80,86,92],[173,188,203,218]].
+    fn matmul_fixture() -> (Tensor, Tensor, Vec<f32>) {
+        (
+            t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]),
+            t(
+                &[
+                    7.0, 8.0, 9.0, 10.0, //
+                    11.0, 12.0, 13.0, 14.0, //
+                    15.0, 16.0, 17.0, 18.0,
+                ],
+                &[3, 4],
+            ),
+            vec![74.0, 80.0, 86.0, 92.0, 173.0, 188.0, 203.0, 218.0],
+        )
+    }
+
+    #[test]
+    fn matmul_cpu_matches_reference() {
+        let (a, b, expected) = matmul_fixture();
+        let out = matmul_cpu(&a, &b);
+        assert_eq!(out.data, expected);
+    }
+
+    #[test]
+    fn matmul_row_kernel_matches_reference() {
+        let (a, b, expected) = matmul_fixture();
+        let mut out = vec![0.0f32; 4];
+        matmul_row(&a, &b, 1, 4, 3, &mut out);
+        assert_eq!(out, expected[4..]);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn matmul_neon_matches_reference() {
+        let (a, b, expected) = matmul_fixture();
+        let mut out = vec![0.0f32; 8];
+        unsafe { matmul_neon(&a, &b, &mut out) };
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn add_cpu_same_shape() {
+        let out = add_cpu(&t(&[1.0, 2.0, 3.0], &[3]), &t(&[10.0, 20.0, 30.0], &[3]));
+        assert_eq!(out.data, vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn add_cpu_broadcasts_1d_over_2d() {
+        // [1,2,3] broadcast over rows of [[1,1,1],[2,2,2]].
+        let out = add_cpu(
+            &t(&[1.0, 2.0, 3.0], &[3]),
+            &t(&[1.0, 1.0, 1.0, 2.0, 2.0, 2.0], &[2, 3]),
+        );
+        assert_eq!(out.data, vec![2.0, 3.0, 4.0, 3.0, 4.0, 5.0]);
+        assert_eq!(out.shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn add_cpu_broadcasts_row_vector_over_2d() {
+        // [[1,1,1],[2,2,2]] + [1,2,3] (the 2D+1D arm).
+        let out = add_cpu(
+            &t(&[1.0, 1.0, 1.0, 2.0, 2.0, 2.0], &[2, 3]),
+            &t(&[1.0, 2.0, 3.0], &[3]),
+        );
+        assert_eq!(out.data, vec![2.0, 3.0, 4.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "incompatible shapes")]
+    fn add_cpu_rejects_incompatible_shapes() {
+        let _ = add_cpu(&t(&[1.0; 4], &[4]), &t(&[1.0; 6], &[2, 3]));
+    }
+
+    #[test]
+    fn mul_scalar_cpu_scales() {
+        let out = mul_scalar_cpu(&t(&[1.0, -2.0, 0.5], &[3]), 4.0);
+        assert_eq!(out.data, vec![4.0, -8.0, 2.0]);
+    }
+
+    #[test]
+    fn softmax_cpu_last_axis_sums_to_one() {
+        let out = softmax_cpu(&t(&[1.0, 2.0, 3.0, 1.0, 1.0, 1.0], &[2, 3]), 1);
+        let sums: Vec<f32> = out.data.chunks(3).map(|r| r.iter().sum()).collect();
+        assert!(sums.iter().all(|s| (*s - 1.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn softmax_cpu_first_axis_normalizes_columns() {
+        // axis=0 on a 2×3 tensor exercises the outer/inner/stride layout.
+        // Output interleaves per-column softmax pairs: [c0d0, c0d1, c1d0, c1d1, …].
+        let out = softmax_cpu(&t(&[1.0, 2.0, 4.0, 3.0, 1.0, 0.0], &[2, 3]), 0);
+        for col in 0..3 {
+            let s = out.data[col * 2] + out.data[col * 2 + 1];
+            assert!((s - 1.0).abs() < 1e-5, "column {col} sum {s}");
+        }
+    }
+
+    #[test]
+    fn relu_cpu_clamps_negatives() {
+        let out = relu_cpu(&t(&[-1.0, 0.0, 2.0, -0.5], &[4]));
+        assert_eq!(out.data, vec![0.0, 0.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn layer_norm_cpu_normalizes_each_vector() {
+        let out = layer_norm_cpu(&t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), &t(&[1.0; 2], &[2]), &t(&[0.0; 2], &[2]), 1e-5);
+        for row in out.data.chunks(2) {
+            let mean = row.iter().sum::<f32>() / 2.0;
+            assert!(mean.abs() < 1e-5, "row mean {mean}");
+        }
+    }
 }
