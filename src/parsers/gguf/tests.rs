@@ -664,30 +664,110 @@ fn cursor_read_string_array_wrong_inner_type_errors() {
     assert!(c.read_string_array().is_err());
 }
 
+/// Encode a GGUF metadata array body: inner_type tag + u64 len + element payloads.
+fn kv_array_bytes(inner_type: u32, elements: &[Vec<u8>]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&inner_type.to_le_bytes());
+    b.extend_from_slice(&(elements.len() as u64).to_le_bytes());
+    for e in elements {
+        b.extend_from_slice(e);
+    }
+    b
+}
+
+fn gguf_str_bytes(s: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    b.extend_from_slice(s.as_bytes());
+    b
+}
+
 #[test]
 fn cursor_kv_array_summary_with_truncation() {
-    // read_kv_array_summary is private to cursor; covered indirectly via
-    // the GGUF parser roundtrip tests in this module.
+    // 33-element u8 array → 32 previewed + 1 consumed → "…(+1 omitted)".
+    let elems: Vec<Vec<u8>> = (0u8..33).map(|i| vec![i]).collect();
+    let bytes = kv_array_bytes(VAL_UINT8, &elems);
+    let mut c = Cursor::new(&bytes);
+    let summary = c.read_kv_value_formatted(VAL_ARRAY).unwrap();
+    assert!(summary.ends_with(",…(+1 omitted)]"), "got {summary}");
+    assert!(summary.starts_with("[0,1,2,"), "got {summary}");
 }
 
 #[test]
 fn cursor_kv_array_summary_short() {
-    // read_kv_array_summary is private but exercised via
-    // read_kv_value_formatted(VAL_ARRAY) for short arrays. Indirect
-    // coverage is sufficient.
+    let elems: Vec<Vec<u8>> = vec![7u32.to_le_bytes().to_vec(); 3];
+    let bytes = kv_array_bytes(VAL_UINT32, &elems);
+    let mut c = Cursor::new(&bytes);
+    assert_eq!(c.read_kv_value_formatted(VAL_ARRAY).unwrap(), "[7,7,7]");
 }
 
 #[test]
 fn cursor_kv_array_summary_eof_errors() {
-    // Indirect coverage via the existing parser roundtrip tests.
+    // Fewer than 12 bytes remaining → header can't be read.
+    let mut c = Cursor::new(&[0u8; 8]);
+    assert!(c.read_kv_value_formatted(VAL_ARRAY).is_err());
 }
 
 #[test]
 fn cursor_consume_kv_value_skips_string_array() {
-    // consume_kv_value is private but is exercised via the existing
-    // roundtrip tests in this module (read_kv_array_summary -> summary
-    // branch > preview -> consume_kv_value). Indirect coverage is
-    // sufficient; explicit unit test skipped to keep the API private.
+    // 33 strings → element 33 goes through consume_kv_value's VAL_STRING arm.
+    let elems: Vec<Vec<u8>> = (0..33).map(|i| gguf_str_bytes(&format!("s{i}"))).collect();
+    let bytes = kv_array_bytes(VAL_STRING, &elems);
+    let mut c = Cursor::new(&bytes);
+    let summary = c.read_kv_value_formatted(VAL_ARRAY).unwrap();
+    assert!(summary.contains("…(+1 omitted)"), "got {summary}");
+}
+
+#[test]
+fn cursor_consume_kv_value_covers_all_scalar_arms() {
+    // One 33-element array per scalar type → element 33 exercises that type's
+    // consume_kv_value arm.
+    let cases: &[(u32, Vec<u8>)] = &[
+        (VAL_UINT8, vec![9u8]),
+        (VAL_INT8, vec![(-9i8) as u8]),
+        (VAL_UINT16, 9u16.to_le_bytes().to_vec()),
+        (VAL_INT16, (-9i16).to_le_bytes().to_vec()),
+        (VAL_UINT32, 9u32.to_le_bytes().to_vec()),
+        (VAL_INT32, (-9i32).to_le_bytes().to_vec()),
+        (VAL_FLOAT32, 0.25f32.to_bits().to_le_bytes().to_vec()),
+        (VAL_BOOL, vec![1u8]),
+        (VAL_UINT64, 9u64.to_le_bytes().to_vec()),
+        (VAL_INT64, (-9i64).to_le_bytes().to_vec()),
+        (VAL_FLOAT64, 0.25f64.to_bits().to_le_bytes().to_vec()),
+    ];
+    for &(vt, ref elem) in cases {
+        let elems = vec![elem.clone(); 33];
+        let bytes = kv_array_bytes(vt, &elems);
+        let mut c = Cursor::new(&bytes);
+        let summary = c
+            .read_kv_value_formatted(VAL_ARRAY)
+            .unwrap_or_else(|e| panic!("type {vt}: {e}"));
+        assert!(summary.contains("…(+1 omitted)"), "type {vt}: {summary}");
+    }
+}
+
+#[test]
+fn cursor_consume_kv_value_nested_array_arm() {
+    // Outer array of 33 elements where each element is itself a 1-element
+    // u8 array → element 33 hits consume_kv_value's VAL_ARRAY arm.
+    let inner = kv_array_bytes(VAL_UINT8, &[vec![5u8]]);
+    let elems = vec![inner; 33];
+    let bytes = kv_array_bytes(VAL_ARRAY, &elems);
+    let mut c = Cursor::new(&bytes);
+    let summary = c.read_kv_value_formatted(VAL_ARRAY).unwrap();
+    assert!(summary.contains("[5]"), "got {summary}");
+    assert!(summary.contains("…(+1 omitted)"), "got {summary}");
+}
+
+#[test]
+fn cursor_read_string_array_rejects_impossible_count() {
+    // Claim 1M strings with almost no data — the pre-allocation guard must
+    // reject before Vec::with_capacity can attempt a giant alloc.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&VAL_STRING.to_le_bytes());
+    bytes.extend_from_slice(&(1_000_000u64).to_le_bytes());
+    let mut c = Cursor::new(&bytes);
+    assert!(c.read_string_array().is_err());
 }
 
 #[test]

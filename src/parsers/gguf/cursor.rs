@@ -96,6 +96,12 @@ impl<'a> Cursor<'a> {
         }
         let len_u = self.read_u64()?;
         let n = usize::try_from(len_u).map_err(|_| anyhow!("array length overflow"))?;
+        // Each element carries at least an 8-byte length header — reject counts that
+        // can't physically fit before allocating, so hostile lengths can't force a
+        // multi-GB `Vec::with_capacity`.
+        if n > self.remaining() / 8 {
+            anyhow::bail!("string array length {n} exceeds remaining input");
+        }
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             out.push(self.read_string()?);
