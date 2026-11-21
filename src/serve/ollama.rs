@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::infer::{run_text_inference_token_ids, run_text_inference_with_config};
+use super::infer::{
+    run_embeddings, run_text_inference_token_ids, run_text_inference_with_config,
+};
 use super::{AppState, CancelOnDrop, Message};
 use crate::generate::GenerationConfig;
 use crate::pack::ArtifactHeader;
@@ -526,6 +528,88 @@ pub(super) async fn api_chat(
         eval_duration: r.eval_ns,
     })
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// `/api/embed` + `/api/embeddings` — Ollama embedding endpoints
+// ---------------------------------------------------------------------------
+
+/// Ollama `/api/embed` request. `input` accepts a string or an array of
+/// strings; `truncate`, `options`, and `keep_alive` are ignored.
+#[derive(Deserialize)]
+pub struct OllamaEmbedRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub input: Value,
+}
+
+/// Legacy Ollama `/api/embeddings` request (single `prompt`).
+#[derive(Deserialize)]
+pub struct OllamaEmbeddingsRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub prompt: String,
+}
+
+/// Ollama `/api/embed` response shape.
+#[derive(Serialize)]
+pub struct OllamaEmbedResponse {
+    pub model: String,
+    pub embeddings: Vec<Vec<f32>>,
+    pub total_duration: u64,
+    pub load_duration: u64,
+    pub prompt_eval_count: usize,
+}
+
+/// Legacy `/api/embeddings` response shape.
+#[derive(Serialize)]
+pub struct OllamaEmbeddingsResponse {
+    pub embedding: Vec<f32>,
+}
+
+/// Byte-normalized input vector — the same encoding `/embeddings` uses.
+fn embed_input(text: &str) -> Vec<f32> {
+    text.bytes().map(|b| b as f32 / 255.0).collect()
+}
+
+pub(super) async fn api_embed(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OllamaEmbedRequest>,
+) -> Json<OllamaEmbedResponse> {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+    let start = Instant::now();
+    let inputs = stop_strings(&req.input);
+    let tokenizer = crate::tokenizer::BpeTokenizer::byte_fallback();
+    let mut prompt_eval_count = 0usize;
+    let embeddings: Vec<Vec<f32>> = inputs
+        .iter()
+        .map(|text| {
+            prompt_eval_count += tokenizer.encode(text).len();
+            run_embeddings(&state, &embed_input(text)).unwrap_or_default()
+        })
+        .collect();
+    Json(OllamaEmbedResponse {
+        model: req.model.unwrap_or_else(|| state.name.clone()),
+        embeddings,
+        total_duration: start.elapsed().as_nanos() as u64,
+        load_duration: 0,
+        prompt_eval_count,
+    })
+}
+
+pub(super) async fn api_embeddings(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OllamaEmbeddingsRequest>,
+) -> Json<OllamaEmbeddingsResponse> {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+    let _ = req.model; // single loaded artifact, like the other /api/* handlers
+    Json(OllamaEmbeddingsResponse {
+        embedding: run_embeddings(&state, &embed_input(&req.prompt)).unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]

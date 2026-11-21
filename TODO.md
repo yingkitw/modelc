@@ -1,6 +1,6 @@
 # TODO — Plan
 
-> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **252 inline unit tests** · **372 integration tests**.
+> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **252 inline unit tests** · **374 integration tests**.
 
 ### Scorecard history (continued)
 
@@ -24,6 +24,7 @@ Learnings ported back from **modelc-web** (the TS port + hosted store found real
 - [x] **`modelc diff <a> <b>`** — structural diff between two artifact headers (tensors added/removed/changed, architecture, params/size deltas, metadata diff), text or `--json`. Port of modelc-web `api/_diff.ts` → `src/diff.rs`.
 - [x] **sha256 digest plumbing** — `src/digest.rs` (streaming SHA-256 + RFC3339, stdlib-only, no new deps); `verify` prints `digest: sha256:<hex>` matching the store convention.
 - [x] **Ollama inference endpoints `/api/generate` + `/api/chat`** — discovery-only Ollama compat meant real clients could list models but not generate. Now: `options` sub-object maps onto `GenerationConfig` (`num_predict`→max_tokens, `repeat_penalty`→repetition_penalty, `num_ctx`→max_context, `stop` accepts string or array), `stream:false` returns full Ollama stats (`total_duration`, `eval_count`, `prompt_eval_count`, `context` token ids, `done_reason`), default `stream:true` emits **NDJSON** (Ollama's wire format — not SSE), and `format:"json"`/`{schema}` routes through `generate_with_schema`. `system`/`raw` honored on `/api/generate`. Covered by `run_server_serves_api_generate`, `run_server_serves_api_generate_streams_ndjson`, `run_server_serves_api_chat`.
+- [x] **Ollama embedding endpoints `/api/embed` + `/api/embeddings`** — completes the Ollama trio (discovery + generate + embed). `/api/embed` takes `input` as string or array (batch → one embedding per element), returns `{model, embeddings: [[f32]], total_duration, load_duration, prompt_eval_count}`. Legacy `/api/embeddings` takes `prompt` and returns the bare `{embedding: [f32]}` shape. Both reuse `run_embeddings` (final hidden state for transformer models). Covered by `run_server_serves_api_embed`, `run_server_serves_api_embeddings_legacy`.
 - [x] **Rust 2021 compat + `rust-version`** — `edition` downgraded to `2021` for older toolchains; all 44 let-chain sites (edition-2024 syntax) desugared to nested `if`s / `Option` combinators. `rust-version = "1.90"` verified via `cargo +1.90.0 check --all-targets`.
 - [x] **Self-improvement round-trip test** — `tests/roundtrip_alignment_test.rs`: each loop iteration packs weights → verifies → unpacks → runs `ops::linear` → applies a gradient step toward a code-defined spec. Asserts the artifact round-trip is lossless every cycle, weights evolve (digest changes), and loss decreases monotonically to <1e-4, on both compressed and uncompressed paths.
 

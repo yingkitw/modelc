@@ -216,6 +216,8 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `POST` | `/api/show` | **Ollama-ecosystem** model details (`{"model"}` or `{"name"}`; `model_info`, `capabilities`) |
 | `POST` | `/api/generate` | **Ollama-ecosystem** generation (`options`→sampling, `format`, NDJSON streaming) |
 | `POST` | `/api/chat` | **Ollama-ecosystem** chat generation (`messages`, `options`, NDJSON streaming) |
+| `POST` | `/api/embed` | **Ollama-ecosystem** embeddings (`input` string or array → `embeddings`, stats) |
+| `POST` | `/api/embeddings` | **Ollama-ecosystem** legacy embeddings (`prompt` → `embedding`) |
 | `GET` | `/v1/system` | CPU/GPU/memory/core info |
 | `GET` | `/v1/models` · `/v1/models/:id` | OpenAI model list / retrieval |
 | `POST` | `/infer` | Raw tensor inference (`input` or batch `inputs`) |

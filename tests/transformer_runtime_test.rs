@@ -2185,3 +2185,78 @@ async fn run_server_serves_api_chat() {
     assert!(val["eval_count"].is_number(), "eval_count present");
     assert!(val["prompt_eval_count"].as_u64().is_some_and(|n| n > 0));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_embed() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    // Ollama accepts a single string or an array on `input`.
+    let val = post_json(
+        &format!("{base}/api/embed"),
+        &serde_json::json!({ "model": "mini_gpt2", "input": "hello world" }),
+    );
+    let embeddings = val["embeddings"].as_array().expect("embeddings array");
+    assert_eq!(embeddings.len(), 1, "one embedding per input");
+    assert_eq!(embeddings[0].as_array().map(Vec::len), Some(GPT2_HIDDEN));
+    assert_eq!(val["model"], "mini_gpt2");
+    for key in ["total_duration", "load_duration", "prompt_eval_count"] {
+        assert!(val[key].is_number(), "{key} present");
+    }
+    assert!(val["prompt_eval_count"].as_u64().is_some_and(|n| n > 0));
+
+    // Batch input → one embedding per element, same hidden size.
+    let val = post_json(
+        &format!("{base}/api/embed"),
+        &serde_json::json!({ "input": ["alpha", "beta", "gamma"] }),
+    );
+    let embeddings = val["embeddings"].as_array().expect("batch embeddings");
+    assert_eq!(embeddings.len(), 3);
+    assert!(
+        embeddings
+            .iter()
+            .all(|e| e.as_array().map(Vec::len) == Some(GPT2_HIDDEN))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_api_embeddings_legacy() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    // Legacy Ollama endpoint: `prompt` in, bare `embedding` array out.
+    let val = post_json(
+        &format!("{base}/api/embeddings"),
+        &serde_json::json!({ "model": "mini_gpt2", "prompt": "legacy embed" }),
+    );
+    let embedding = val["embedding"].as_array().expect("legacy embedding array");
+    assert_eq!(embedding.len(), GPT2_HIDDEN);
+}
