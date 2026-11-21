@@ -1,6 +1,5 @@
 //! HTTP server for `modelc run` — loads a `.modelc` artifact and serves /info + /infer + /chat + /complete.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +9,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
 use tokio_stream::Stream;
 
 use crate::model::Model;
@@ -22,6 +20,10 @@ mod infer;
 mod metrics;
 mod ollama;
 mod openai;
+mod types;
+mod web_ui;
+
+use types::*;
 
 /// A `Stream` wrapper that sets a cancellation flag when dropped.
 ///
@@ -245,13 +247,13 @@ fn build_router(
 /// `AppState` to exercise handlers in isolation).
 pub fn build_router_from_state(state: std::sync::Arc<AppState>) -> Router {
     let router = Router::new()
-        .route("/", get(handlers::web_ui))
+        .route("/", get(web_ui::web_ui))
         .route("/infer", post(handlers::infer))
         .route("/info", get(handlers::model_info))
         .route("/props", get(handlers::server_props))
         .route("/api/version", get(handlers::version_info))
-        .route("/api/tags", get(handlers::api_tags))
-        .route("/api/show", post(handlers::api_show))
+        .route("/api/tags", get(ollama::api_tags))
+        .route("/api/show", post(ollama::api_show))
         .route("/api/generate", post(ollama::api_generate))
         .route("/api/chat", post(ollama::api_chat))
         .route("/api/embed", post(ollama::api_embed))
@@ -346,395 +348,6 @@ async fn backpressure_middleware(
 /// Maximum number of distinct prompt prefixes retained in the prefix cache.
 const PREFIX_CACHE_CAPACITY: usize = 32;
 
-#[derive(Deserialize)]
-struct InferRequest {
-    #[serde(default)]
-    input: Vec<f32>,
-    #[serde(default)]
-    inputs: Vec<Vec<f32>>,
-}
-
-#[derive(Deserialize)]
-struct LoraLoadRequest {
-    /// Absolute or relative path to a Safetensors LoRA adapter file.
-    path: String,
-    /// LoRA alpha scaling factor (default 1.0).
-    #[serde(default = "default_lora_alpha")]
-    alpha: f32,
-}
-
-fn default_lora_alpha() -> f32 {
-    1.0
-}
-
-#[derive(Serialize)]
-struct LoraLoadResponse {
-    applied: usize,
-    skipped: usize,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct LoraUnloadResponse {
-    message: String,
-}
-
-#[derive(Serialize)]
-struct InferResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<Vec<f32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    outputs: Option<Vec<Vec<f32>>>,
-}
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    model: String,
-    architecture: String,
-}
-
-#[derive(Serialize)]
-struct ModelInfo {
-    name: String,
-    architecture: String,
-    total_params: usize,
-    total_bytes: usize,
-    tensors: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct ServerProps {
-    model: String,
-    architecture: String,
-    total_params: usize,
-    total_bytes: usize,
-    chat_template: Option<String>,
-    default_generation: DefaultGenerationProps,
-}
-
-#[derive(Serialize)]
-struct DefaultGenerationProps {
-    max_tokens: usize,
-    temperature: f32,
-    top_p: f32,
-    min_p: f32,
-    repetition_penalty: f32,
-    presence_penalty: f32,
-    frequency_penalty: f32,
-    gamma: usize,
-}
-
-#[derive(Serialize)]
-struct VersionInfo {
-    version: String,
-    git_sha: String,
-}
-
-#[derive(Deserialize)]
-struct TokenizeRequest {
-    #[serde(default)]
-    input: String,
-    #[serde(default)]
-    inputs: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct TokenizeResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tokens: Option<Vec<u32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tokens_batch: Option<Vec<Vec<u32>>>,
-    /// Total number of tokens across all inputs.
-    count: usize,
-}
-
-#[derive(Deserialize)]
-struct DetokenizeRequest {
-    #[serde(default)]
-    tokens: Vec<u32>,
-}
-
-#[derive(Serialize)]
-struct DetokenizeResponse {
-    text: String,
-}
-
-/// System/hardware info exposed by `GET /v1/system`.
-#[derive(Serialize)]
-struct SystemInfo {
-    model: String,
-    architecture: String,
-    total_params: usize,
-    total_bytes: usize,
-    /// Logical CPU cores available to the process.
-    cpu_cores: usize,
-    /// Operating system name (e.g. "macos", "linux", "windows").
-    os: &'static str,
-    /// CPU architecture (e.g. "aarch64", "x86_64").
-    cpu_arch: &'static str,
-    /// Pointer width in bits (32 or 64).
-    pointer_width: usize,
-    /// Whether Apple Silicon Metal GPU acceleration is compiled in.
-    metal_available: bool,
-    /// Best-effort total physical memory in bytes (`null` if unavailable).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    memory_total_bytes: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingsRequest {
-    #[serde(default)]
-    input: String,
-    #[serde(default)]
-    inputs: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct EmbeddingEntry {
-    embedding: Vec<f32>,
-    index: usize,
-}
-
-#[derive(Serialize)]
-struct EmbeddingsResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    embedding: Option<Vec<f32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    embeddings: Option<Vec<EmbeddingEntry>>,
-    model: String,
-}
-
-#[derive(Deserialize)]
-struct RerankingRequest {
-    query: String,
-    documents: Vec<String>,
-    #[serde(default)]
-    top_n: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct RerankingResponse {
-    model: String,
-    results: Vec<RerankingResult>,
-}
-
-#[derive(Serialize)]
-struct RerankingResult {
-    index: usize,
-    relevance_score: f32,
-    document: Document,
-}
-
-#[derive(Serialize)]
-struct Document {
-    text: String,
-}
-
-/// `GET /api/tags` — Ollama-compatible model list.
-///
-/// Real Ollama clients parse `name`, `model`, `modified_at`, `size`, `digest`
-/// and `details.*` (see `serve/ollama.rs`). The extra modelc fields
-/// (`architecture`, `compressed`, `tensor_count`) are ignored by clients.
-#[derive(Serialize)]
-struct ApiTagsResponse {
-    models: Vec<ApiTag>,
-}
-
-#[derive(Serialize)]
-struct ApiTag {
-    name: String,
-    model: String,
-    modified_at: String,
-    size: u64,
-    digest: String,
-    details: OllamaDetails,
-    // modelc extras
-    architecture: String,
-    tensor_count: usize,
-    compressed: bool,
-}
-
-/// Ollama `details` block (same shape for `/api/tags` and `/api/show`).
-#[derive(Serialize)]
-struct OllamaDetails {
-    format: String,
-    family: String,
-    families: Vec<String>,
-    parameter_size: String,
-    quantization_level: String,
-}
-
-/// `POST /api/show` request — Ollama clients send `{"model": "..."}`, older
-/// tooling (and previous modelc versions) send `{"name": "..."}`; accept both.
-#[derive(Deserialize)]
-struct ApiShowRequest {
-    name: Option<String>,
-    model: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ApiShowResponse {
-    // Ollama schema
-    model: String,
-    modified_at: String,
-    size: u64,
-    digest: String,
-    details: OllamaDetails,
-    model_info: serde_json::Value,
-    capabilities: Vec<String>,
-    license: String,
-    modelfile: String,
-    parameters: String,
-    template: String,
-    // modelc extras
-    name: String,
-    architecture: String,
-    size_bytes: u64,
-    parameter_size: String,
-    quantization: String,
-    tensor_count: usize,
-}
-
-/// `GET /api/cache/stats` response.
-#[derive(Serialize)]
-struct CacheStatsResponse {
-    entries: usize,
-    capacity: usize,
-    total_tokens: usize,
-    total_kv_bytes: usize,
-    /// `entries / capacity`, in the closed interval `[0.0, 1.0]`.
-    utilization: f64,
-}
-
-#[derive(Deserialize)]
-struct ChatRequest {
-    messages: Vec<Message>,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    top_p: Option<f32>,
-    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
-    /// least `min_p` fraction of the max probability.
-    #[serde(default)]
-    min_p: Option<f32>,
-    /// Optional regex grammar constraint applied during sampling.
-    #[serde(default)]
-    grammar: Option<String>,
-    /// Optional JSON Schema object to validate generated output against.
-    #[serde(default)]
-    json_schema: Option<serde_json::Value>,
-    /// Optional stop sequences that halt generation.
-    #[serde(default)]
-    stop: Vec<String>,
-    /// Optional seed for reproducible sampling.
-    #[serde(default)]
-    seed: Option<u64>,
-    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
-    #[serde(default)]
-    repetition_penalty: Option<f32>,
-    /// OpenAI-style presence penalty. Positive values discourage token reuse.
-    #[serde(default)]
-    presence_penalty: Option<f32>,
-    /// OpenAI-style frequency penalty. Scales with token occurrence count.
-    #[serde(default)]
-    frequency_penalty: Option<f32>,
-    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
-    #[serde(default)]
-    logit_bias: Option<HashMap<u32, f32>>,
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ChatResponse {
-    message: Message,
-}
-
-#[derive(Deserialize)]
-struct CompleteRequest {
-    prompt: String,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    top_p: Option<f32>,
-    /// Optional min-p sampling threshold. Keeps tokens whose probability is at
-    /// least `min_p` fraction of the max probability.
-    #[serde(default)]
-    min_p: Option<f32>,
-    /// Optional regex grammar constraint applied during sampling.
-    #[serde(default)]
-    grammar: Option<String>,
-    /// Optional JSON Schema object to validate generated output against.
-    #[serde(default)]
-    json_schema: Option<serde_json::Value>,
-    /// Optional stop sequences that halt generation.
-    #[serde(default)]
-    stop: Vec<String>,
-    /// Optional seed for reproducible sampling.
-    #[serde(default)]
-    seed: Option<u64>,
-    /// Penalty for repeated tokens. Values > 1.0 discourage repetition.
-    #[serde(default)]
-    repetition_penalty: Option<f32>,
-    /// OpenAI-style presence penalty. Positive values discourage token reuse.
-    #[serde(default)]
-    presence_penalty: Option<f32>,
-    /// OpenAI-style frequency penalty. Scales with token occurrence count.
-    #[serde(default)]
-    frequency_penalty: Option<f32>,
-    /// OpenAI-style logit bias: map from token ID to additive bias (-100 to 100).
-    #[serde(default)]
-    logit_bias: Option<HashMap<u32, f32>>,
-}
-
-#[derive(Serialize)]
-struct CompleteResponse {
-    completion: String,
-}
-
-#[derive(Deserialize)]
-struct InfillRequest {
-    prefix: String,
-    suffix: String,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    top_p: Option<f32>,
-    #[serde(default)]
-    min_p: Option<f32>,
-    #[serde(default)]
-    seed: Option<u64>,
-    #[serde(default)]
-    repetition_penalty: Option<f32>,
-    #[serde(default)]
-    presence_penalty: Option<f32>,
-    #[serde(default)]
-    frequency_penalty: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct InfillResponse {
-    completion: String,
-}
-
-#[derive(Serialize)]
-struct StreamChunk {
-    delta: String,
-    done: bool,
-}
 
 fn infer_mlp_plan(model: &Model) -> Option<Vec<(String, String)>> {
     if model.architecture != "mlp" {

@@ -19,7 +19,7 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/arch.rs` | Shared architecture inspection (layers / hidden / heads) used by both runtime and codegen so the generated binary has the same view as `modelc run`. |
 | `src/kv_error.rs` | `KvError` + `CacheValidationError` + `KvResult` types — rich error context for KV cache operations (`KvLayer`/`KvCache` shift, quantization, dimension, capacity). |
 | `src/model.rs` | Canonical `Model`, `TensorData`, `DataType`; size helpers; auto architecture inference from tensor names; `QuantPreview` for `--quant-sizes`. |
-| `src/generate.rs` | Autoregressive text generation (`generate`, `generate_core`, `speculative_generate`), samplers (greedy/temperature/top-p/min-p), penalties (repetition/presence/frequency), logit bias, grammar constraint application, and cooperative cancellation (`GenerationConfig.cancel`). |
+| `src/generate.rs` | Autoregressive text generation (`generate`, `generate_core`), `GenerationConfig`, cooperative cancellation (`GenerationConfig.cancel`). `generate/sampling.rs` holds the samplers (greedy/temperature/top-p/min-p), penalties (repetition/presence/frequency), logit bias, and `MiniRng` seeded sampling; `generate/speculative.rs` holds `speculative_generate` + the n-gram draft machinery. |
 | `src/tokenizer.rs` | Byte-level BPE tokenizer (encode/decode, greedy merge; `from_gguf`, `byte_fallback`, `decode_deltas` shared by all streaming endpoints). |
 | `src/chat_template.rs` | Chat message formatting (`role: content\n` fallback). Jinja2 templates are accepted for API stability but ignored — render complex prompts client-side. |
 | `src/constraint.rs` | Grammar-based constrained decoding (`Constraint` trait, `RegexConstraint` token masking). |
@@ -35,16 +35,16 @@ The **packer** creates `.modelc` single-file artifacts with JSON header + compre
 | `src/lora.rs` | LoRA adapter loading and application on top of base model weights at runtime. |
 | `src/config.rs` | `~/.modelc/config.toml` loading and saving (bind, port, store path, compression). |
 | `src/parsers/` | Format parsers (`WeightParser` trait). Modularized by format. |
-| `src/parsers/gguf/` | `mod.rs` (parser), `cursor.rs` (byte-level I/O), `dequant.rs` (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K → F32). |
+| `src/parsers/gguf/` | `mod.rs` (parser), `cursor.rs` (byte-level I/O), `dequant.rs` (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K → F32), `tests.rs` (parser unit tests). |
 | `src/parsers/onnx/` | `mod.rs` (parser, execution plan building), `initializers.rs` (inline, external, segmented tensor loading). |
 | `src/parsers/safetensors.rs` | Safetensors parser (`safetensors` crate). |
 | `src/parsers/pytorch.rs` | PyTorch ZIP/Safetensors-in-ZIP parser. |
 | `src/onnx_exec/` | ONNX graph execution engine. `mod.rs` (plan builder, executor), `helpers.rs` (attribute getters, transpose, element-wise ops). |
 | `src/codegen/` | `CodeGenerator` trait; `native/` module emits standalone Rust server. |
 | `src/codegen/native/` | `mod.rs` (codegen entry, `generate_cargo_toml`, `generate_main_rs`, MLP plan detection), `forward.rs` (MLP/GPT2/LLaMA forward generation), `helpers.rs` (decode_f32, matmul_bias, relu_inplace). |
-| `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`, `gemv`); `transformer.rs` runs GPT-2/LLaMA forward passes + KV cache (`KvCache`/`KvLayer` FP32/INT8/Mixed, context shifting, anchor preservation). |
+| `src/runtime/` | Library tensor + ops scaffolding (`ops`, `serve`, `tensor`, `gemv`); `transformer.rs` runs GPT-2/LLaMA forward passes + attention helpers; `kv.rs` holds the KV cache (`KvCache`/`KvLayer` FP32/INT8/Mixed, context shifting, anchor preservation) re-exported through `transformer`. |
 | `src/runtime/gemv.rs` | Shared SIMD GEMV row dot-product (`gemv_dot`, NEON/AVX with scalar fallback). Compiled into `modelc` AND emitted verbatim into `modelc compile` binaries so `run` and `compile` produce bit-identical logits. |
-| `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `handlers.rs` (Axum endpoints incl. `/tokenize`, `/v1/system`, `/reranking`, `/` web UI, `/api/tags`, `/api/show`), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints), `ollama.rs` (Ollama ecosystem schema for `/api/tags` + `/api/show`, and the `/api/generate` + `/api/chat` inference endpoints — `options`→`GenerationConfig` mapping, NDJSON streaming), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
+| `src/serve/` | HTTP inference server. `mod.rs` (state, routing, `CancelOnDrop` cancellation wrapper), `types.rs` (native-API request/response DTOs), `web_ui.rs` (`GET /` page), `handlers.rs` (native Axum endpoints: `/infer`, `/chat`, `/complete`, `/tokenize`, `/reranking`, LoRA, `/api/cache/*`), `infer.rs` (ONNX/MLP/transformer inference + batched MLP), `openai.rs` (OpenAI-compatible endpoints; `openai/types.rs` holds its wire-schema DTOs), `ollama.rs` (all Ollama surface: `/api/tags`, `/api/show`, `/api/generate`, `/api/chat`, `/api/embed`, `/api/embeddings` — `options`→`GenerationConfig` mapping, NDJSON streaming), `auth.rs` (API key + rate-limit middleware), `metrics.rs` (Prometheus metrics). |
 | `src/metal.rs` | Apple Silicon Metal acceleration: matmul, relu, add, mul_scalar, softmax, layer_norm kernels (macOS only). |
 | `src/compute/` | Metal compute shaders (`shaders.metal`). |
 

@@ -338,9 +338,9 @@ src/
   parsers/          gguf/ onnx/ safetensors.rs pytorch.rs (WeightParser impls)
   onnx_exec/        ONNX graph execution engine
   codegen/native/   standalone-binary emitter (forward.rs, helpers.rs)
-  runtime/          tensor/ops/serve + transformer.rs (KV cache) + gemv.rs (shared SIMD)
-  serve/            axum server: handlers, infer, openai (v1/*), auth, metrics
-  generate.rs       autoregressive generation, samplers, speculative decoding
+  runtime/          tensor/ops/serve + transformer.rs + kv.rs (KV cache) + gemv.rs (shared SIMD)
+  serve/            axum server: handlers + types, web_ui, infer, openai(+types) (v1/*), ollama (api/*), auth, metrics
+  generate.rs       autoregressive generation (+ generate/sampling.rs samplers, generate/speculative.rs)
   tokenizer.rs      byte-level BPE tokenizer
   lora.rs prefix_cache.rs constraint.rs draft.rs  ...
 examples/           runnable cargo examples
