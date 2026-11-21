@@ -1,9 +1,21 @@
 # TODO — Plan
 
-> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **252 inline unit tests** · **374 integration tests**.
+> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **259 inline unit tests** · **386 integration tests**.
 
 ### Scorecard history (continued)
 
+- 2026-11-21 — **Correctness & coverage improved** (weakest-dimension pass targeting `generate/speculative.rs`). Changes:
+  - **Two real bugs found by the new tests, not just coverage**: (1) `speculative_generate` recomputed progress as `token_ids.len() - prompt_len`, but `context_shift` shrinks *both* sides — so with `max_context` smaller than the surviving context the generated count reset every shift → **infinite loop** (caught by a test that hung 15 min). Fixed by tracking a monotonic `generated` counter, mirroring the non-speculative loop. (2) The draft-accept loop could overshoot `max_tokens` by up to `gamma` tokens; added a `generated >= max_tokens` guard inside the verify loop.
+  - **+19 tests** (252 → 259 inline markers; 374 → 386 integration markers): 7 n-gram helper units in `speculative.rs` (`build_ngram_index`/`update_ngram_index`/`draft_tokens`/`most_frequent` incl. short-input and no-continuation edges) + 12 end-to-end in `prefix_cache_test.rs`/`transformer_runtime_test.rs` (n-gram draft parity, empty prompt, cache-hit restore, stop sequences, context shift w/ anchors, pre-tripped cancel; llama/MLP/ONNX/gamma serve paths).
+  - **Coverage result**: `speculative.rs` 61 → **92.7% lines** (100% fns); `serve/infer.rs` 64.5 → **89.5% lines** (+6 serve tests: llama /infer+/embeddings+/chat, gamma>0 speculative dispatch via `run_server` GenerationConfig, MLP single+batched /infer with profile logs, ONNX Identity plan + broken-plan echo fallback, logprobs on non-transformer). Project total 83.8 → **88.2% lines**. `runtime/ops.rs` 32% remains the only big gap — unreachable AVX/rayon paths on aarch64+NEON, needs a test-only CPU-path seam, deferred deliberately.
+- 2026-11-21 — **28 / 30** (post-modularization score). Dimensions:
+  - Correctness & coverage **4**: 621 pass / 5 ignored / 0 fail; llvm-cov 83.8% lines / 84.3% fns (was 86.0 — untested modules now weigh more). Weakest files: `runtime/ops.rs` 32%, `generate/speculative.rs` 61%, `parsers/gguf/cursor.rs` 59%, `serve/infer.rs` 67%.
+  - API fidelity **5**: OpenAI schema + complete Ollama surface (tags/show/generate/chat/embed/embeddings) + llama.cpp `/props`; parsers round-trip.
+  - Maintainability **4**: six files split along domain seams (see Implemented); clippy clean; largest file now `generate.rs` 1061; `ollama.rs` 840 is one cohesive domain; 7 `dead_code` allows all justified.
+  - Docs alignment **5**: `docs_sync` 4/4; all root docs synced to the new module layout.
+  - Wiring & ergonomics **5**: all 31 routes have integration tests; 17 subcommands; examples compile under `--all-targets`; public paths preserved via re-exports.
+  - Footprint **5**: 16 + `metal` deps, each feature-justified; zero new deps this series.
+  - **Weakest → fix next**: `runtime/ops.rs` at 32% — parallel/broadcast matmul and batched-linear paths are underexercised (see Scorecard follow-up).
 - 2026-11-20 — **29 / 30** (audit + weakest-dimension pass). Changes:
   - **API fidelity**: fixed a latent streaming bug found by the audit — all four streaming endpoints (`/chat/stream`, `/v1/chat/completions`, `/v1/completions`, `/api/generate`/`/api/chat`) emitted the full prompt text as the first delta (`prev` seeded `""`, so `strip_prefix` returned the whole cumulative decode). Extracted `BpeTokenizer::decode_deltas` which seeds from `decode(prefix_ids)` — deltas now contain generated text only, matching OpenAI/Ollama semantics. Regression test: `run_server_serves_api_generate_streams_ndjson` asserts prompt markers never appear in chunks.
   - **Maintainability**: `chat_completion` 373 → 246 lines, `completions` 279 → 230 — shared `SamplingParams` (serde-flattened into both request structs, identical JSON surface) + `to_generation_config` removed ~90 lines of duplicated field decls/gen_cfg literals; `ChatFlags::from_request` + `templated_chat_messages` extracted the structured-output/tool assembly. 4× duplicated decode-delta loops collapsed to `tokenizer.rs`. Remaining 4s: `generate.rs` (frozen, Mature Module Policy), openai.rs handlers still ~230 lines of distinct stream/response logic.
@@ -196,6 +208,12 @@ Per AGENTS.md Step 7 — evidence-based scoring across six dimensions (0–5 eac
   - **+20 onnx_exec tests** (16 integration `execute_plan` dispatch + 21 inline helpers tests): `onnx_exec/mod.rs` 57 % → higher, `onnx_exec/helpers.rs` 40 % → higher.
   - **+3 resize_to_hidden tests**: `serve/infer.rs` 51 % → 65 %.
   - Coverage rose 80.3 % → **84.0 %**; test counts 478 → **558** (212 inline + 346 integration). All 27 HTTP endpoints documented in SPEC.md/README.
+
+## Scorecard follow-up (Nov 2026)
+
+Each item below targets a single dimension that scored < 5 in the audit. Re-score after each fix lands.
+
+- [ ] **Coverage: `generate/speculative.rs` (61%) + `serve/infer.rs` (67%)** — Correctness & coverage: 4 → 5 candidate. Most testable gap: n-gram draft/verify branches in `speculative_generate` and the prefix-cache restore / logprob / resize paths in `infer.rs`. Add unit tests for `draft_tokens` edge cases (empty index, wrap-around context, gamma truncation) and endpoint-level tests covering speculative generation (`gamma > 0`) and prefix-cache hits on repeated prompts. Note: `runtime/ops.rs` at 32% is partly a **platform artifact** — `matmul_avx`, the rayon fallback, and scalar paths are unreachable on aarch64+NEON builds; raising it materially needs a test-only CPU-path bypass, deferred. Success criterion: `cargo llvm-cov --summary-only` back ≥ 85% lines, suite green.
 
 ## Scorecard follow-up (Sep 2026)
 

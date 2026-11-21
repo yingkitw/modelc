@@ -277,3 +277,231 @@ fn cancellation_flag_stops_generation() {
         ids.len()
     );
 }
+
+/// Speculative decoding (gamma > 0) with the built-in n-gram draft model must
+/// produce the same tokens as the non-speculative baseline — verified output
+/// is correct regardless of accept/reject interleaving.
+#[test]
+fn speculative_ngram_draft_matches_baseline() {
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+
+    // A prompt with repeated trigrams gives the n-gram index real drafts to
+    // propose (unlike "hello", whose short prompt yields an empty index).
+    let prompt = "a b c a b c a b c a b c";
+    let cfg = config(10);
+    let baseline = generate_token_ids(&runtime, "gpt2", hidden, &tokenizer, prompt, &cfg, None);
+
+    let spec_cfg = GenerationConfig {
+        gamma: 3,
+        ..cfg
+    };
+    let spec = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        prompt,
+        &spec_cfg,
+        None,
+        None, // no neural draft → n-gram draft index path
+    );
+
+    assert_eq!(
+        spec, baseline,
+        "speculative n-gram decoding must match non-speculative baseline"
+    );
+}
+
+/// An empty prompt must short-circuit to empty output (early return in
+/// `speculative_generate`) rather than running the draft/verify loop.
+#[test]
+fn speculative_empty_prompt_returns_empty() {
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+
+    let cfg = GenerationConfig {
+        gamma: 3,
+        ..config(8)
+    };
+    let ids = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        "",
+        &cfg,
+        None,
+        None,
+    );
+    assert!(ids.is_empty(), "empty prompt must yield no tokens");
+}
+
+/// A second speculative call over the same prompt must restore the cached
+/// prefix (the `cache_lookup` Some branch) and still match baseline.
+#[test]
+fn speculative_cache_hit_matches_baseline() {
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+    let prompt = "system: you are helpful. user: hello";
+    let cfg = GenerationConfig {
+        gamma: 2,
+        ..config(8)
+    };
+
+    let mut cache = PrefixCache::new(8);
+    let cold = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        prompt,
+        &cfg,
+        Some(&mut cache),
+        None,
+    );
+    let warm = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        prompt,
+        &cfg,
+        Some(&mut cache),
+        None,
+    );
+    assert_eq!(warm, cold, "cache-hit speculative output must match cold run");
+}
+
+/// A stop sequence hit inside the speculative loop must truncate output at the
+/// stop marker, exercising the check_stop_sequences branch in speculative.rs.
+#[test]
+fn speculative_honors_stop_sequences() {
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+    let prompt = "hello";
+
+    // Deterministic baseline to learn what the model will emit.
+    let baseline_ids =
+        generate_token_ids(&runtime, "gpt2", hidden, &tokenizer, prompt, &config(8), None);
+    let baseline_text = tokenizer.decode(&baseline_ids);
+    assert!(!baseline_text.is_empty(), "fixture must generate text");
+
+    // Stop on the first emitted character — output must truncate there.
+    let stop_str = baseline_text.chars().next().unwrap().to_string();
+    let cfg = GenerationConfig {
+        gamma: 2,
+        stop: vec![stop_str],
+        ..config(8)
+    };
+    let spec_ids = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        prompt,
+        &cfg,
+        None,
+        None,
+    );
+    let spec_text = tokenizer.decode(&spec_ids);
+    assert!(
+        !spec_text.contains(&cfg.stop[0]),
+        "output must not contain the stop sequence"
+    );
+    assert!(
+        spec_text.len() < baseline_text.len(),
+        "stop must truncate speculative output"
+    );
+}
+
+/// A small `max_context` forces `context_shift` inside the speculative loop.
+#[test]
+fn speculative_applies_context_shift() {
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+
+    let cfg = GenerationConfig {
+        gamma: 2,
+        max_context: Some(8),
+        anchor_tokens: 2,
+        ..config(12)
+    };
+    // Must not panic and must honor the token budget.
+    let ids = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        "a b c a b c a b c",
+        &cfg,
+        None,
+        None,
+    );
+    assert!(ids.len() <= 12, "max_tokens bound respected after shifts");
+}
+
+/// A pre-tripped cancellation flag must break the speculative loop before the
+/// first generated token.
+#[test]
+fn speculative_cancellation_stops_before_first_token() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let model = common::create_gpt2_test_model();
+    let runtime = Runtime::from_raw(&model.tensors);
+    let hidden = model
+        .metadata
+        .get("hidden")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(12);
+    let tokenizer = BpeTokenizer::byte_fallback();
+
+    let cancel = Arc::new(AtomicBool::new(true));
+    let cfg = GenerationConfig {
+        gamma: 2,
+        cancel: Some(cancel),
+        ..config(8)
+    };
+    let ids = generate_token_ids_with_cache(
+        &runtime,
+        "gpt2",
+        hidden,
+        &tokenizer,
+        "hello world",
+        &cfg,
+        None,
+        None,
+    );
+    assert!(ids.is_empty(), "cancelled generation must emit no tokens");
+}

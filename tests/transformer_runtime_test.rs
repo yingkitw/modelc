@@ -2260,3 +2260,276 @@ async fn run_server_serves_api_embeddings_legacy() {
     let embedding = val["embedding"].as_array().expect("legacy embedding array");
     assert_eq!(embedding.len(), GPT2_HIDDEN);
 }
+
+/// A model whose metadata carries an ONNX `ExecutionPlan` exercises the
+/// `onnx_plan` branch in `run_inference` / `run_text_inference_with_config`.
+fn create_onnx_plan_model(plan: modelc::onnx_exec::ExecutionPlan) -> modelc::model::Model {
+    use modelc::model::{DataType, Model, TensorData};
+    let mut tensors = std::collections::HashMap::new();
+    tensors.insert(
+        "w".to_string(),
+        TensorData {
+            shape: vec![4],
+            dtype: DataType::F32,
+            data: [1.0f32, 2.0, 3.0, 4.0]
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect(),
+        },
+    );
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "onnx.execution_plan".to_string(),
+        plan.to_json().expect("plan serializes"),
+    );
+    Model {
+        name: "onnx_test".to_string(),
+        architecture: "onnx".to_string(),
+        tensors,
+        metadata,
+    }
+}
+
+fn identity_plan() -> modelc::onnx_exec::ExecutionPlan {
+    modelc::onnx_exec::ExecutionPlan {
+        ops: vec![modelc::onnx_exec::Op {
+            op_type: "Identity".to_string(),
+            inputs: vec!["input".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs: std::collections::HashMap::new(),
+        }],
+        inputs: vec!["input".to_string()],
+        outputs: vec!["out".to_string()],
+    }
+}
+
+/// LLaMA models must take the `forward_llama` / `embed_llama` branches in
+/// `run_transformer` / `run_embeddings` and the llama filter in text paths.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_llama_infer_embed_and_chat() {
+    let model = common::create_llama_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/infer"),
+        &serde_json::json!({ "input": vec![0.1f32; LLAMA_HIDDEN] }),
+    );
+    assert_eq!(
+        val["output"].as_array().expect("output array").len(),
+        LLAMA_VOCAB,
+        "llama /infer must return vocab-sized logits"
+    );
+
+    let emb = post_json(
+        &format!("{base}/embeddings"),
+        &serde_json::json!({ "input": "hello" }),
+    );
+    assert!(
+        emb["embedding"].as_array().map(|e| !e.is_empty()).unwrap_or(false),
+        "llama /embeddings must return a vector"
+    );
+
+    let chat = post_json(
+        &format!("{base}/chat"),
+        &serde_json::json!({ "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4 }),
+    );
+    assert!(
+        chat["message"]["content"].is_string(),
+        "llama /chat must respond"
+    );
+}
+
+/// A server booted with `gamma > 0` routes every text request through
+/// `speculative_generate` — covering the n-gram draft dispatch in both
+/// `run_text_inference_with_config` and `run_text_inference_token_ids`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_speculative_gamma_generation() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig {
+                gamma: 2,
+                max_tokens: 8,
+                temperature: 0.0,
+                ..modelc::generate::GenerationConfig::default()
+            },
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let chat = post_json(
+        &format!("{base}/chat"),
+        &serde_json::json!({ "messages": [{"role": "user", "content": "a b c a b c a b"}], "max_tokens": 6 }),
+    );
+    assert!(chat["message"]["content"].is_string());
+
+    let comp = post_json(
+        &format!("{base}/complete"),
+        &serde_json::json!({ "prompt": "a b c a b c a b", "max_tokens": 6 }),
+    );
+    assert!(comp["completion"].is_string());
+}
+
+/// MLP models take the `mlp_plan` branch: single input through
+/// `run_mlp_forward` (with relu on intermediate layers) and `inputs` batches
+/// through `run_mlp_forward_batched`. `profile: true` covers the timing logs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_mlp_infer_single_and_batched() {
+    let model = common::create_large_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            true, // profile — covers the eprintln timing branches
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    // Single input → run_inference → mlp_plan → run_mlp_forward (relu on layer0).
+    let single = post_json(
+        &format!("{base}/infer"),
+        &serde_json::json!({ "inputs": [vec![0.5f32; 64]] }),
+    );
+    let outs = single["outputs"].as_array().expect("outputs array");
+    assert_eq!(outs.len(), 1);
+    assert_eq!(outs[0].as_array().unwrap().len(), 64);
+
+    // Batch of two → run_mlp_forward_batched.
+    let batch = post_json(
+        &format!("{base}/infer"),
+        &serde_json::json!({ "inputs": [vec![0.5f32; 64], vec![-0.5f32; 64]] }),
+    );
+    let outs = batch["outputs"].as_array().expect("batched outputs");
+    assert_eq!(outs.len(), 2);
+    assert!(
+        outs.iter().all(|o| o.as_array().unwrap().len() == 64),
+        "each batched output must be hidden-sized"
+    );
+}
+
+/// A model carrying an ONNX `ExecutionPlan` (Identity) must take the
+/// `onnx_plan` branch in `run_inference` — exercising `runtime_to_tensor_data`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_onnx_infer_identity() {
+    let model = create_onnx_plan_model(identity_plan());
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/infer"),
+        &serde_json::json!({ "input": vec![1.0f32, 2.0, 3.0, 4.0] }),
+    );
+    let out = val["output"].as_array().expect("onnx output");
+    assert_eq!(out.len(), 4, "identity plan returns bound input");
+}
+
+/// When ONNX execution fails (op references a missing tensor), the server must
+/// log and fall back — with no MLP plan or transformer dims that means echo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_onnx_failure_falls_back_to_echo() {
+    let broken = modelc::onnx_exec::ExecutionPlan {
+        ops: vec![modelc::onnx_exec::Op {
+            op_type: "Identity".to_string(),
+            inputs: vec!["missing_tensor".to_string()],
+            outputs: vec!["out".to_string()],
+            attrs: std::collections::HashMap::new(),
+        }],
+        inputs: vec!["input".to_string()],
+        outputs: vec!["out".to_string()],
+    };
+    let model = create_onnx_plan_model(broken);
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/infer"),
+        &serde_json::json!({ "input": vec![7.0f32, 8.0, 9.0] }),
+    );
+    let out = val["output"].as_array().expect("fallback output");
+    assert_eq!(out.len(), 3, "failed plan falls back to echo");
+}
+
+/// `logprobs` on a non-transformer model: `run_text_inference_with_logprobs`
+/// returns `None` and the endpoint falls back to the MLP text path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_logprobs_on_non_transformer() {
+    let model = common::create_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(
+            model,
+            addr,
+            false,
+            modelc::generate::GenerationConfig::default(),
+            None,
+            None,
+        )
+        .await;
+    });
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/v1/completions"),
+        &serde_json::json!({ "model": "test_model", "prompt": "ab", "logprobs": true, "max_tokens": 2 }),
+    );
+    let choices = val["choices"].as_array().expect("choices");
+    assert_eq!(choices.len(), 1, "mlp completions must still respond");
+}

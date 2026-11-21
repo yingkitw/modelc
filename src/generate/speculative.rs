@@ -41,6 +41,7 @@ pub(crate) fn speculative_generate(
 
     let n_layers = count_layers(runtime, architecture);
     let mut prompt_len = token_ids.len();
+    let mut generated = 0usize;
     let n = 3usize; // trigram
     let mut ngram_index = build_ngram_index(&token_ids, n);
 
@@ -64,7 +65,7 @@ pub(crate) fn speculative_generate(
         };
     }
 
-    while token_ids.len() - prompt_len < config.max_tokens {
+    while generated < config.max_tokens {
         if config.cancelled() {
             break;
         }
@@ -86,15 +87,15 @@ pub(crate) fn speculative_generate(
                 }
                 _ => break,
             };
-            let step = token_ids.len() - prompt_len;
             let next_token = sample_constrained(
                 logits.as_deref(),
                 config,
                 tokenizer,
                 &token_ids[prompt_len..],
-                step,
+                generated,
             );
             token_ids.push(next_token);
+            generated += 1;
             ngram_index = update_ngram_index(&ngram_index, &token_ids, n);
 
             if let Some(max_ctx) = config.max_context {
@@ -123,6 +124,9 @@ pub(crate) fn speculative_generate(
 
         let mut accepted = 0usize;
         for &draft_token in &draft {
+            if generated >= config.max_tokens {
+                break;
+            }
             let last_id = token_ids.last().copied().unwrap_or(0);
             let embedding = token_embedding(runtime, architecture, last_id, hidden);
             let logits = match architecture {
@@ -134,22 +138,23 @@ pub(crate) fn speculative_generate(
                 }
                 _ => break,
             };
-            let step = token_ids.len() - prompt_len;
             let next_token = sample_constrained(
                 logits.as_deref(),
                 config,
                 tokenizer,
                 &token_ids[prompt_len..],
-                step,
+                generated,
             );
             if next_token == draft_token {
                 token_ids.push(draft_token);
+                generated += 1;
                 accepted += 1;
                 if tokenizer.vocab_size() > 0 && draft_token as usize >= tokenizer.vocab_size() {
                     break;
                 }
             } else {
                 token_ids.push(next_token);
+                generated += 1;
                 break;
             }
         }
@@ -177,7 +182,7 @@ pub(crate) fn speculative_generate(
         }
 
         // Stop if we've hit max tokens or an out-of-vocab token was emitted.
-        if token_ids.len() - prompt_len >= config.max_tokens {
+        if generated >= config.max_tokens {
             break;
         }
         if accepted < draft.len()
@@ -267,4 +272,65 @@ pub(super) fn most_frequent(xs: &[u32]) -> u32 {
         .max_by_key(|&(_, c)| c)
         .map(|(v, _)| v)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_ngram_index_maps_trigrams_to_continuations() {
+        // Tokens 1,2,3,1,2,3 → trigram (1,2,3) is followed by 1; (2,3,1) by 2; (3,1,2) by 3.
+        let index = build_ngram_index(&[1, 2, 3, 1, 2, 3], 3);
+        assert_eq!(index.get(&vec![1, 2, 3]), Some(&vec![1]));
+        assert_eq!(index.get(&vec![2, 3, 1]), Some(&vec![2]));
+        assert_eq!(index.get(&vec![3, 1, 2]), Some(&vec![3]));
+    }
+
+    #[test]
+    fn build_ngram_index_empty_when_too_short() {
+        // Fewer than n+1 tokens can't form a complete window.
+        assert!(build_ngram_index(&[1, 2, 3], 3).is_empty());
+        assert!(build_ngram_index(&[], 3).is_empty());
+    }
+
+    #[test]
+    fn update_ngram_index_adds_only_newest_window() {
+        let index = build_ngram_index(&[1, 2, 3, 1], 3);
+        // Appending 2 creates the new tail window (2,3,1)→2.
+        let updated = update_ngram_index(&index, &[1, 2, 3, 1, 2], 3);
+        assert_eq!(updated.get(&vec![2, 3, 1]), Some(&vec![2]));
+        // Older entries untouched.
+        assert_eq!(updated.get(&vec![1, 2, 3]), Some(&vec![1]));
+    }
+
+    #[test]
+    fn update_ngram_index_noop_on_short_tokens() {
+        let index = build_ngram_index(&[1, 2, 3, 1], 3);
+        let updated = update_ngram_index(&index, &[9, 9], 3);
+        assert_eq!(updated, index);
+    }
+
+    #[test]
+    fn draft_tokens_follows_continuation_chain() {
+        // Repeated "a b c" pattern: index maps trigrams so drafting chains.
+        let tokens = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let index = build_ngram_index(&tokens, 3);
+        let draft = draft_tokens(&index, &tokens, 3, 4);
+        // Last trigram is (1,2,3) → most frequent continuation is 1, then (2,3,1)→2, …
+        assert_eq!(draft, vec![1, 2, 3, 1]);
+    }
+
+    #[test]
+    fn draft_tokens_empty_when_no_continuation() {
+        let index = build_ngram_index(&[1, 2, 3, 1], 3);
+        // Tail trigram (4,5,6) never seen → no draft.
+        assert!(draft_tokens(&index, &[4, 5, 6], 3, 3).is_empty());
+    }
+
+    #[test]
+    fn most_frequent_picks_majority() {
+        assert_eq!(most_frequent(&[7, 7, 3, 7, 3]), 7);
+        assert_eq!(most_frequent(&[]), 0);
+    }
 }
