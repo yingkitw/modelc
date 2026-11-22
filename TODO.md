@@ -211,6 +211,10 @@ Per AGENTS.md Step 7 — evidence-based scoring across six dimensions (0–5 eac
   - **+3 resize_to_hidden tests**: `serve/infer.rs` 51 % → 65 %.
   - Coverage rose 80.3 % → **84.0 %**; test counts 478 → **558** (212 inline + 346 integration). All 27 HTTP endpoints documented in SPEC.md/README.
 
+## Next up (candidate fixes)
+
+- [ ] **`inspect model.modelc` cannot work** — README line 152 documents `modelc inspect model.modelc --readme`, but `WeightFormat::detect` only recognizes weight files (safetensors/gguf/onnx/pytorch), so inspecting a `.modelc` artifact fails with "could not detect weight format". Either add `.modelc` support to the detect path (read the MODELC magic, parse the header) or fix the README/docs. Discovered by modelc-web's doc audit — the web's commands page copied the claim. Verified against HEAD (2026-11-21).
+
 ## Scorecard follow-up (Nov 2026)
 
 Each item below targets a single dimension that scored < 5 in the audit. Re-score after each fix lands.
