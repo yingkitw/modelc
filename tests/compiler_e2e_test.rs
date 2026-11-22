@@ -99,6 +99,35 @@ fn test_inspect_detect_format() {
     assert!(result.is_ok());
 }
 
+/// The documented flow: pack a model, then inspect the artifact itself.
+/// `inspect model.modelc` used to fail with "could not detect weight format".
+#[test]
+fn test_inspect_packed_artifact_round_trip() {
+    let dir = common::tempdir().unwrap();
+    let src = dir.path().join("round_trip.safetensors");
+    let w = common::f32_to_bytes(&[0.5, -0.25, 0.75, 1.0, 2.0, -1.0, 0.0, 3.0]);
+    common::create_safetensors_file(&src, vec![("layer1.weight", "F32", vec![2, 4], w)]);
+
+    let artifact = dir.path().join("round_trip.modelc");
+    compiler::pack(&src, Some(&artifact), Some(&WeightFormat::Safetensors), None, false, None, None)
+        .unwrap();
+    assert!(artifact.exists());
+
+    // The artifact unpacks through the same path inspect now takes.
+    let model = compiler::inspect_model(&artifact, None).unwrap();
+    assert_eq!(model.architecture, "mlp");
+    assert_eq!(model.tensors.len(), 1);
+    assert!(model.tensors.contains_key("layer1.weight"));
+
+    // The printing path succeeds too — and without a stale double-detect.
+    let printed = compiler::inspect(&artifact, None);
+    assert!(printed.is_ok());
+
+    // The --readme path is inspect_model + dequantize + print — same route.
+    let mut card_model = compiler::inspect_model(&artifact, None).unwrap();
+    card_model.dequantize_in_place();
+}
+
 #[test]
 fn test_inspect_nonexistent() {
     let result = compiler::inspect(std::path::Path::new("/nonexistent.safetensors"), None);

@@ -296,6 +296,13 @@ pub fn pack(
 
 /// Parse a model file and return the [`Model`] for programmatic inspection.
 pub fn inspect_model(input: &Path, format: Option<&WeightFormat>) -> Result<Model> {
+    // `.modelc` artifacts are the CLI's own container — unpack handles the
+    // version/flags/decompression. WeightFormat::detect only reads weight
+    // files, which is why `inspect model.modelc` used to fail.
+    if format.is_none() && crate::pack::is_artifact(input) {
+        return crate::pack::unpack(input);
+    }
+
     let weight_format = format
         .cloned()
         .or_else(|| WeightFormat::detect(input))
@@ -310,16 +317,21 @@ pub fn inspect_model(input: &Path, format: Option<&WeightFormat>) -> Result<Mode
 }
 
 pub fn inspect(input: &Path, format: Option<&WeightFormat>) -> Result<()> {
+    let artifact = format.is_none() && crate::pack::is_artifact(input);
     let model = inspect_model(input, format)?;
-    let weight_format = format
-        .cloned()
-        .or_else(|| WeightFormat::detect(input))
-        .context("could not detect weight format; specify with -f/--format")?;
-    let parser = get_parser(&weight_format);
+    let format_name = if artifact {
+        "modelc (artifact)".to_string()
+    } else {
+        let weight_format = format
+            .cloned()
+            .or_else(|| WeightFormat::detect(input))
+            .context("could not detect weight format; specify with -f/--format")?;
+        get_parser(&weight_format).format_name().to_string()
+    };
 
     println!("Model: {}", model.name);
     println!("Architecture: {}", model.architecture);
-    println!("Format: {}", parser.format_name());
+    println!("Format: {}", format_name);
     println!(
         "Total parameters: {} ({:.2}M)",
         model.total_params(),

@@ -1,8 +1,10 @@
 # TODO — Plan
 
-> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **274 inline unit tests** · **386 integration tests**.
+> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **274 inline unit tests** · **387 integration tests**.
 
 ### Scorecard history (continued)
+
+- 2026-11-21 — **inspect .modelc fixed** — the README-documented `inspect model.modelc --readme` could not work (`WeightFormat::detect` reads weight files only). `inspect_model` now routes `.modelc` artifacts through `pack::unpack` (magic-checked by `pack::is_artifact`, fail-closed on explicit `-f` overrides), `inspect` prints `Format: modelc (artifact)`, and the --readme path shares the route. Round-trip test: pack → inspect_model → architecture/tensors → inspect prints → readme dequant path. Integration marker 386 → 387. Verified end-to-end with the built binary: pack → `inspect /tmp/e2e.modelc` prints `Format: modelc (artifact)` with the tensor table; `--readme` shares the route. **web note**: the released 0.1.12 still has the old behavior — modelc-web's commands page says `model.safetensors` until the next crates.io release.
 
 - 2026-11-21 — **Correctness & coverage improved** (weakest-dimension pass targeting `generate/speculative.rs`). Changes:
   - **Two real bugs found by the new tests, not just coverage**: (1) `speculative_generate` recomputed progress as `token_ids.len() - prompt_len`, but `context_shift` shrinks *both* sides — so with `max_context` smaller than the surviving context the generated count reset every shift → **infinite loop** (caught by a test that hung 15 min). Fixed by tracking a monotonic `generated` counter, mirroring the non-speculative loop. (2) The draft-accept loop could overshoot `max_tokens` by up to `gamma` tokens; added a `generated >= max_tokens` guard inside the verify loop.

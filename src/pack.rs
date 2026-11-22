@@ -144,6 +144,18 @@ pub fn read_header(path: &Path) -> Result<ArtifactHeader> {
     Ok(header)
 }
 
+/// True when the file starts with the `.modelc` magic bytes — the cheap check
+/// that lets commands like `inspect` accept their own packed artifacts.
+pub fn is_artifact(path: &Path) -> bool {
+    (|| -> std::io::Result<bool> {
+        let mut file = std::fs::File::open(path)?;
+        let mut magic = [0u8; 6];
+        std::io::Read::read_exact(&mut file, &mut magic)?;
+        Ok(magic == MAGIC)
+    })()
+    .unwrap_or(false)
+}
+
 /// Unpack a `.modelc` artifact file into a [`Model`].
 pub fn unpack(path: &Path) -> Result<Model> {
     let mut file = std::fs::File::open(path)
