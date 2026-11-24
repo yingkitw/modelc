@@ -24,6 +24,47 @@ fn get_parser(format: &WeightFormat) -> Box<dyn WeightParser> {
     }
 }
 
+/// A `.py` input, bridged into a temporary Safetensors weights file.
+/// The temp dir is dropped when this value is, after parsing is done.
+struct BridgedPython {
+    weights: PathBuf,
+    _temp: crate::tempdir::TempDir,
+}
+
+/// A Python program is not a weight file — it is executed. When `input` ends in
+/// `.py`, run the [`crate::pybridge`] (embedded driver + system Python) to extract
+/// its tensors into a temporary Safetensors file, which then flows through the
+/// normal detect/parse path. `--format` is meaningless here and rejected.
+fn maybe_bridge_python(
+    input: &Path,
+    format: Option<&WeightFormat>,
+) -> Result<Option<BridgedPython>> {
+    if input.extension().and_then(|e| e.to_str()) != Some("py") {
+        return Ok(None);
+    }
+    if format.is_some() {
+        anyhow::bail!(
+            "--format cannot be combined with a Python program; {:?} is executed \
+             to extract weights and always yields Safetensors",
+            input
+        );
+    }
+    eprintln!(
+        "modelc: executing {} via the python bridge to extract weights...",
+        input.display()
+    );
+    let temp = crate::tempdir::tempdir().context("failed to create temp dir")?;
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("model");
+    let weights = temp.path().join(format!("{stem}.safetensors"));
+    crate::pybridge::python_to_safetensors(input, &weights)
+        .with_context(|| format!("failed to extract weights from {}", input.display()))?;
+    Ok(Some(BridgedPython { weights, _temp: temp }))
+}
+
 pub fn compile(
     input: &Path,
     output: Option<&Path>,
@@ -33,18 +74,21 @@ pub fn compile(
     target: Option<&str>,
     release: bool,
 ) -> Result<PathBuf> {
+    let bridged = maybe_bridge_python(input, format)?;
+    let parse_input = bridged.as_ref().map(|b| b.weights.as_path()).unwrap_or(input);
+
     let weight_format = format
         .cloned()
-        .or_else(|| WeightFormat::detect(input))
+        .or_else(|| WeightFormat::detect(parse_input))
         .context("could not detect weight format; specify with -f/--format")?;
 
-    eprintln!("modelc: parsing {:?} ({:?})...", input, weight_format);
+    eprintln!("modelc: parsing {:?} ({:?})...", parse_input, weight_format);
     let start = Instant::now();
 
     let parser = get_parser(&weight_format);
     let mut model = parser
-        .parse(input)
-        .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
+        .parse(parse_input)
+        .with_context(|| format!("failed to parse {:?} as {}", parse_input, parser.format_name()))?;
 
     apply_arch_hint(&mut model, arch);
 
@@ -147,15 +191,18 @@ pub fn pack(
     quantize: Option<&QuantizeMode>,
     prune: Option<f32>,
 ) -> Result<PathBuf> {
+    let bridged = maybe_bridge_python(input, format)?;
+    let parse_input = bridged.as_ref().map(|b| b.weights.as_path()).unwrap_or(input);
+
     let weight_format = format
         .cloned()
-        .or_else(|| WeightFormat::detect(input))
+        .or_else(|| WeightFormat::detect(parse_input))
         .context("could not detect weight format; specify with -f/--format")?;
 
     let parser = get_parser(&weight_format);
     let mut model = parser
-        .parse(input)
-        .with_context(|| format!("failed to parse {:?} as {}", input, parser.format_name()))?;
+        .parse(parse_input)
+        .with_context(|| format!("failed to parse {:?} as {}", parse_input, parser.format_name()))?;
 
     apply_arch_hint(&mut model, arch);
 

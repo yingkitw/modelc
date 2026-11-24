@@ -26,7 +26,10 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "Compile a model to a standalone executable")]
     Compile {
-        #[arg(help = "Path to model weights file", value_hint = ValueHint::FilePath)]
+        #[arg(
+            help = "Path to model weights file (.safetensors/.gguf/.onnx/.pt/.py)",
+            value_hint = ValueHint::FilePath
+        )]
         input: PathBuf,
 
         #[arg(short, long, help = "Output binary path", value_hint = ValueHint::FilePath)]
@@ -95,7 +98,10 @@ pub enum Commands {
 
     #[command(about = "Pack model weights into a single .modelc artifact")]
     Pack {
-        #[arg(help = "Path to model weights file", value_hint = ValueHint::FilePath)]
+        #[arg(
+            help = "Path to model weights file (.safetensors/.gguf/.onnx/.pt/.py)",
+            value_hint = ValueHint::FilePath
+        )]
         input: PathBuf,
 
         #[arg(short, long, help = "Output artifact path", value_hint = ValueHint::FilePath)]

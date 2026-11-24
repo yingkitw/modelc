@@ -19,6 +19,7 @@ pub mod onnx_exec;
 pub mod pack;
 pub mod parsers;
 pub mod prefix_cache;
+pub mod pybridge;
 pub mod runtime;
 pub mod serve;
 pub mod store;
