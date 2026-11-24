@@ -1,6 +1,6 @@
 # TODO — Plan
 
-> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **304 inline unit tests** · **392 integration tests**.
+> Test counts are enforced by `tests/docs_sync.rs` — the markers must match what `cargo test` reports (the "running N tests" total per binary). Currently: **326 inline unit tests** · **405 integration tests**.
 
 ### Scorecard history (continued)
 

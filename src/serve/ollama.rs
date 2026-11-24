@@ -825,6 +825,7 @@ mod tests {
         assert_eq!(ollama_file_type("int4"), 2);
         assert_eq!(ollama_file_type("q8_0"), 7);
         assert_eq!(ollama_file_type("q6_k"), 12);
+        assert_eq!(ollama_file_type("exotic"), 0, "unknown label → table fallback 0");
     }
 
     #[test]

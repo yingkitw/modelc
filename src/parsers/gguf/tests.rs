@@ -7,6 +7,17 @@ use crate::tempdir::tempfile;
 
 #[test]
 fn roundtrip_minimal_gguf_f32() -> Result<()> {
+    let buf = minimal_f32_gguf();
+    let m = parse_gguf_bytes(&buf, Path::new("fixture.gguf"))?;
+    assert_eq!(m.architecture, "gpt2");
+    assert_eq!(m.tensors.len(), 1);
+    assert_eq!(m.tensors["w"].data, [11.3f32, 11.4f32].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>());
+    Ok(())
+}
+
+/// A one-tensor F32 GGUF with `general.architecture = "gpt2"` — reused by the
+/// trait-path and error-path tests below.
+fn minimal_f32_gguf() -> Vec<u8> {
     let kv_count: u64 = 1;
     let tensor_count: u64 = 1;
 
@@ -52,12 +63,7 @@ fn roundtrip_minimal_gguf_f32() -> Result<()> {
         .flat_map(|f| f.to_le_bytes())
         .collect();
     buf.extend_from_slice(&bytes);
-
-    let m = parse_gguf_bytes(&buf, Path::new("fixture.gguf"))?;
-    assert_eq!(m.architecture, "gpt2");
-    assert_eq!(m.tensors.len(), 1);
-    assert_eq!(m.tensors["w"].data, bytes);
-    Ok(())
+    buf
 }
 
 #[test]
@@ -776,3 +782,225 @@ fn cursor_read_i16_roundtrip() {
     let mut c = Cursor::new(&bytes);
     assert_eq!(c.read_i16().unwrap(), -1);
 }
+
+// ---- Parser entry + error paths (gguf/mod.rs) ----
+
+/// Assemble a GGUF file from raw blocks (kv entries, tensor infos, blob).
+fn gguf_bytes(
+    kv_block: &[u8],
+    kv_count: u64,
+    ti: &[u8],
+    tensor_count: u64,
+    blob: &[u8],
+    alignment: usize,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"GGUF");
+    buf.extend_from_slice(&3u32.to_le_bytes());
+    buf.extend_from_slice(&tensor_count.to_le_bytes());
+    buf.extend_from_slice(&kv_count.to_le_bytes());
+    buf.extend_from_slice(kv_block);
+    buf.extend_from_slice(ti);
+    let pad = align_offset(buf.len(), alignment) - buf.len();
+    buf.extend(std::iter::repeat_n(0u8, pad));
+    buf.extend_from_slice(blob);
+    buf
+}
+
+/// One 2-element F32 tensor named "w" plus the architecture KV.
+fn one_tensor_ti(name: &str, dims: &[u64], ty: u32) -> Vec<u8> {
+    let mut ti = gguf_string_bytes(name);
+    ti.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+    for d in dims {
+        ti.extend_from_slice(&d.to_le_bytes());
+    }
+    ti.extend_from_slice(&ty.to_le_bytes());
+    ti.extend_from_slice(&0u64.to_le_bytes());
+    ti
+}
+
+#[test]
+fn weight_parser_trait_reads_from_disk_and_reports_format() -> Result<()> {
+    let tmp = tempfile()?;
+    std::fs::write(tmp.path(), minimal_f32_gguf())?;
+    let parser = GgufParser;
+    assert_eq!(parser.format_name(), "gguf");
+    let m = parser.parse(tmp.path())?;
+    assert_eq!(m.architecture, "gpt2");
+    assert_eq!(m.tensors.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn n_dims_over_128_rejected() {
+    let mut ti = gguf_string_bytes("w");
+    ti.extend_from_slice(&129u32.to_le_bytes());
+    let buf = gguf_bytes(&encode_minimal_kv_generic(), 1, &ti, 1, &[], 32);
+    let err = parse_gguf_bytes(&buf, Path::new("x.gguf")).unwrap_err();
+    assert!(format!("{err:#}").contains("unrealistic n_dimensions"), "{err:#}");
+}
+
+#[test]
+fn tensor_base_past_end_rejected() {
+    // `general.alignment` = 1 MiB pushes the aligned tensor base past EOF.
+    let mut kv = gguf_string_bytes("general.alignment");
+    kv.extend_from_slice(&VAL_STRING.to_le_bytes());
+    kv.extend_from_slice(&gguf_string_bytes("1048576"));
+    let buf = gguf_bytes(&kv, 1, &[], 0, &[], 32);
+    let err = parse_gguf_bytes(&buf, Path::new("x.gguf")).unwrap_err();
+    assert!(format!("{err:#}").contains("past end of file"), "{err:#}");
+}
+
+#[test]
+fn truncated_tensor_payload_rejected() {
+    // ti advertises [4,4] F32 (64 bytes) but the blob holds only 8.
+    let ti = one_tensor_ti("w", &[4, 4], GGML_TYPE_F32);
+    let blob: Vec<u8> = [1.0f32, 2.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+    let buf = gguf_bytes(&encode_minimal_kv_generic(), 1, &ti, 1, &blob, 32);
+    let err = parse_gguf_bytes(&buf, Path::new("x.gguf")).unwrap_err();
+    assert!(format!("{err:#}").contains("exceeds file length"), "{err:#}");
+}
+
+#[test]
+fn alignment_1_short_circuits_padding() -> Result<()> {
+    let mut kv = gguf_string_bytes("general.alignment");
+    kv.extend_from_slice(&VAL_STRING.to_le_bytes());
+    kv.extend_from_slice(&gguf_string_bytes("1"));
+    let ti = one_tensor_ti("w", &[2], GGML_TYPE_F32);
+    let blob: Vec<u8> = [3.5f32, -1.25].iter().flat_map(|f| f.to_le_bytes()).collect();
+    let buf = gguf_bytes(&kv, 1, &ti, 1, &blob, 1);
+    let m = parse_gguf_bytes(&buf, Path::new("x.gguf"))?;
+    assert_eq!(m.tensors["w"].data, blob);
+    Ok(())
+}
+
+#[test]
+fn dense_dtypes_map_to_ir() -> Result<()> {
+    let dtypes: &[(u32, DataType, usize, usize)] = &[
+        // (ggml type, IR dtype, on-disk bytes/element, IR bytes/element)
+        (GGML_TYPE_F16, DataType::F16, 2, 2),
+        (GGML_TYPE_BF16, DataType::BF16, 2, 2),
+        (GGML_TYPE_I8, DataType::I8, 1, 1),
+        (GGML_TYPE_I16, DataType::I16, 2, 2),
+        (GGML_TYPE_I32, DataType::I32, 4, 4),
+        (GGML_TYPE_I64, DataType::I64, 8, 8),
+        (GGML_TYPE_F64, DataType::F32, 8, 4), // widened to F32 in IR
+    ];
+    let mut ti = Vec::new();
+    let mut blob = Vec::new();
+    for (i, (ggml_ty, _dtype, width, _ir_width)) in dtypes.iter().enumerate() {
+        let offset = blob.len() as u64;
+        ti.extend_from_slice(&gguf_string_bytes(&format!("t{i}")));
+        ti.extend_from_slice(&1u32.to_le_bytes());
+        ti.extend_from_slice(&2u64.to_le_bytes()); // 2 elements
+        ti.extend_from_slice(&ggml_ty.to_le_bytes());
+        ti.extend_from_slice(&offset.to_le_bytes());
+        blob.extend(vec![0u8; 2 * width]);
+    }
+    let buf = gguf_bytes(&encode_minimal_kv_generic(), 1, &ti, dtypes.len() as u64, &blob, 32);
+    let m = parse_gguf_bytes(&buf, Path::new("x.gguf"))?;
+    for (i, (_ggml_ty, dtype, _width, ir_width)) in dtypes.iter().enumerate() {
+        let t = &m.tensors[&format!("t{i}")];
+        assert_eq!(t.dtype, *dtype, "t{i} dtype");
+        assert_eq!(t.data.len(), 2 * ir_width, "t{i} payload length");
+    }
+    Ok(())
+}
+
+#[test]
+fn block_quant_nelem_not_multiple_of_32_rejected() {
+    // Q4_0 with 30 elements → descriptor error naming the block size.
+    let ti = one_tensor_ti("w", &[30], GGML_TYPE_Q4_0);
+    let buf = gguf_bytes(&encode_minimal_kv_generic(), 1, &ti, 1, &[0u8; 18], 32);
+    let err = parse_gguf_bytes(&buf, Path::new("x.gguf")).unwrap_err();
+    assert!(format!("{err:#}").contains("not divisible by block size"), "{err:#}");
+}
+
+#[test]
+fn zero_element_block_quant_tensor_is_accepted() -> Result<()> {
+    // dims [0] → nelem 0 → block-multiple check short-circuits, empty payload.
+    let ti = one_tensor_ti("w", &[0], GGML_TYPE_Q4_0);
+    let buf = gguf_bytes(&encode_minimal_kv_generic(), 1, &ti, 1, &[], 32);
+    let m = parse_gguf_bytes(&buf, Path::new("x.gguf"))?;
+    assert_eq!(m.tensors["w"].dtype, DataType::Q4_0);
+    assert_eq!(m.tensors["w"].data.len(), 0);
+    Ok(())
+}
+
+#[test]
+fn unsupported_type_error_names_ggml_type() {
+    // ggml type 3 = Q4_1 → the error message reaches the type-hint table.
+    let ti = one_tensor_ti("w", &[32], 3);
+    let buf = gguf_bytes(&encode_minimal_kv_generic(), 1, &ti, 1, &[0u8; 18], 32);
+    let err = parse_gguf_bytes(&buf, Path::new("x.gguf")).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("unsupported GGML type 3 (Q4_1)"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn extract_tokenizer_metadata_tolerates_mismatched_types() -> Result<()> {
+    let mut kv = Vec::new();
+    let push_kv = |kv: &mut Vec<u8>, key: &str, value_type: u32, payload: &[u8]| {
+        kv.extend_from_slice(&gguf_string_bytes(key));
+        kv.extend_from_slice(&value_type.to_le_bytes());
+        kv.extend_from_slice(payload);
+    };
+    // model as UINT32 (wrong type) → skipped via the formatted read.
+    push_kv(&mut kv, "tokenizer.ggml.model", VAL_UINT32, &7u32.to_le_bytes());
+    // tokens / merges / bos as STRING (wrong types) → skipped.
+    push_kv(
+        &mut kv,
+        "tokenizer.ggml.tokens",
+        VAL_STRING,
+        &gguf_string_bytes("not-an-array"),
+    );
+    push_kv(
+        &mut kv,
+        "tokenizer.ggml.merges",
+        VAL_STRING,
+        &gguf_string_bytes("nope"),
+    );
+    push_kv(
+        &mut kv,
+        "tokenizer.ggml.bos_token_id",
+        VAL_STRING,
+        &gguf_string_bytes("3"),
+    );
+    // eos as UINT32 (correct) → harvested.
+    push_kv(&mut kv, "tokenizer.ggml.eos_token_id", VAL_UINT32, &5u32.to_le_bytes());
+    // eos again as STRING (wrong type) → skipped.
+    push_kv(
+        &mut kv,
+        "tokenizer.ggml.eos_token_id",
+        VAL_STRING,
+        &gguf_string_bytes("5"),
+    );
+    // chat template as STRING → harvested.
+    push_kv(
+        &mut kv,
+        "tokenizer.chat_template",
+        VAL_STRING,
+        &gguf_string_bytes("{{sys}}"),
+    );
+    // unknown key → default arm consumes it.
+    push_kv(
+        &mut kv,
+        "general.size_label",
+        VAL_STRING,
+        &gguf_string_bytes("1B"),
+    );
+    let buf = gguf_bytes(&kv, 8, &[], 0, &[], 32);
+    let tmp = tempfile()?;
+    std::fs::write(tmp.path(), &buf)?;
+    let meta = extract_tokenizer_metadata(tmp.path())?;
+    assert_eq!(meta.model, "");
+    assert!(meta.vocab.is_empty());
+    assert!(meta.merges.is_empty());
+    assert_eq!(meta.bos_token_id, None);
+    assert_eq!(meta.eos_token_id, Some(5));
+    assert_eq!(meta.chat_template.as_deref(), Some("{{sys}}"));
+    Ok(())
+}
+

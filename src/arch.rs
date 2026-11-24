@@ -153,3 +153,203 @@ pub fn llama_head_count(model: &Model, hidden: usize) -> usize {
     }
     if hidden == 0 { 1 } else { (hidden / 64).max(1) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn td(shape: Vec<usize>, dtype: DataType) -> TensorData {
+        let n: usize = shape.iter().product();
+        TensorData {
+            shape,
+            dtype,
+            data: vec![0u8; n * dtype.byte_size()],
+        }
+    }
+
+    fn model(arch: &str, tensors: Vec<(&str, TensorData)>, metadata: Vec<(&str, &str)>) -> Model {
+        Model {
+            name: "t".into(),
+            architecture: arch.to_string(),
+            tensors: tensors
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            metadata: metadata
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn detect_layers_parses_indices_and_skips_invalid() {
+        let m = model(
+            "gpt2",
+            vec![
+                ("transformer.h.0.a", td(vec![1], DataType::F32)),
+                ("transformer.h.2.a", td(vec![1], DataType::F32)),
+                ("transformer.h.x.a", td(vec![1], DataType::F32)),
+                ("transformer.h.", td(vec![1], DataType::F32)),
+            ],
+            vec![],
+        );
+        assert_eq!(detect_layers(&m, "transformer.h."), vec![0, 2]);
+    }
+
+    #[test]
+    fn llama_layers_merges_and_dedups_prefixes() {
+        let m = model(
+            "llama",
+            vec![
+                ("model.layers.0.mlp", td(vec![1], DataType::F32)),
+                ("layers.1.mlp", td(vec![1], DataType::F32)),
+                ("layers.0.mlp", td(vec![1], DataType::F32)),
+            ],
+            vec![],
+        );
+        assert_eq!(llama_layers(&m), vec![0, 1]);
+    }
+
+    #[test]
+    fn has_pair_requires_f32_weight_and_bias() {
+        let m = model(
+            "gpt2",
+            vec![
+                ("w", td(vec![2], DataType::F32)),
+                ("b", td(vec![2], DataType::F32)),
+                ("i8w", td(vec![2], DataType::I8)),
+                ("i8b", td(vec![2], DataType::F32)),
+                ("f32w", td(vec![2], DataType::F32)),
+            ],
+            vec![],
+        );
+        assert!(has_pair(&m, "w", "b"));
+        assert!(!has_pair(&m, "missing", "b"), "absent weight → false");
+        assert!(!has_pair(&m, "w", "missing"), "absent bias → false");
+        assert!(!has_pair(&m, "i8w", "i8b"), "non-F32 weight → false");
+        assert!(has_pair(&m, "f32w", "b"));
+    }
+
+    #[test]
+    fn gpt2_hidden_from_c_attn_columns() {
+        let m = model(
+            "gpt2",
+            vec![
+                ("transformer.h.0.attn.c_attn.weight", td(vec![96, 32], DataType::F32)),
+                ("transformer.h.0.attn.c_attn.bias", td(vec![96], DataType::F32)),
+            ],
+            vec![],
+        );
+        let layers = detect_layers(&m, "transformer.h.");
+        assert_eq!(gpt2_hidden_dim(&m, &layers), 32);
+    }
+
+    #[test]
+    fn gpt2_hidden_from_ln1_rows_when_c_attn_missing() {
+        let m = model(
+            "gpt2",
+            vec![
+                ("transformer.h.0.ln_1.weight", td(vec![16], DataType::F32)),
+                ("transformer.h.0.ln_1.bias", td(vec![16], DataType::F32)),
+            ],
+            vec![],
+        );
+        let layers = detect_layers(&m, "transformer.h.");
+        assert_eq!(gpt2_hidden_dim(&m, &layers), 16);
+    }
+
+    #[test]
+    fn gpt2_hidden_falls_back_to_wte_then_lm_head() {
+        let wte = model(
+            "gpt2",
+            vec![("transformer.wte.weight", td(vec![50257, 768], DataType::F32))],
+            vec![],
+        );
+        assert_eq!(gpt2_hidden_dim(&wte, &[]), 768);
+        let lm_head = model(
+            "gpt2",
+            vec![("lm_head.weight", td(vec![50257, 768], DataType::F32))],
+            vec![],
+        );
+        assert_eq!(gpt2_hidden_dim(&lm_head, &[]), 768);
+        let empty = model("gpt2", vec![], vec![]);
+        assert_eq!(gpt2_hidden_dim(&empty, &[]), 0);
+    }
+
+    #[test]
+    fn llama_hidden_from_q_proj_columns() {
+        let m = model(
+            "llama",
+            vec![
+                ("model.layers.0.self_attn.q_proj.weight", td(vec![64, 32], DataType::F32)),
+                ("model.layers.0.input_layernorm.weight", td(vec![32], DataType::F32)),
+            ],
+            vec![],
+        );
+        let layers = llama_layers(&m);
+        assert_eq!(llama_hidden_dim(&m, &layers), 32);
+    }
+
+    #[test]
+    fn llama_hidden_from_layernorm_rows_when_q_proj_missing() {
+        let m = model(
+            "llama",
+            vec![("model.layers.0.input_layernorm.weight", td(vec![48], DataType::F32))],
+            vec![],
+        );
+        let layers = llama_layers(&m);
+        assert_eq!(llama_hidden_dim(&m, &layers), 48);
+    }
+
+    #[test]
+    fn llama_hidden_falls_back_to_embeddings_then_lm_head() {
+        let embed = model(
+            "llama",
+            vec![("model.embed_tokens.weight", td(vec![32000, 4096], DataType::F32))],
+            vec![],
+        );
+        assert_eq!(llama_hidden_dim(&embed, &[]), 4096);
+        let lm_head = model(
+            "llama",
+            vec![("lm_head.weight", td(vec![32000, 4096], DataType::F32))],
+            vec![],
+        );
+        assert_eq!(llama_hidden_dim(&lm_head, &[]), 4096);
+        let empty = model("llama", vec![], vec![]);
+        assert_eq!(llama_hidden_dim(&empty, &[]), 0);
+    }
+
+    #[test]
+    fn transformer_hidden_dim_selects_by_architecture() {
+        assert_eq!(transformer_hidden_dim(&model("bert", vec![], vec![])), None);
+        assert_eq!(transformer_hidden_dim(&model("gpt2", vec![], vec![])), None);
+        assert_eq!(transformer_hidden_dim(&model("llama", vec![], vec![])), None);
+        let gpt2 = model(
+            "gpt2",
+            vec![("transformer.h.0.attn.c_attn.weight", td(vec![96, 32], DataType::F32))],
+            vec![],
+        );
+        assert_eq!(transformer_hidden_dim(&gpt2), Some(32));
+    }
+
+    #[test]
+    fn llama_head_count_prefers_metadata_hint() {
+        let hinted = model("llama", vec![], vec![("attention.head_count", "8")]);
+        assert_eq!(llama_head_count(&hinted, 4096), 8);
+        let zero_hint = model("llama", vec![], vec![("attention.head_count", "0")]);
+        assert_eq!(llama_head_count(&zero_hint, 4096), 1, "hint clamps to ≥ 1");
+        let invalid = model("llama", vec![], vec![("attention.head_count", "abc")]);
+        assert_eq!(llama_head_count(&invalid, 128), 2, "unparseable hint → fallback");
+        let none = model("llama", vec![], vec![]);
+        assert_eq!(llama_head_count(&none, 128), 2);
+        assert_eq!(llama_head_count(&none, 0), 1);
+    }
+
+    #[test]
+    fn gpt2_head_count_is_hidden_per_64() {
+        assert_eq!(gpt2_head_count(0), 1);
+        assert_eq!(gpt2_head_count(128), 2);
+        assert_eq!(gpt2_head_count(10), 1);
+    }
+}

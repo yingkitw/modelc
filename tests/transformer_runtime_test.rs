@@ -121,6 +121,24 @@ fn read_body(resp: Response) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Parse JSON-object lines from a raw (non-dechunked) HTTP body — skips
+/// chunked-transfer framing lines and keeps only complete `{...}` objects.
+fn object_lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v.is_object())
+        .collect()
+}
+
+/// Status code that tolerates our test client surfacing 4xx/5xx as `Err(StatusCode)`.
+fn post_status(url: &str, body: &serde_json::Value) -> u16 {
+    match http::post(url).content_type("application/json").send(&body.to_string()) {
+        Ok(resp) => resp.status(),
+        Err(HttpError::StatusCode(code)) => code,
+        Err(e) => panic!("request failed: {e}"),
+    }
+}
+
 fn post_json(url: &str, body: &serde_json::Value) -> serde_json::Value {
     let body_str = serde_json::to_string(body).unwrap();
     let resp = http::post(url)
@@ -2533,3 +2551,420 @@ async fn run_server_completions_logprobs_on_non_transformer() {
     let choices = val["choices"].as_array().expect("choices");
     assert_eq!(choices.len(), 1, "mlp completions must still respond");
 }
+
+// ---------------------------------------------------------------------------
+// Endpoint coverage gaps (2026-11 audit follow-up): batched /infer + profiling,
+// batched /embeddings, /complete json_schema retry, /chat/stream SSE, grammar,
+// zero-norm reranking, LoRA load, and the Ollama options/format/raw/system/
+// /api/show error paths. Tests-only per the Mature Module Policy.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_infers_batches_with_profile() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, true, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let inputs = vec![vec![0.1f32; GPT2_HIDDEN], vec![0.2f32; GPT2_HIDDEN]];
+    let val = post_json(&format!("{base}/infer"), &serde_json::json!({ "inputs": inputs }));
+    let outs = val["outputs"].as_array().expect("batched outputs");
+    assert_eq!(outs.len(), 2);
+    for out in outs {
+        assert_eq!(
+            out.as_array().expect("per-item output").len(),
+            GPT2_VOCAB,
+            "each batch item yields vocab-sized logits"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_batched_embeddings() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/embeddings"),
+        &serde_json::json!({ "inputs": ["hello", "there"] }),
+    );
+    let entries = val["embeddings"].as_array().expect("batched embeddings");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["index"], 0);
+    assert_eq!(entries[1]["index"], 1);
+    assert!(!entries[0]["embedding"].as_array().expect("vector").is_empty(), "gpt2 yields real embeddings");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_completions_respect_json_schema() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/complete"),
+        &serde_json::json!({
+            "prompt": "hi",
+            "max_tokens": 4,
+            "json_schema": { "type": "object" }
+        }),
+    );
+    // The schema retry path runs and still returns the (fallback) completion.
+    assert!(val["completion"].as_str().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_chat_stream() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = http::post(&format!("{base}/chat/stream"))
+        .content_type("application/json")
+        .send(&serde_json::json!({
+            "messages": [{ "role": "user", "content": "hi" }]
+        })
+        .to_string())
+        .expect("chat/stream request");
+    let body = read_body(resp).expect("sse body");
+    let text = String::from_utf8(body).expect("utf8 sse");
+
+    let chunks: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .collect();
+    assert!(!chunks.is_empty(), "at least one SSE chunk");
+    let last = chunks.last().unwrap();
+    assert_eq!(last["done"], true, "stream ends with a done chunk");
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk["done"], i + 1 == chunks.len(), "only the last chunk is done");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_chat_with_grammar() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/chat"),
+        &serde_json::json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "grammar": "^a+b*$",
+            "max_tokens": 8
+        }),
+    );
+    assert!(val["message"]["content"].as_str().is_some(), "grammar path still answers");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_reranking_zero_norm_embeddings_score_zero() {
+    // MLP fixtures have no embedding head → run_embeddings yields empty vectors
+    // → cosine similarity must return 0.0 (not NaN) for every document.
+    let model = common::create_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/reranking"),
+        &serde_json::json!({ "query": "q", "documents": ["a", "b"] }),
+    );
+    let results = val["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2);
+    for r in results {
+        assert_eq!(r["relevance_score"].as_f64(), Some(0.0), "zero-norm → 0.0");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_lora_load_applies_adapter() {
+    let model = common::create_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // A [2,2] F32 adapter tensor named after the base tensor "weight".
+    let adapter_bytes = {
+        use safetensors::tensor::TensorView;
+        let data: Vec<u8> = vec![1.0f32, 0.0, 0.0, 1.0]
+            .into_iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let tv = TensorView::new(safetensors::Dtype::F32, vec![2, 2], &data).unwrap();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("weight".to_string(), tv);
+        safetensors::serialize(&metadata, &None).unwrap()
+    };
+    let dir = modelc::tempdir::tempdir().unwrap();
+    let adapter_path = dir.path().join("adapter.safetensors");
+    std::fs::write(&adapter_path, adapter_bytes).unwrap();
+
+    let val = post_json(
+        &format!("{base}/lora/load"),
+        &serde_json::json!({ "path": adapter_path.display().to_string(), "alpha": 1.0 }),
+    );
+    assert!(val["applied"].as_u64().unwrap_or(0) >= 1, "adapter applied: {val}");
+    assert_eq!(val["skipped"], 0);
+    assert!(val["message"].as_str().unwrap().contains("LoRA loaded"));
+}
+
+// ---- Ollama surfaces: options mapping, format/raw/system, /api/show errors ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_api_generate_honors_options_and_format() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/api/generate"),
+        &serde_json::json!({
+            "prompt": "hi",
+            "stream": false,
+            "format": "json",
+            "options": {
+                "num_predict": 5,
+                "temperature": 0.5,
+                "top_p": 0.9,
+                "min_p": 0.1,
+                "repeat_penalty": 1.1,
+                "presence_penalty": 0.5,
+                "frequency_penalty": 0.5,
+                "stop": ",",
+                "num_ctx": 128
+            }
+        }),
+    );
+    assert_eq!(val["done"], true);
+    assert_eq!(val["done_reason"], "stop");
+    assert!(val["response"].as_str().is_some());
+    assert!(val["prompt_eval_count"].as_u64().unwrap_or(0) > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_api_generate_raw_and_system_prompt_assembly() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // raw + no system → the prompt goes in verbatim ("hi" → 2 byte tokens).
+    let val = post_json(
+        &format!("{base}/api/generate"),
+        &serde_json::json!({ "prompt": "hi", "raw": true, "stream": false }),
+    );
+    assert_eq!(val["prompt_eval_count"].as_u64(), Some(2));
+
+    // raw + system → the template still renders BOTH messages:
+    // "system: SYS\n" (12 bytes) + "user: hi\n" (9 bytes) = 21 tokens.
+    let val = post_json(
+        &format!("{base}/api/generate"),
+        &serde_json::json!({ "prompt": "hi", "raw": true, "system": "SYS", "stream": false }),
+    );
+    assert_eq!(val["prompt_eval_count"].as_u64(), Some(21));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_api_generate_streams_schema_ndjson() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = http::post(&format!("{base}/api/generate"))
+        .content_type("application/json")
+        .send(
+            &serde_json::json!({
+                "prompt": "hi",
+                "stream": true,
+                "format": { "type": "object" }
+            })
+            .to_string(),
+        )
+        .expect("generate request");
+    let body = read_body(resp).expect("ndjson body");
+    let text = String::from_utf8(body).expect("utf8 ndjson");
+    let lines = object_lines(&text);
+    assert!(!lines.is_empty(), "at least one ndjson chunk");
+    let last = lines.last().unwrap();
+    assert_eq!(last["done"], true);
+    assert!(last["eval_count"].as_u64().is_some(), "final chunk carries stats");
+    for val in &lines[..lines.len() - 1] {
+        assert_eq!(val["done"], false, "deltas stream before the final chunk");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_api_chat_streams_and_formats() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let resp = http::post(&format!("{base}/api/chat"))
+        .content_type("application/json")
+        .send(
+            &serde_json::json!({
+                "messages": [{ "role": "user", "content": "hi" }],
+                "format": "json"
+            })
+            .to_string(),
+        )
+        .expect("chat request");
+    let body = read_body(resp).expect("ndjson body");
+    let text = String::from_utf8(body).expect("utf8 ndjson");
+    let lines = object_lines(&text);
+    assert!(!lines.is_empty());
+    let first = lines.first().unwrap();
+    assert_eq!(first["message"]["role"], "assistant", "chat chunks carry the message envelope");
+    let last = lines.last().unwrap();
+    assert_eq!(last["done"], true);
+    assert_eq!(last["done_reason"], "stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_api_show_validates_and_resolves() {
+    let model = common::create_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // No model field → 400 "model is required".
+    assert_eq!(post_status(&format!("{base}/api/show"), &serde_json::json!({})), 400);
+
+    // Unknown model → 404.
+    assert_eq!(
+        post_status(&format!("{base}/api/show"), &serde_json::json!({ "model": "no-such-model-xyz" })),
+        404
+    );
+
+    // A corrupt artifact in the store → 500 (read_header failure), cleaned up.
+    let corrupt_name = format!("corrupt-show-{}", std::process::id());
+    let corrupt_path = modelc::store::store_dir().unwrap().join(format!("{corrupt_name}.modelc"));
+    std::fs::write(&corrupt_path, b"not a modelc artifact").unwrap();
+    let status = post_status(&format!("{base}/api/show"), &serde_json::json!({ "model": corrupt_name }));
+    let _ = std::fs::remove_file(&corrupt_path);
+    assert_eq!(status, 500);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_api_show_reports_blank_architecture_and_unknown_quant() {
+    // pack::pack (unlike compiler::pack) preserves the header verbatim: an empty
+    // architecture stays empty → /api/show family falls back to "generic", and an
+    // unknown quantization label falls through the llama.cpp file-type table to 0.
+    let bytes = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let mut tensors = std::collections::HashMap::new();
+    tensors.insert(
+        "weight".to_string(),
+        modelc::model::TensorData { shape: vec![2, 2], dtype: modelc::model::DataType::F32, data: bytes(&[0.5, 0.5, 0.5, 0.5]) },
+    );
+    tensors.insert(
+        "bias".to_string(),
+        modelc::model::TensorData { shape: vec![2], dtype: modelc::model::DataType::F32, data: bytes(&[0.0, 0.0]) },
+    );
+    let model = modelc::model::Model {
+        name: "blank_arch".into(),
+        architecture: "".into(),
+        tensors,
+        metadata: [("quantization".to_string(), "weird-quant".to_string())].into_iter().collect(),
+    };
+    let dir = modelc::tempdir::tempdir().unwrap();
+    let artifact = dir.path().join("blank_arch.modelc");
+    modelc::pack::pack(&model, &artifact, false).expect("pack blank-arch fixture");
+
+    let unique_name = format!("blank-arch-show-{}", std::process::id());
+    modelc::store::install(&artifact, &unique_name).expect("install fixture");
+
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move {
+        let _ = run_server(common::create_test_model(), addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    let val = post_json(
+        &format!("{base}/api/show"),
+        &serde_json::json!({ "model": unique_name }),
+    );
+    assert_eq!(val["details"]["family"], "generic", "blank architecture → generic: {val}");
+    assert_eq!(val["quantization"], "weird-quant");
+    assert_eq!(
+        val["model_info"]["general.file_type"], 0,
+        "unknown label falls through the llama.cpp file-type table to 0"
+    );
+
+    // Best-effort cleanup of the store entry.
+    let _ = std::fs::remove_file(modelc::store::store_dir().unwrap().join(format!("{unique_name}.modelc")));
+}
+
+
