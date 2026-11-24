@@ -197,6 +197,114 @@ fn pack_quantize_int4_writes_quant_mode_metadata() {
     assert!(total_int4_bytes <= total_int4_params.div_ceil(2) + 1);
 }
 
+/// A tiny MLP whose weight is a whole number of 32-element blocks (so the GGML
+/// block-quantizers can encode it) and whose bias is not (8 elements).
+fn write_blocky_mlp(path: &std::path::Path) {
+    let weight: Vec<u8> = (0..64)
+        .flat_map(|i| ((i as f32) * 0.25 - 4.0).to_le_bytes())
+        .collect();
+    let bias: Vec<u8> = (0..8)
+        .flat_map(|i| ((i as f32) * 0.5).to_le_bytes())
+        .collect();
+    common::create_safetensors_file(
+        path,
+        vec![
+            ("layer0.bias", "F32", vec![8], bias),
+            ("layer0.weight", "F32", vec![8, 8], weight),
+        ],
+    );
+}
+
+/// The original F32 values of `write_blocky_mlp`'s weight.
+fn blocky_weight_values() -> Vec<f32> {
+    (0..64).map(|i| (i as f32) * 0.25 - 4.0).collect()
+}
+
+#[test]
+fn pack_quantize_q4_0_encodes_blocks_and_loads_at_runtime() {
+    let dir = common::tempdir().unwrap();
+    let src = dir.path().join("mlp.safetensors");
+    let out = dir.path().join("q4_0.modelc");
+    write_blocky_mlp(&src);
+
+    compiler::pack(
+        &src,
+        Some(&out),
+        Some(&WeightFormat::Safetensors),
+        None,
+        false,
+        Some(&QuantizeMode::Q4_0),
+        None,
+    )
+    .unwrap();
+
+    let model = modelc::pack::unpack(&out).unwrap();
+    let weight = &model.tensors["layer0.weight"];
+    assert_eq!(weight.dtype, DataType::Q4_0, "whole blocks → Q4_0");
+    assert_eq!(weight.data.len(), 64 / 32 * 18, "two Q4_0 blocks");
+    // The bias is 8 elements — not a whole number of blocks — so it stays F32.
+    assert_eq!(model.tensors["layer0.bias"].dtype, DataType::F32);
+
+    // The header reports the block-quant dtype, which is what `/api/tags`
+    // surfaces as the Ollama quantization level.
+    let header = modelc::pack::read_header(&out).unwrap();
+    assert_eq!(modelc::pack::infer_quantization(&header), "q4_0");
+
+    // The runtime dequantizes the block-quant tensor on the fly, so the packed
+    // artifact still runs — within one Q4_0 quantization step.
+    let runtime = modelc::runtime::serve::Runtime::from_raw(&model.tensors);
+    let w0 = runtime.get("layer0.weight").expect("layer0.weight");
+    let original = blocky_weight_values();
+    let amax = original.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+    for (got, want) in w0.data.iter().zip(original.iter()) {
+        assert!(
+            (got - want).abs() <= amax / 8.0 + 1e-3,
+            "Q4_0 weight {got} vs {want} exceeds one step"
+        );
+    }
+}
+
+#[test]
+fn pack_quantize_q8_0_encodes_blocks_with_finer_precision() {
+    let dir = common::tempdir().unwrap();
+    let src = dir.path().join("mlp.safetensors");
+    let out = dir.path().join("q8_0.modelc");
+    write_blocky_mlp(&src);
+
+    compiler::pack(
+        &src,
+        Some(&out),
+        Some(&WeightFormat::Safetensors),
+        None,
+        false,
+        Some(&QuantizeMode::Q8_0),
+        None,
+    )
+    .unwrap();
+
+    let model = modelc::pack::unpack(&out).unwrap();
+    let weight = &model.tensors["layer0.weight"];
+    assert_eq!(weight.dtype, DataType::Q8_0, "whole blocks → Q8_0");
+    assert_eq!(weight.data.len(), 64 / 32 * 34, "two Q8_0 blocks");
+    assert_eq!(model.tensors["layer0.bias"].dtype, DataType::F32);
+
+    let header = modelc::pack::read_header(&out).unwrap();
+    assert_eq!(modelc::pack::infer_quantization(&header), "q8_0");
+
+    // Q8_0 keeps 8 bits per weight, so its round-trip error is far below
+    // Q4_0's — the values come back nearly exact.
+    let runtime = modelc::runtime::serve::Runtime::from_raw(&model.tensors);
+    let w0 = runtime.get("layer0.weight").expect("layer0.weight");
+    let original = blocky_weight_values();
+    let amax = original.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+    for (got, want) in w0.data.iter().zip(original.iter()) {
+        assert!(
+            (got - want).abs() <= amax / 127.0 + 1e-3,
+            "Q8_0 weight {got} vs {want} exceeds one step"
+        );
+    }
+}
+
 fn t_name_of(model: &modelc::model::Model, t: &modelc::model::TensorData) -> String {
     model
         .tensors

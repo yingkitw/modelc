@@ -182,6 +182,15 @@ pub fn compile(
     Ok(output_path)
 }
 
+/// Decode a little-endian F32 byte blob into floats — the input shape every
+/// quantizer below reads from.
+fn f32_values(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 pub fn pack(
     input: &Path,
     output: Option<&Path>,
@@ -234,6 +243,7 @@ pub fn pack(
     if let Some(mode) = quantize {
         eprintln!("modelc: quantizing tensors to {:?}...", mode);
         let mut quantized = 0;
+        let mut skipped = 0;
         for (name, td) in model.tensors.iter_mut() {
             if td.dtype != DataType::F32 {
                 continue;
@@ -253,11 +263,7 @@ pub fn pack(
                 }
                 QuantizeMode::Int8 => {
                     let count = td.element_count();
-                    let mut floats = Vec::with_capacity(count);
-                    for chunk in td.data.chunks_exact(4) {
-                        let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        floats.push(val);
-                    }
+                    let floats = f32_values(&td.data);
                     let max_abs = floats.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
                     if max_abs > 0.0 {
                         let scale = max_abs / 127.0;
@@ -276,11 +282,7 @@ pub fn pack(
                 }
                 QuantizeMode::Int4 => {
                     let count = td.element_count();
-                    let mut floats = Vec::with_capacity(count);
-                    for chunk in td.data.chunks_exact(4) {
-                        let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        floats.push(val);
-                    }
+                    let floats = f32_values(&td.data);
                     let max_abs = floats.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
                     if max_abs > 0.0 {
                         let scale = max_abs / 7.0;
@@ -309,9 +311,39 @@ pub fn pack(
                         quantized += 1;
                     }
                 }
+                QuantizeMode::Q4_0 => {
+                    // GGML block-quant: 18 bytes per 32 elements. A tensor that
+                    // is not a whole number of blocks stays F32 (llama.cpp's
+                    // own fallback) rather than failing the pack.
+                    match crate::parsers::gguf::quantize_q4_0(&f32_values(&td.data)) {
+                        Some(bytes) => {
+                            td.dtype = DataType::Q4_0;
+                            td.data = bytes;
+                            quantized += 1;
+                        }
+                        None => skipped += 1,
+                    }
+                }
+                QuantizeMode::Q8_0 => {
+                    // GGML block-quant: 34 bytes per 32 elements.
+                    match crate::parsers::gguf::quantize_q8_0(&f32_values(&td.data)) {
+                        Some(bytes) => {
+                            td.dtype = DataType::Q8_0;
+                            td.data = bytes;
+                            quantized += 1;
+                        }
+                        None => skipped += 1,
+                    }
+                }
             }
         }
         eprintln!("  quantized {} tensors", quantized);
+        if skipped > 0 {
+            eprintln!(
+                "  skipped {} tensors (element count not a multiple of 32)",
+                skipped
+            );
+        }
     }
 
     let output_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {

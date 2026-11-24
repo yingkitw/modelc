@@ -13,6 +13,9 @@ use crate::parsers::WeightParser;
 
 mod cursor;
 mod dequant;
+mod quant;
+
+pub use quant::{quantize_q4_0, quantize_q8_0};
 
 pub struct GgufParser;
 

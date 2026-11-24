@@ -192,6 +192,37 @@ fn cli_pack_quantize_int8_flag_is_accepted() {
 }
 
 #[test]
+fn cli_pack_quantize_q4_0_flag_writes_block_quant_artifact() {
+    let dir = unique_tmp("pack-quant-q4");
+    std::fs::create_dir_all(&dir).unwrap();
+    // 64 elements (8x8) → a whole number of 32-element blocks, so the
+    // block-quantizer actually encodes the weight.
+    let w: Vec<u8> = (0..64)
+        .flat_map(|i| ((i as f32) * 0.25).to_le_bytes())
+        .collect();
+    let b: Vec<u8> = (0..8).flat_map(|_| 0.0f32.to_le_bytes()).collect();
+    let src = dir.join("mlp.safetensors");
+    write_safetensors_two_tensor(&src, "weight", &w, vec![8, 8], "bias", &b, vec![8]);
+    let artifact = dir.join("mlp-q4.modelc");
+    let (code, _stdout, stderr) = run(&[
+        "pack",
+        src.to_str().unwrap(),
+        "-o",
+        artifact.to_str().unwrap(),
+        "--quantize",
+        "q4_0",
+    ]);
+    assert_eq!(code, 0, "pack failed: {stderr}");
+    let header = modelc::pack::read_header(&artifact).unwrap();
+    assert!(
+        header.tensors.iter().any(|t| t.dtype == "q4_0"),
+        "expected a q4_0 tensor, got {:?}",
+        header.tensors
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cli_pack_force_format_flag() {
     let dir = unique_tmp("pack-format");
     std::fs::create_dir_all(&dir).unwrap();

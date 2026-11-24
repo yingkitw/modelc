@@ -90,6 +90,9 @@ pub enum QuantPreview {
     /// GGML Q4_0 block-quantized: 18 bytes per block of 32 elements
     /// (one f16 scale + 32 × 4-bit weights).
     Q4_0,
+    /// GGML Q8_0 block-quantized: 34 bytes per block of 32 elements
+    /// (one f16 scale + 32 × int8 weights).
+    Q8_0,
 }
 
 impl QuantPreview {
@@ -102,6 +105,7 @@ impl QuantPreview {
             Self::Int8 => elements,
             Self::Int4 => elements.div_ceil(2),
             Self::Q4_0 => elements.div_ceil(32) * 18,
+            Self::Q8_0 => elements.div_ceil(32) * 34,
         }
     }
 
@@ -113,12 +117,20 @@ impl QuantPreview {
             Self::Int8 => "int8",
             Self::Int4 => "int4",
             Self::Q4_0 => "q4_0",
+            Self::Q8_0 => "q8_0",
         }
     }
 
     /// All preview formats in display order.
-    pub fn all() -> [QuantPreview; 5] {
-        [Self::F32, Self::F16, Self::Int8, Self::Int4, Self::Q4_0]
+    pub fn all() -> [QuantPreview; 6] {
+        [
+            Self::F32,
+            Self::F16,
+            Self::Int8,
+            Self::Int4,
+            Self::Q4_0,
+            Self::Q8_0,
+        ]
     }
 }
 
@@ -308,10 +320,14 @@ mod tests {
     #[test]
     fn all_formats_returns_expected_set() {
         let all = QuantPreview::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         assert_eq!(all[0], QuantPreview::F32);
         assert_eq!(all[4], QuantPreview::Q4_0);
+        assert_eq!(all[5], QuantPreview::Q8_0);
         let labels: Vec<&str> = all.iter().map(|q| q.label()).collect();
-        assert_eq!(labels, vec!["fp32", "fp16", "int8", "int4", "q4_0"]);
+        assert_eq!(
+            labels,
+            vec!["fp32", "fp16", "int8", "int4", "q4_0", "q8_0"]
+        );
     }
 }

@@ -120,7 +120,11 @@ pub enum Commands {
         #[arg(long, help = "Compress tensor data with zstd")]
         compress: bool,
 
-        #[arg(long, help = "Quantize FP32 tensors (fp16, int8, int4)", value_enum)]
+        #[arg(
+            long,
+            help = "Quantize FP32 tensors (fp16, int8, int4, q4_0, q8_0)",
+            value_enum
+        )]
         quantize: Option<QuantizeMode>,
 
         #[arg(
@@ -533,6 +537,12 @@ pub enum QuantizeMode {
     Fp16,
     Int8,
     Int4,
+    /// GGML Q4_0 block-quantized (18 bytes per 32 elements).
+    #[value(name = "q4_0")]
+    Q4_0,
+    /// GGML Q8_0 block-quantized (34 bytes per 32 elements).
+    #[value(name = "q8_0")]
+    Q8_0,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

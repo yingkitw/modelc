@@ -2,6 +2,7 @@
 use half::f16;
 
 use super::cursor::Cursor;
+use super::dequant::{dequantize_q4_0, dequantize_q8_0};
 use super::*;
 use crate::tempdir::tempfile;
 
@@ -1004,3 +1005,108 @@ fn extract_tokenizer_metadata_tolerates_mismatched_types() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Block-quant encoder — the write side used by `modelc pack --quantize q4_0|q8_0`
+// ---------------------------------------------------------------------------
+
+/// 64 elements with mixed magnitudes, used by the round-trip tests below.
+fn blocky_values() -> Vec<f32> {
+    (0..64).map(|i| (i as f32) * 0.125 - 2.0).collect()
+}
+
+#[test]
+fn q4_0_encoder_matches_llama_cpp_reference_block() {
+    // llama.cpp reference values: amax = 1.0 (element 0) → d = 1.0 / -8 = -0.125
+    // (exactly representable in f16 → 0xB000), id = -8.
+    //   element 0  ( 1.0) → x·id = -8 → trunc(-8 + 8.5) =  0        → nibble 0
+    //   element 1  (-1.0) → x·id =  8 → trunc( 8 + 8.5) = 16 → MIN 15 → nibble 15
+    //   elements 2+ ( 0.0) → 8.5 → trunc 8 → nibble 8
+    // The high nibble of byte j holds element j + 16 (all zeros → nibble 8).
+    let mut values = vec![0.0f32; 32];
+    values[0] = 1.0;
+    values[1] = -1.0;
+
+    let bytes = quantize_q4_0(&values).expect("32 elements is a whole block");
+    assert_eq!(bytes.len(), 18, "one Q4_0 block is 18 bytes");
+    assert_eq!(&bytes[0..2], &[0x00, 0xB0], "f16 scale -0.125");
+    assert_eq!(bytes[2], 0x80, "element 0 → nibble 0, element 16 → nibble 8");
+    assert_eq!(
+        bytes[3], 0x8F,
+        "element 1 saturates to nibble 15, element 17 → nibble 8"
+    );
+    assert!(
+        bytes[4..].iter().all(|&b| b == 0x88),
+        "zero elements encode to nibble 8"
+    );
+}
+
+#[test]
+fn q8_0_encoder_matches_llama_cpp_reference_block() {
+    // amax = 127.0 → d = 127.0 / 127 = 1.0 (f16 → 0x3C00), id = 1.0, and each
+    // weight is stored as round(x / d).
+    let mut values = vec![0.0f32; 32];
+    values[0] = 127.0;
+    values[1] = -127.0;
+    values[2] = 64.0;
+
+    let bytes = quantize_q8_0(&values).expect("32 elements is a whole block");
+    assert_eq!(bytes.len(), 34, "one Q8_0 block is 34 bytes");
+    assert_eq!(&bytes[0..2], &[0x00, 0x3C], "f16 scale 1.0");
+    assert_eq!(bytes[2], 127u8, "127.0 → 127");
+    assert_eq!(bytes[3], (-127i8) as u8, "-127.0 → -127");
+    assert_eq!(bytes[4], 64, "64.0 → 64");
+    assert!(bytes[5..].iter().all(|&b| b == 0), "zeros → 0");
+}
+
+#[test]
+fn q4_0_round_trips_through_the_gguf_decoder() {
+    // Encode → decode with the *existing* GGUF decoder: both sides must agree,
+    // and the error stays within one quantization step (amax / 8).
+    let values = blocky_values();
+    let bytes = quantize_q4_0(&values).expect("64 elements is two whole blocks");
+    assert_eq!(bytes.len(), 2 * 18);
+    let decoded = dequantize_q4_0(&bytes, values.len()).expect("decode");
+    let amax = values.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+    for (got, want) in decoded.iter().zip(values.iter()) {
+        assert!(
+            (got - want).abs() <= amax / 8.0 + 1e-6,
+            "Q4_0 error {got} vs {want} exceeds one step (amax/8 = {})",
+            amax / 8.0
+        );
+    }
+}
+
+#[test]
+fn q8_0_round_trips_through_the_gguf_decoder() {
+    // Q8_0 keeps 8 bits per weight — its step (amax / 127) is far finer than Q4_0's.
+    let values = blocky_values();
+    let bytes = quantize_q8_0(&values).expect("64 elements is two whole blocks");
+    assert_eq!(bytes.len(), 2 * 34);
+    let decoded = dequantize_q8_0(&bytes, values.len()).expect("decode");
+    let amax = values.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+    for (got, want) in decoded.iter().zip(values.iter()) {
+        assert!(
+            (got - want).abs() <= amax / 127.0 + 1e-3,
+            "Q8_0 error {got} vs {want} exceeds one step"
+        );
+    }
+}
+
+#[test]
+fn block_quantizers_reject_partial_blocks() {
+    // Not a whole number of 32-element blocks → the caller keeps the tensor F32.
+    assert!(quantize_q4_0(&[0.0f32; 33]).is_none());
+    assert!(quantize_q8_0(&[0.0f32; 33]).is_none());
+    // Whole blocks are fine; an empty tensor encodes to no bytes.
+    assert!(quantize_q4_0(&[0.0f32; 64]).is_some());
+    assert_eq!(quantize_q4_0(&[]).expect("empty tensor").len(), 0);
+}
+
+#[test]
+fn q4_0_zero_block_round_trips_to_zero() {
+    // An all-zero block has no scale (d = -0.0) and every weight decodes to 0.
+    let values = vec![0.0f32; 32];
+    let bytes = quantize_q4_0(&values).expect("whole block");
+    let decoded = dequantize_q4_0(&bytes, 32).expect("decode");
+    assert!(decoded.iter().all(|&v| v == 0.0), "zeros stay zeros");
+}
