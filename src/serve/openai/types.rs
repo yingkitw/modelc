@@ -450,3 +450,63 @@ pub(in crate::serve) struct V1Embedding {
     pub(in crate::serve)index: usize,
     pub(in crate::serve)dimensions: usize,
 }
+
+// ---- Cohere-compatible /v1/rerank + /v2/rerank ----
+
+#[derive(Deserialize)]
+pub(in crate::serve) struct CohereRerankRequest {
+    /// Accepted for API compatibility; a modelc server serves exactly one model.
+    #[allow(dead_code)] // Cohere field accepted for API fidelity, ignored.
+    #[serde(default)]
+    pub(in crate::serve)model: Option<String>,
+    pub(in crate::serve)query: String,
+    pub(in crate::serve)documents: Vec<RerankDocument>,
+    #[serde(default)]
+    pub(in crate::serve)top_n: Option<usize>,
+    /// Documents are omitted from results unless asked for (Cohere default).
+    #[serde(default)]
+    pub(in crate::serve)return_documents: bool,
+}
+
+/// A document to rerank. Cohere v1 accepts "document objects or strings" and
+/// ranks an object on its `text` field (the default `rank_fields`); v2 sends
+/// plain strings. Extra object fields are preserved in the response.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(in crate::serve) enum RerankDocument {
+    Text(String),
+    Object(serde_json::Map<String, serde_json::Value>),
+}
+
+impl RerankDocument {
+    /// The text that gets embedded — `None` for an object with no string `text`.
+    pub(in crate::serve) fn text(&self) -> Option<&str> {
+        match self {
+            RerankDocument::Text(s) => Some(s),
+            RerankDocument::Object(map) => map.get("text").and_then(|v| v.as_str()),
+        }
+    }
+
+    /// The `document` value echoed back when `return_documents` is true.
+    pub(in crate::serve) fn echoed(&self) -> serde_json::Value {
+        match self {
+            RerankDocument::Text(s) => serde_json::json!({ "text": s }),
+            RerankDocument::Object(map) => serde_json::Value::Object(map.clone()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub(in crate::serve) struct CohereRerankResponse {
+    pub(in crate::serve)id: String,
+    pub(in crate::serve)results: Vec<CohereRerankResult>,
+}
+
+#[derive(Serialize)]
+pub(in crate::serve) struct CohereRerankResult {
+    pub(in crate::serve)index: usize,
+    /// Cosine similarity clamped into Cohere's documented `[0, 1]` range.
+    pub(in crate::serve)relevance_score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::serve)document: Option<serde_json::Value>,
+}

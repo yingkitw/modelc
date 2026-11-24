@@ -2968,3 +2968,120 @@ async fn run_server_api_show_reports_blank_architecture_and_unknown_quant() {
 }
 
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_cohere_rerank() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    let info = wait_for_server(&format!("{base}/info"));
+
+    let body = |return_documents: bool| {
+        serde_json::json!({
+            "model": "whatever",
+            "query": "capital cities",
+            "documents": ["washington", "paris", "tokyo"],
+            "top_n": 2,
+            "return_documents": return_documents
+        })
+    };
+
+    // Cohere default: no documents in results.
+    let val = post_json(&format!("{base}/v1/rerank"), &body(false));
+    assert_eq!(
+        val["id"],
+        format!("rerank-{}", info["name"].as_str().unwrap()),
+        "response carries an id derived from the served model"
+    );
+    let results = val["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 2, "top_n truncates");
+    let mut prev = f64::INFINITY;
+    for r in results {
+        let score = r["relevance_score"].as_f64().expect("score");
+        assert!(score <= prev, "results are sorted by descending relevance");
+        prev = score;
+        assert!(
+            (0.0..=1.0).contains(&score),
+            "relevance_score is normalized to Cohere's documented [0, 1]"
+        );
+        assert!(r["document"].is_null(), "documents are omitted by default");
+        assert!(r["index"].as_u64().is_some_and(|i| i < 3), "index within range");
+    }
+
+    // return_documents: true → document text rides along, index preserved.
+    let val = post_json(&format!("{base}/v1/rerank"), &body(true));
+    for r in val["results"].as_array().unwrap() {
+        let idx = r["index"].as_u64().unwrap() as usize;
+        assert_eq!(
+            r["document"]["text"].as_str().unwrap(),
+            ["washington", "paris", "tokyo"][idx],
+            "document text matches the original index"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_server_serves_cohere_rerank_object_documents_and_v2_path() {
+    let model = common::create_gpt2_test_model();
+    let addr = ephemeral_addr();
+    let base = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = run_server(model, addr, false, modelc::generate::GenerationConfig::default(), None, None).await;
+    });
+
+    wait_for_server(&format!("{base}/info"));
+
+    // Cohere v1 accepts "document objects or strings": objects are ranked on
+    // `text` and their extra fields are preserved in the response.
+    let body = serde_json::json!({
+        "query": "capital cities",
+        "documents": [
+            {"text": "washington", "title": "US"},
+            "paris",
+            {"text": "tokyo", "title": "JP"}
+        ],
+        "return_documents": true
+    });
+    let val = post_json(&format!("{base}/v1/rerank"), &body);
+    let results = val["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 3, "no top_n → every document is ranked");
+    let originals = [
+        serde_json::json!({"text": "washington", "title": "US"}),
+        serde_json::json!({"text": "paris"}),
+        serde_json::json!({"text": "tokyo", "title": "JP"}),
+    ];
+    let mut indices: Vec<usize> = Vec::new();
+    for r in results {
+        let idx = r["index"].as_u64().unwrap() as usize;
+        indices.push(idx);
+        assert_eq!(
+            r["document"], originals[idx],
+            "extra object fields preserved; a string document echoes as {{text}}"
+        );
+    }
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1, 2], "every original index appears once");
+
+    // An object without a string `text` is a missing-required-fields request.
+    let body = serde_json::json!({ "query": "q", "documents": [{ "title": "no text" }] });
+    assert_eq!(post_status(&format!("{base}/v1/rerank"), &body), 400);
+
+    // `/v2/rerank` is what `cohere.ClientV2` calls on a private deployment —
+    // both API versions' paths serve the same envelope from one handler.
+    let body = serde_json::json!({
+        "model": "rerank-v3.5",
+        "query": "capital cities",
+        "documents": ["washington", "paris", "tokyo"],
+        "top_n": 2
+    });
+    let v1 = post_json(&format!("{base}/v1/rerank"), &body);
+    let v2 = post_json(&format!("{base}/v2/rerank"), &body);
+    assert_eq!(v1["results"], v2["results"], "both paths share one envelope");
+    assert_eq!(v1["id"], v2["id"]);
+    assert_eq!(v2["results"].as_array().unwrap().len(), 2);
+}

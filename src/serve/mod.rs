@@ -271,6 +271,8 @@ pub fn build_router_from_state(state: std::sync::Arc<AppState>) -> Router {
         .route("/detokenize", post(handlers::detokenize))
         .route("/metrics", get(handlers::metrics_handler))
         .route("/v1/models", get(openai::list_models))
+        .route("/v1/rerank", post(openai::rerank))
+        .route("/v2/rerank", post(openai::rerank))
         .route("/v1/models/{id}", get(openai::retrieve_model))
         .route("/v1/system", get(handlers::system_info))
         .route("/v1/chat/completions", post(openai::chat_completion))

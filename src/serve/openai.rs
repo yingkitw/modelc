@@ -854,6 +854,79 @@ fn extract_embedding_inputs(input: &serde_json::Value) -> Vec<String> {
     }
 }
 
+/// Orders `(index, cosine)` pairs by descending raw similarity (stable, so ties
+/// keep input order), truncates to `top_n`, then clamps the reported score into
+/// Cohere's documented `[0, 1]` range. Clamping happens *after* ordering, so
+/// documents whose similarity is ≤ 0 stay ordered by raw similarity even
+/// though they all report `0.0`.
+fn rank_results(mut scored: Vec<(usize, f32)>, top_n: Option<usize>) -> Vec<(usize, f32)> {
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(top_n) = top_n {
+        scored.truncate(top_n);
+    }
+    scored
+        .into_iter()
+        .map(|(index, cos)| (index, cos.clamp(0.0, 1.0)))
+        .collect()
+}
+
+/// `POST /v1/rerank` + `/v2/rerank` — Cohere-compatible reranking over the same
+/// embedding + cosine machinery as the native `/reranking` endpoint. Both API
+/// versions' paths share one envelope: results are ordered by descending raw
+/// similarity, truncated to `top_n`, scored in Cohere's documented `[0, 1]`
+/// range, and carry the document only when `return_documents` is true.
+pub(super) async fn rerank(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CohereRerankRequest>,
+) -> axum::response::Response {
+    let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
+    let _timer = super::metrics::InferenceTimer::new(&state.metrics);
+
+    let query_input: Vec<f32> = req.query.bytes().map(|b| b as f32 / 255.0).collect();
+    let query_emb = run_embeddings(&state, &query_input).unwrap_or_default();
+
+    let mut scored = Vec::with_capacity(req.documents.len());
+    for (idx, doc) in req.documents.iter().enumerate() {
+        let Some(text) = doc.text() else {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "message": format!(
+                        "documents[{idx}] is an object without a string `text` field"
+                    )
+                })),
+            )
+                .into_response();
+        };
+        let doc_input: Vec<f32> = text.bytes().map(|b| b as f32 / 255.0).collect();
+        let doc_emb = run_embeddings(&state, &doc_input).unwrap_or_default();
+        scored.push((
+            idx,
+            super::handlers::cosine_similarity(&query_emb, &doc_emb),
+        ));
+    }
+
+    let results: Vec<CohereRerankResult> = rank_results(scored, req.top_n)
+        .into_iter()
+        .map(|(index, relevance_score)| CohereRerankResult {
+            index,
+            relevance_score,
+            document: req
+                .return_documents
+                .then(|| req.documents[index].echoed()),
+        })
+        .collect();
+
+    Json(CohereRerankResponse {
+        id: format!("rerank-{}", state.name),
+        results,
+    })
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -966,5 +1039,56 @@ mod tests {
             }
         }
         assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn rank_results_orders_by_raw_similarity_then_clamps() {
+        // Ordering uses the raw cosine (1.4 outranks 0.9) while the reported
+        // score lands in Cohere's documented [0, 1] range.
+        let ranked = rank_results(vec![(0, -0.5), (1, 0.9), (2, 1.4)], None);
+        assert_eq!(ranked, vec![(2, 1.0), (1, 0.9), (0, 0.0)]);
+    }
+
+    #[test]
+    fn rank_results_truncates_to_top_n() {
+        let scored = vec![(0, 0.2), (1, 0.8), (2, 0.5)];
+        assert_eq!(rank_results(scored.clone(), Some(1)), vec![(1, 0.8)]);
+        assert_eq!(
+            rank_results(scored.clone(), Some(10)),
+            vec![(1, 0.8), (2, 0.5), (0, 0.2)]
+        );
+        assert_eq!(rank_results(scored, Some(0)), Vec::new());
+    }
+
+    #[test]
+    fn rank_results_ties_keep_input_order() {
+        // Stable sort: equal scores stay in original-index order.
+        let ranked = rank_results(vec![(0, 0.5), (1, 0.5), (2, 0.5)], None);
+        let indices: Vec<usize> = ranked.into_iter().map(|(i, _)| i).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn rerank_document_accepts_strings_and_objects() {
+        let text: RerankDocument = serde_json::from_str(r#""washington""#).unwrap();
+        assert_eq!(text.text(), Some("washington"));
+        assert_eq!(text.echoed(), serde_json::json!({ "text": "washington" }));
+
+        let object: RerankDocument =
+            serde_json::from_str(r#"{"text": "paris", "title": "FR"}"#).unwrap();
+        assert_eq!(object.text(), Some("paris"));
+        // Cohere v1 preserves extra object fields in the response.
+        assert_eq!(
+            object.echoed(),
+            serde_json::json!({ "text": "paris", "title": "FR" })
+        );
+    }
+
+    #[test]
+    fn rerank_document_without_string_text_is_not_rankable() {
+        let no_text: RerankDocument = serde_json::from_str(r#"{"title": "FR"}"#).unwrap();
+        assert_eq!(no_text.text(), None);
+        let non_string: RerankDocument = serde_json::from_str(r#"{"text": 42}"#).unwrap();
+        assert_eq!(non_string.text(), None);
     }
 }
