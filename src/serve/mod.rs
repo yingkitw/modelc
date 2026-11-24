@@ -20,8 +20,11 @@ mod infer;
 mod metrics;
 mod ollama;
 mod openai;
+mod stdio;
 mod types;
 mod web_ui;
+
+pub use stdio::run_stdio_server;
 
 use types::*;
 
@@ -98,7 +101,7 @@ where
     let app = build_router(model, profile, generation, max_concurrent);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("modelc run: listening on http://{}", addr);
+    eprintln!("modelc: listening on http://{}", addr);
 
     let mut shutdown = Some(shutdown);
     if let Some(auth_cfg) = auth {
@@ -116,7 +119,7 @@ where
             .with_graceful_shutdown(shutdown.take().expect("shutdown future"))
             .await?;
     }
-    eprintln!("modelc run: server stopped");
+    eprintln!("modelc: server stopped");
     Ok(())
 }
 

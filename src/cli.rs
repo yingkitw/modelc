@@ -136,102 +136,23 @@ pub enum Commands {
         #[arg(help = "Path to .modelc artifact or model name", value_hint = ValueHint::FilePath)]
         input: String,
 
-        #[arg(short = 'p', long, default_value_t = 8080u16, help = "Listening port")]
-        port: u16,
+        #[command(flatten)]
+        flags: ServeFlags,
+    },
+
+    #[command(about = "Serve a .modelc artifact over a port (HTTP) or over stdio (MCP-style JSON-RPC)")]
+    Serve {
+        #[arg(help = "Path to .modelc artifact or model name", value_hint = ValueHint::FilePath)]
+        input: String,
 
         #[arg(
             long,
-            default_value = "127.0.0.1",
-            value_name = "IP",
-            help = "IP address to bind"
+            help = "Serve newline-delimited JSON-RPC 2.0 (MCP-compatible) on stdin/stdout instead of HTTP"
         )]
-        bind: String,
+        stdio: bool,
 
-        #[arg(long, help = "Print per-operation timing for each inference request")]
-        profile: bool,
-
-        #[arg(long, value_name = "N", help = "Default maximum tokens to generate")]
-        max_tokens: Option<usize>,
-
-        #[arg(
-            long,
-            value_name = "FLOAT",
-            help = "Default sampling temperature (0.0 = greedy)"
-        )]
-        temperature: Option<f32>,
-
-        #[arg(long, value_name = "N", help = "Random seed for reproducible sampling")]
-        seed: Option<u64>,
-
-        #[arg(
-            long,
-            value_name = "FLOAT",
-            help = "Repetition penalty. Values > 1.0 discourage token repetition"
-        )]
-        repetition_penalty: Option<f32>,
-
-        #[arg(
-            long,
-            value_name = "FLOAT",
-            help = "OpenAI-style presence penalty (0.0 = disabled)"
-        )]
-        presence_penalty: Option<f32>,
-
-        #[arg(
-            long,
-            value_name = "FLOAT",
-            help = "OpenAI-style frequency penalty (0.0 = disabled)"
-        )]
-        frequency_penalty: Option<f32>,
-
-        #[arg(
-            long,
-            value_name = "FLOAT",
-            help = "Min-p sampling threshold (0.0 = disabled)"
-        )]
-        min_p: Option<f32>,
-
-        #[arg(
-            long,
-            value_name = "N",
-            help = "Maximum context length before KV cache shifting"
-        )]
-        max_context: Option<usize>,
-
-        #[arg(
-            long,
-            value_name = "N",
-            help = "Number of initial anchor tokens to preserve during context shifting"
-        )]
-        anchor_tokens: Option<usize>,
-
-        #[arg(
-            long,
-            value_name = "REGEX",
-            help = "Default regex grammar constraint for all requests"
-        )]
-        grammar: Option<String>,
-
-        #[arg(
-            long,
-            value_name = "KEY",
-            help = "Require Bearer token authentication on all endpoints"
-        )]
-        api_key: Option<String>,
-
-        #[arg(
-            long,
-            value_name = "N",
-            help = "Max requests per minute per client IP (0 = unlimited)"
-        )]
-        rate_limit: Option<u32>,
-
-        #[arg(
-            long,
-            value_name = "N",
-            help = "Max concurrent inference requests (0 = unlimited)"
-        )]
-        max_concurrent: Option<usize>,
+        #[command(flatten)]
+        flags: ServeFlags,
     },
 
     #[command(about = "List installed model packages")]
@@ -397,6 +318,108 @@ pub enum Commands {
         #[arg(long, value_name = "FLOAT", help = "Min-p sampling threshold")]
         min_p: Option<f32>,
     },
+}
+
+/// Flags shared by `run` and `serve`: HTTP serving options plus the default
+/// generation parameters applied to every text-inference request.
+#[derive(clap::Args, Clone, Debug)]
+pub struct ServeFlags {
+    #[arg(short = 'p', long, default_value_t = 8080u16, help = "Listening port")]
+    pub port: u16,
+
+    #[arg(
+        long,
+        default_value = "127.0.0.1",
+        value_name = "IP",
+        help = "IP address to bind"
+    )]
+    pub bind: String,
+
+    #[arg(long, help = "Print per-operation timing for each inference request")]
+    pub profile: bool,
+
+    #[arg(long, value_name = "N", help = "Default maximum tokens to generate")]
+    pub max_tokens: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Default sampling temperature (0.0 = greedy)"
+    )]
+    pub temperature: Option<f32>,
+
+    #[arg(long, value_name = "N", help = "Random seed for reproducible sampling")]
+    pub seed: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Repetition penalty. Values > 1.0 discourage token repetition"
+    )]
+    pub repetition_penalty: Option<f32>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "OpenAI-style presence penalty (0.0 = disabled)"
+    )]
+    pub presence_penalty: Option<f32>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "OpenAI-style frequency penalty (0.0 = disabled)"
+    )]
+    pub frequency_penalty: Option<f32>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Min-p sampling threshold (0.0 = disabled)"
+    )]
+    pub min_p: Option<f32>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Maximum context length before KV cache shifting"
+    )]
+    pub max_context: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Number of initial anchor tokens to preserve during context shifting"
+    )]
+    pub anchor_tokens: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "REGEX",
+        help = "Default regex grammar constraint for all requests"
+    )]
+    pub grammar: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "KEY",
+        help = "Require Bearer token authentication on all endpoints"
+    )]
+    pub api_key: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Max requests per minute per client IP (0 = unlimited)"
+    )]
+    pub rate_limit: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Max concurrent inference requests (0 = unlimited)"
+    )]
+    pub max_concurrent: Option<usize>,
 }
 
 /// Resolve `--listen` vs `--bind` + `--port` before calling [`crate::compiler::compile`].

@@ -62,6 +62,7 @@ fn cli_help_lists_subcommands() {
     for sub in [
         "pack",
         "run",
+        "serve",
         "list",
         "inspect",
         "compile",
