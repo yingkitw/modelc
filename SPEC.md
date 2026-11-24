@@ -21,13 +21,15 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 ### `pack`
 
-**Input:** path to weights file; optional `-f`, `-o`, `--arch`, `--compress`, `--quantize fp16|int8|int4`, `--prune <threshold>`.
+**Input:** path to weights file; optional `-f`, `-o`, `--arch`, `--compress`, `--quantize fp16|int8|int4|q4_0|q8_0`, `--prune <threshold>`.
 
 **Output:** `.modelc` single-file artifact containing JSON header + tensor blob (optionally compressed / quantized / pruned).
 
 **Side effects:** writes artifact file to specified path.
 
 **Errors:** parse failure; invalid output path; compression failure.
+
+**Python programs (`.py`):** when the input ends in `.py`, it is *executed* by the python bridge (`src/pybridge.rs`) — the system Python (`python3`, falling back to `python`) runs an embedded stdlib-only driver that harvests tensors from the program's globals and writes a temporary Safetensors file which then flows through the normal pack path. Harvested sources: any global with a callable `state_dict()` (torch `nn.Module` — no torch import needed by modelc), numpy arrays, dicts of tensors, and plain nested lists of numbers. When every `state_dict()` entry alternates a 2-D `*.weight` with a 1-D `*.bias`, parameters are re-emitted as `layer{N}.weight`/`layer{N}.bias` (bare globals named `layer{N}_weight`/`layer{N}_bias` likewise), which makes the artifact `mlp`-shaped and runnable through the MLP inference path. The program first runs as an import (`__name__ == "__modelc__"`) so `if __name__ == "__main__"` blocks stay dormant; only when that yields no tensors is it re-run as `__main__`. `-f` is rejected for `.py` inputs; the program may run twice in that second case, and script output is echoed after the run completes. `inspect` does **not** execute programs (undetectable without `-f`).
 
 ### `run`
 
@@ -46,6 +48,31 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 **Output:** generated text on stdout (transformer artifacts) or a JSON array of byte-normalized floats (MLP / other), matching `POST /complete` semantics. Does **not** start an HTTP server.
 
 **Errors:** missing artifact; invalid artifact format.
+
+### `serve`
+
+One command, two transports. `modelc serve <artifact> [flags]` shares `run`'s flag set (`--port`/`--bind`, `--api-key`/`--rate-limit`/`--max-concurrent`, and all generation-default flags) — without `--stdio` it is the HTTP server, byte-for-byte.
+
+**HTTP mode (default):** identical to `run`; binds `--bind:--port` and serves the full router until `SIGINT`/`SIGTERM`.
+
+**stdio mode (`--stdio`):** serves **newline-delimited JSON-RPC 2.0 on stdin/stdout**, wire-compatible with the Model Context Protocol (MCP) stdio transport — attachable from editors and agent runtimes. Design rules:
+
+- stdout carries **only** protocol messages; all logs go to stderr. Each response is one line, flushed immediately.
+- Methods: `initialize` (echoes a supported `protocolVersion` — `2024-11-05`, `2025-03-26`, `2025-06-18` — and reports `capabilities.tools` + `serverInfo: {name: "modelc", version}`), `ping` → `{}`, `tools/list` → `chat` / `complete` / `embeddings` tools with JSON-Schema `inputSchema`s mirroring the native request shapes, `tools/call` → inference, `notifications/initialized` → silent.
+- `tools/call` results use the MCP content envelope `{content: [{type: "text", text}], isError}`. Tool failures (bad arguments, unknown tool) are error **results** with `isError: true`; protocol violations use JSON-RPC errors: `-32601` unknown method, `-32600` missing method, `-32700` unparseable line (id `null`).
+- Inference goes through the same internals as the HTTP handlers (chat template, sampling params, JSON-Schema retry, prefix cache, metrics), so both transports agree on semantics.
+- `--api-key` / `--rate-limit` apply to the HTTP mode only; stdio has no authentication layer.
+
+**Example session** (`modelc serve my.modelc --stdio`):
+
+```
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"modelc","version":"…"}}}
+→ {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"complete","arguments":{"prompt":"hello"}}}
+← {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"…"}],"isError":false}}
+```
+
+**Errors:** missing artifact; invalid artifact format; port already bound (HTTP mode).
 
 ### `list`
 
@@ -125,7 +152,7 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 
 **Errors:** missing or undetectable format; parse failure.
 
-**`--quant-sizes`** — instead of the normal summary, print a quantization size preview: the total byte size the model would occupy under each format (fp32, fp16, int8, int4, q4_0) without actually quantizing. Sizes are computed from element counts (shape-based), so they are accurate regardless of the tensors' current dtype. INT4 packs two signed nibbles per byte; Q4_0 uses 18 bytes per block of 32 elements with per-tensor block rounding. Shows each format's size in MB and the percentage change vs the current stored size.
+**`--quant-sizes`** — instead of the normal summary, print a quantization size preview: the total byte size the model would occupy under each format (fp32, fp16, int8, int4, q4_0, q8_0) without actually quantizing. Sizes are computed from element counts (shape-based), so they are accurate regardless of the tensors' current dtype. INT4 packs two signed nibbles per byte; Q4_0 uses 18 bytes per block of 32 elements and Q8_0 34 bytes, with per-tensor block rounding. Shows each format's size in MB and the percentage change vs the current stored size.
 
 ### `compile` (legacy)
 
@@ -147,8 +174,11 @@ The primary user outcome: a **single file** per model that can be inspected, mov
 | GGUF        | Implemented for **F32/F16/BF16/F64/I8/I16/I32/I64** and contiguous integer blobs; **Q4_0, Q5_0, Q8_0, Q4_K, Q6_K** blocks are **dequantized to F32** in IR. Unsupported quant types still error with a named type hint. |
 | ONNX        | Implemented for **initializer** tensors: inlined `raw_data` / typed fields, **external** payloads (`external_data` with `location`/`offset`/`length`), and **segmented** initializers. Also parses the graph into an `ExecutionPlan` stored as `onnx.execution_plan` metadata. |
 | PyTorch     | Implemented for **Safetensors-in-ZIP** (and standalone Safetensors mislabeled `.pt`/`.pth`); pickle-only checkpoints need export outside `modelc`. |
+| Python program | Implemented via the **python bridge** (`src/pybridge.rs`): `.py` inputs are executed with the system Python (embedded stdlib-only driver) and their tensors are written as Safetensors — torch `state_dict()` objects, numpy arrays, and plain nested lists are all harvested. |
 
 ## Format detection
+
+0. **Python programs** — a `.py` extension short-circuits detection entirely: the python bridge executes the program (see `pack`).
 
 1. **Extension** (`.safetensors`, `.gguf`, `.onnx`, `.pt`, `.pth`, heuristics on `.bin`).
 2. **Sniffing** when needed: `GGUF` prefix, zip `PK\x03\x04` (common for torch archives), or full-file Safetensors parse for files **≤ 64 MiB** when the extension is ambiguous or missing.
@@ -192,6 +222,7 @@ Created by `pack`, consumed by `run`.
 - **`POST /embeddings`** — request JSON `{ "input": "..." }` (single) or `{ "inputs": ["...", "..."] }` (batch). Single response: `{ "embedding": [f32, ...], "model": "..." }`. Batch response: `{ "embeddings": [{"embedding": [f32, ...], "index": 0}, ...], "model": "..." }`. Uses the final hidden state (after layer norm / RMS norm, before the output head) for transformer models; echo fallback for others.
 - **`POST /v1/embeddings`** — OpenAI-compatible embeddings endpoint. Request JSON: `{ "input": "..." }` or `{ "input": ["...", "..."] }`, optional `encoding_format: "float"` (default) or `"base64"`, optional `model`. Response: `{ "object": "list", "data": [{ "object": "embedding", "embedding": [f32, ...] | "base64...", "index": 0, "dimensions": N }, ...], "model": "...", "usage": { "prompt_tokens": N, "total_tokens": N } }`. Uses the same embedding logic as `/embeddings`.
 - **`POST /reranking`** — llama.cpp-compatible reranking endpoint for RAG pipelines. Request JSON: `{ "query": "...", "documents": ["...", "..."], "top_n": N }` (`top_n` optional). Embeds the query and each document via the model's embedding path, computes cosine similarity between the query embedding and each document embedding, and returns results sorted by descending relevance score. Response: `{ "model": "...", "results": [{ "index": 0, "relevance_score": 0.95, "document": { "text": "..." } }, ...] }`. When `top_n` is provided, only the top N results are returned. Covered by `run_server_serves_reranking` test.
+- **`POST /v1/rerank` · `/v2/rerank`** — Cohere-compatible reranking for RAG pipelines. Both API versions' paths share one handler: `cohere.Client` calls `/v1/rerank` and `cohere.ClientV2` (Cohere's current default) calls `/v2/rerank`, each appending its own path to the configured `base_url` — so either SDK generation can point at a modelc server. Request JSON: `{ "model": "...", "query": "...", "documents": ["...", { "text": "..." }], "top_n": N, "return_documents": false }`. `model` is accepted but ignored (one model per server). `documents` are plain strings or objects ranked on their `text` field (Cohere v1); an object without a string `text` returns `400 { "message": "..." }`. `top_n` limits the number of results (default: all). The query and each document go through the same embedding path as `/reranking`; results are ordered by descending cosine similarity and `relevance_score` is that similarity clamped into Cohere's documented `[0, 1]` range — the ordering is meaningful, the magnitude is not a calibrated relevance probability. `document` is echoed back only when `return_documents` is true (string documents as `{ "text": "..." }`, object documents with their extra fields preserved). Response: `{ "id": "rerank-<model>", "results": [{ "index": 0, "relevance_score": 0.95, "document": { "text": "..." } }, ...] }`. Not supported (accepted, no effect): `rank_fields` (always `text`), `max_chunks_per_doc` / `max_tokens_per_doc`, `relevant_spans`. Covered by `run_server_serves_cohere_rerank` and `run_server_serves_cohere_rerank_object_documents_and_v2_path`.
 - **`POST /tokenize`** — encode text to token IDs using the model's byte-level BPE tokenizer (the same one `/chat` and `/complete` use). Request JSON `{ "input": "..." }` (single) or `{ "inputs": ["...", "..."] }` (batch). Single response: `{ "tokens": [id, ...], "count": N }`. Batch response: `{ "tokens_batch": [[id, ...], ...], "count": N }` where `count` is the total across all inputs. Useful for prompt budgeting and prompt management.
 - **`POST /detokenize`** — decode token IDs back to text using the model's byte-level BPE tokenizer. Request JSON `{ "tokens": [id, ...] }`. Response `{ "text": "..." }`. Complements `/tokenize` for round-trip token management.
 - **`GET /api/version`** — exposes CLI version and git SHA for orchestration/health checks. JSON: `{ "version": "<CARGO_PKG_VERSION>", "git_sha": "abc123" }`. `version` is captured at compile time via `env!("CARGO_PKG_VERSION")`; `git_sha` is captured at compile time by `build.rs` via `git rev-parse --short HEAD` (or `"unknown"` when git is unavailable).
@@ -301,10 +332,11 @@ Created by `pack`, consumed by `run`.
 
 ### Pack-time quantization (`--quantize`)
 
-`modelc compile --quantize fp16/int8/int4` converts FP32 tensors at pack time:
+`modelc compile --quantize fp16/int8/int4/q4_0/q8_0` converts FP32 tensors at pack time:
 - **FP16** — stored as `DataType::F16`.
 - **INT8** — per-tensor symmetric quantization to `DataType::I8` with `quant_scale.<name>` metadata. `Runtime::from_raw` casts to FP32 directly (scale is not applied at runtime; this is a known limitation for `run` — `dequantize_in_place` handles it for `inspect`/`export`).
 - **INT4** — packed two signed nibbles per byte, stored as `DataType::I8` with `quant_mode.<name> = "int4"` metadata.
+- **Q4_0 / Q8_0** — GGML block quantization, using the same layouts llama.cpp writes: Q4_0 stores 18 bytes per 32 elements (f16 scale + packed 4-bit weights), Q8_0 stores 34 bytes per 32 elements (f16 scale + int8 weights). The encoded bytes are written to the artifact as-is and the tensor keeps its `DataType::Q4_0` / `Q8_0` dtype, so `Runtime::from_raw` dequantizes them on the fly — no scale metadata is needed, and the block layout is byte-compatible with llama.cpp. A tensor whose element count is not a multiple of 32 is not a whole number of blocks and stays F32 (llama.cpp's own fallback); the pack log reports how many tensors were skipped.
 
 ## Platform support
 

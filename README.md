@@ -39,7 +39,7 @@
 
 modelc is a command-line tool for working with local language-model weight files. It does two jobs:
 
-1. **Package** weights into one `.modelc` file (JSON header + compressed tensor blob, optional INT4/INT8/FP16 quantization and pruning).
+1. **Package** weights into one `.modelc` file (JSON header + compressed tensor blob, optional INT4/INT8/FP16/Q4_0/Q8_0 quantization and pruning).
 2. **Serve** that artifact as an HTTP inference API that speaks the OpenAI protocol, so existing clients and SDKs work without changes.
 
 It supports **GPT-2 and LLaMA** transformer forward passes, **MLP** models, and **ONNX** graph execution directly from the in-memory runtime — no Python, no PyTorch, no large framework runtime required. Output binaries are pure Rust (axum + tokio).
@@ -51,9 +51,9 @@ modelc is designed for developers and teams who need to:
 - **Package and ship LLM models** as a single portable file — no external weight files, no directory layouts to manage.
 - **Run local LLM inference** with an OpenAI-compatible API — drop-in replacement for OpenAI clients and SDKs.
 - **Serve models on Apple Silicon** with native Metal GPU acceleration, or on any CPU with AVX/NEON SIMD.
-- **Optimize models at pack time** — quantize to INT4/INT8/FP16, prune small weights, compress with zstd.
+- **Optimize models at pack time** — quantize to INT4/INT8/FP16/Q4_0/Q8_0, prune small weights, compress with zstd.
 - **Embed inference in Rust projects** — `compile` emits a standalone pure-Rust binary with no runtime dependencies.
-- **Avoid Python/PyTorch infrastructure** — modelc is a single Rust binary with zero Python dependencies.
+- **Avoid Python/PyTorch infrastructure** — modelc is a single Rust binary with zero Python dependencies at runtime. (Compiling `.py` *sources* is the one opt-in exception: an embedded one-shot Python driver extracts weights at pack time; serving never needs Python.)
 
 ### Cross-platform
 
@@ -69,7 +69,7 @@ Runs on **macOS**, **Linux**, and **Windows** from the same Rust toolchain. On A
 | Native GPU | Metal (macOS) | via llama.cpp | CUDA / ROCm | CUDA, Metal, Vulkan |
 | CPU SIMD | ✅ AVX / NEON GEMV | via llama.cpp | limited | ✅ |
 | GGUF / Safetensors / ONNX / PyTorch | ✅ all four | GGUF | HF / Safetensors | GGUF |
-| Quantization | INT4 / INT8 / FP16 at pack | GGUF quants | AWQ / GPTQ | GGUF quants |
+| Quantization | INT4 / INT8 / FP16 / Q4_0 / Q8_0 at pack | GGUF quants | AWQ / GPTQ | GGUF quants |
 | Speculative decoding, prefix cache, KV quant | ✅ | via llama.cpp | ✅ | ✅ |
 | Standalone emitted binary (`compile`) | ✅ | ❌ | ❌ | ❌ |
 | Best fit | packaging, portable single-file artifacts, lightweight serving | model zoo + chat app | high-throughput GPU serving | widest model support / edge |
@@ -109,6 +109,7 @@ cargo build --release
 | **Safetensors** | `safetensors` | `.safetensors` | Merges `__metadata__` (`architecture` / `model_type`) into the model IR. |
 | **ONNX** | `onnx` | `.onnx` | Inline, external-data, and segmented initializers; graph ops executed via the tensor runtime. |
 | **PyTorch** | `pytorch` | `.pt`, `.pth` | Torch **ZIP** containers incl. nested Safetensors payloads. Pickle-only checkpoints should be exported to Safetensors/ONNX/GGUF first. |
+| **Python programs** | — | `.py` | **Executed** by the embedded python bridge: weights harvested from `state_dict()` (torch), numpy arrays, dicts of tensors, or plain nested lists. Affine stacks normalize to `layer{N}.weight/bias` so the artifact runs through the MLP path. Requires Python on PATH. |
 
 Ambiguous or extensionless files (e.g. generic `.bin`) are auto-sniffed against GGUF / zip / Safetensors magic bytes.
 
@@ -120,9 +121,16 @@ Ambiguous or extensionless files (e.g. generic `.bin`) are auto-sniffed against 
 # Package
 modelc pack model.safetensors -o my.modelc
 modelc pack model.gguf --compress -o my.modelc
+modelc pack model.py -o my.modelc        # executes the program, extracts its weights
 modelc pack model.safetensors --quantize int8 --prune 0.001 -o my.modelc
+modelc pack model.safetensors --quantize q4_0 -o my.modelc        # GGML Q4_0 blocks, ~7x smaller weights
 
 # Serve
+modelc serve my.modelc                    # HTTP on 127.0.0.1:8080 (same as run)
+modelc serve my.modelc -p 8080 --profile
+modelc serve my.modelc --stdio            # MCP-compatible JSON-RPC 2.0 on stdin/stdout
+
+# Run
 modelc run my.modelc
 modelc run my.modelc --port 8080 --profile
 modelc run my.modelc --max-context 2048 --grammar "^\d+$"
@@ -148,7 +156,7 @@ modelc switch my-model 2
 
 ```bash
 modelc inspect model.safetensors
-modelc inspect model.safetensors --quant-sizes   # preview fp32/fp16/int8/int4/q4_0 sizes
+modelc inspect model.safetensors --quant-sizes   # preview fp32/fp16/int8/int4/q4_0/q8_0 sizes
 modelc inspect model.modelc --readme              # generate a Markdown model card
 modelc export model.modelc -o out.safetensors    # GGUF quants dequantize to F32 automatically
 modelc verify model.modelc                        # header check + sha256 digest
@@ -170,7 +178,7 @@ The `compile` path and the `run` path produce **bit-identical logits** — they 
 
 ### `pack` flags
 - **`--compress`** — zstd-compress the artifact (version-2 format).
-- **`--quantize fp16|int8|int4`** — quantize F32 tensors at pack time (INT4/INT8 auto-dequantize on `run`).
+- **`--quantize fp16|int8|int4|q4_0|q8_0`** — quantize F32 tensors at pack time (INT4/INT8 auto-dequantize on `run`; `q4_0`/`q8_0` write GGML block layouts and dequantize on the fly).
 - **`--prune <threshold>`** — zero small weights below threshold.
 - **`--arch llama|gpt2|mlp|…`** — optional architecture hint.
 - **`--format` / `-f`** — force the input weight format.
@@ -179,7 +187,7 @@ The `compile` path and the `run` path produce **bit-identical logits** — they 
 ### `run` flags
 | Flag | Default | Purpose |
 |---|---|---|
-| `--bind` / `--port` | `0.0.0.0` / `8080` | HTTP bind address / port |
+| `--bind` / `--port` | `127.0.0.1` / `8080` | HTTP bind address / port |
 | `--api-key <key>` | — | Require `Authorization: Bearer <key>` (exempts `/health`, `/info`) |
 | `--rate-limit <N>` | unlimited | Max requests/min per client IP |
 | `--max-concurrent <N>` | unlimited | In-flight inference cap; over-limit gets `503` |
@@ -193,6 +201,10 @@ The `compile` path and the `run` path produce **bit-identical logits** — they 
 | `--grammar <regex>` | — | Regex grammar constraint during sampling |
 | `--seed <n>` | — | Deterministic sampling |
 | `--profile` | — | Print per-step inference timing |
+
+### `serve` flags
+
+`serve` accepts every `run` flag (same defaults) plus `--stdio`. Without `--stdio` it is the HTTP server (see `run` flags); with `--stdio` it serves newline-delimited JSON-RPC 2.0 (MCP-compatible) on stdin/stdout — see the `serve` section in SPEC.md for the protocol. Auth flags are HTTP-only.
 
 ### `prompt` flags
 Same sampling flags as `run` for a single generation: `--max-tokens`, `--temperature`, `--top-p`, `--min-p`, `--seed`. Prints to stdout and exits. Transformer artifacts (`gpt2` / `llama`) emit decoded text; other architectures echo a JSON float array (same as `POST /complete` without a transformer).
@@ -229,6 +241,7 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `POST` | `/v1/completions` | **OpenAI legacy completion** (stream + non-stream, `echo`, `best_of`, `suffix`, `n`, …) |
 | `POST` | `/v1/embeddings` | **OpenAI embeddings** (`encoding_format` float/base64, `dimensions`, `usage`) |
 | `POST` | `/reranking` | **Reranking** (llama.cpp-compatible; query + documents → sorted by cosine similarity, optional `top_n`) |
+| `POST` | `/v1/rerank` · `/v2/rerank` | **Cohere-compatible reranking** (both Cohere SDK generations; string or `{text}` documents, `top_n`, `return_documents`) |
 | `POST` | `/lora/load` · `/lora/unload` | Hot-swap LoRA adapters without restart |
 | `GET` | `/api/cache/stats` | Prefix cache stats (entries, tokens, KV bytes, utilization) |
 | `POST` | `/api/cache/clear` | Drop every cached prefix snapshot (e.g. after LoRA swap) |
@@ -247,14 +260,16 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 - **Concurrent generation** — `RwLock` prefix cache with short hold times; transformer requests run in parallel up to CPU core count.
 
 ### Quantization & optimization
-- **Pack-time quantization** — `--quantize fp16|int8|int4`; preview with `inspect --quant-sizes`.
+- **Pack-time quantization** — `--quantize fp16|int8|int4|q4_0|q8_0`; preview with `inspect --quant-sizes`.
 - **Weight pruning** — `--prune <threshold>`.
 - **GGUF quantized inference** — Q4_0/Q5_0/Q8_0/Q4_K/Q6_K preserved in-IR and dequantized on-the-fly (~8× artifact size reduction for Q4_0).
 - **zstd compression** — `--compress` (version-2 artifact format).
 - **SIMD GEMV** — NEON (aarch64) / AVX (x86_64) K-dimension vectorized dot product, shared bit-for-bit between `run` and `compile` via `src/runtime/gemv.rs`.
 
 ### Serving & operations
+- **One command, two transports** — `modelc serve` runs the same inference stack over HTTP (`--port`/`--bind`) **or over stdio** (`--stdio`): MCP-compatible newline-delimited JSON-RPC 2.0 (`initialize` / `ping` / `tools/list` / `tools/call`) so agents and editors can attach directly to a local artifact.
 - **OpenAI compatibility** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`; tools, tool_choice, JSON mode / JSON Schema, `n`, `best_of`, `echo`, `suffix`, `logprobs`, `stream_options.include_usage`, `user`, `max_completion_tokens`, `response_format`.
+- **Cohere-compatible reranking** — `/v1/rerank` + `/v2/rerank`: point Cohere SDK clients (`cohere.Client` → `/v1/rerank`, `cohere.ClientV2` → `/v2/rerank`) at the server via `base_url` for RAG reranking; same embedding path as `/reranking`.
 - **Auth & limits** — `--api-key` bearer auth, `--rate-limit` per-IP token bucket, `--max-concurrent` backpressure.
 - **Observability** — Prometheus `/metrics`, `/v1/system` hardware info, `/api/version`, `/props`.
 - **LoRA hot-swap** — load/unload adapters at runtime via HTTP, atomic runtime swap.
@@ -269,7 +284,11 @@ Runnable programs live under [`examples/`](./examples/) (see [`examples/README.m
 cargo run --example create_simple_model -- ./demo_mlp.safetensors
 cargo run --example parse_weights -- ./demo_mlp.safetensors safetensors
 cargo run --example runtime_inference
+cargo run --example python_model          # compile a python program, run it as a model
+cargo run --example mcp_client            # MCP session against `modelc serve --stdio`
 ```
+
+Sample Python programs live in [`examples/python/`](./examples/python/) — they double as the test fixtures for `tests/python_samples_test.rs` (golden forward values + documented failure cases).
 
 ## When not to use modelc
 
@@ -316,7 +335,7 @@ Yes — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and `/v1/mo
 modelc is suitable for lightweight serving, edge deployment, and development workflows. For high-throughput multi-GPU production serving, use vLLM or a managed inference provider. modelc's strength is portability and single-file deployment.
 
 **What quantization formats are supported?**
-modelc supports INT4, INT8, and FP16 quantization at pack time (`--quantize`), plus GGUF native quantized formats (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K) which are preserved in the IR and dequantized on-the-fly during inference.
+modelc supports INT4, INT8, FP16, Q4_0 and Q8_0 quantization at pack time (`--quantize`), plus GGUF native quantized formats (Q4_0, Q5_0, Q8_0, Q4_K, Q6_K) which are preserved in the IR and dequantized on-the-fly during inference. The `q4_0`/`q8_0` modes write the same GGML block layouts llama.cpp uses, so a modelc-packed artifact is readable by llama.cpp.
 
 **Does modelc support streaming?**
 Yes — all OpenAI-compatible endpoints support SSE streaming (`stream: true`), with request cancellation on client disconnect.

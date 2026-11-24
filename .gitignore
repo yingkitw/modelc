@@ -1,3 +1,5 @@
 /target
-AGENTS.md
-MEMORY.mdsimple_model.safetensors
+simple_model.safetensors
+demo_mlp.safetensors
+*.modelc
+modelc-docker/
