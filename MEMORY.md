@@ -214,6 +214,17 @@ For each tensor:
 - **Testable core over handler tests**: the GPT-2 fixture cannot be made to emit a negative cosine on demand, so the `[0, 1]` contract is pinned by inline tests on the pure `rank_results` (`rank_results_orders_by_raw_similarity_then_clamps` feeds `-0.5` / `1.4`) plus DTO deserialization tests; the integration tests pin `id` (`rerank-{name}` with the name read from `/info`), the range, object documents, the 400, and v1/v2 parity through the running server. `post_status` surfaces only the status code (the test client drops 4xx bodies) — assert bodies through the 200 path.
 - **Resuming an interrupted loop**: this endpoint arrived as code + one test with the TODO box unchecked and no docs. Before implementing any TODO item, `grep` the tree for its keywords and check `git status` — an earlier session may have landed part of it. An unchecked box is not evidence the work is absent.
 
+### MCP resources (`resources/list` + `resources/read`, `src/serve/stdio.rs`, 2026-11-25)
+Read-only model metadata over the same stdio session, so an agent can inspect the artifact it is talking to.
+- **URIs**: `modelc://model` (name, architecture, tensor count, parameter/byte totals, quantization label, artifact metadata), `modelc://model/tensors` (name, shape, dtype, element count, stored bytes — **sorted by name** so the output is deterministic; `base_tensors` is a `HashMap`, so an unsorted listing would flap between runs), `modelc://model/tokenizer` (model type, BOS/EOS ids, chat-template size, raw `tokenizer.*` entries).
+- **Envelope**: contents use `{contents: [{uri, mimeType: "application/json", text}]}` — the payload is **JSON text inside `text`**, not a structured object; metadata values are capped at 1024 chars.
+- **Error codes**: `-32002` unknown `uri`, `-32602` missing `uri` param — JSON-RPC *errors*, unlike tool failures which are `isError: true` results.
+- **Gate the capability by protocol version**: resources entered MCP in `2025-03-26`, so `initialize` advertises `capabilities.resources` only when the negotiated version is ≥ that — a `2024-11-05` client must not be pointed at a method it does not know.
+- **`AppState` now keeps `metadata`** (`HashMap<String, String>`): the parsed weights' metadata (GGUF KV pairs / Safetensors `__metadata__`) used to be dropped right after parsing, which made the tokenizer info unreachable from every server.
+- **Adding an MCP method touches the error tests**: the "unknown method" cases had used `resources/list` as their example of an unknown method — a method that becomes known invalidates them, so re-point them (e.g. at `prompts/list`).
+- **MCP tools** (`tools/list` + `tools/call`): `chat` / `complete` / `embeddings` / `rerank`. A tool result is **JSON text inside the content envelope** (`{content: [{type: "text", text}], isError}`) — parse `text` as JSON rather than expecting a structured object. Tool failures are `isError: true` results; only protocol violations are JSON-RPC errors.
+- **One core per behavior**: the MCP `rerank` tool and the HTTP `/v1/rerank` endpoint both call `openai::rerank_documents` (embed → cosine → order → clamp). The HTTP handler used to inline its own embedding loop, which would have let the two surfaces drift. When adding a tool, put the shared logic in the module that owns the behavior and call it from both transports.
+
 ### Streaming protocol
 - All streaming endpoints use SSE (`text/event-stream`)
 - `ReceiverStream<Result<Event, Infallible>>` is the body

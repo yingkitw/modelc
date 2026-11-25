@@ -9,7 +9,7 @@ Run these with `cargo run --example <name> -- [args…]` from the crate root (`-
 | [`inspect_model`](./inspect_model.rs) | Thin wrapper around `modelc::compiler::inspect` (same output style as `modelc inspect`). |
 | [`runtime_inference`](./runtime_inference.rs) | Builds tensors in memory and runs **`Runtime` + ops** (`linear`, `relu`, `softmax`) without parsing a file. |
 | [`python_model`](./python_model.rs) | Compiles a **Python program** into a `.modelc` artifact via the python bridge (`modelc pack model.py` flow) and runs it as a model. |
-| [`mcp_client`](./mcp_client.rs) | Spawns `modelc serve --stdio` and drives an **MCP session** (initialize → tools/list → tools/call chat) as a client, validating every response. |
+| [`mcp_client`](./mcp_client.rs) | Spawns `modelc serve --stdio` and drives an **MCP session** (initialize → tools/list → tools/call chat → resources/list → resources/read) as a client, validating every response. |
 
 ### Python sample programs (`examples/python/`)
 

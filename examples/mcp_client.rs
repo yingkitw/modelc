@@ -4,7 +4,8 @@
 //! 1. packs a tiny 2-layer MLP into a temp artifact,
 //! 2. spawns `modelc serve <artifact> --stdio` as a child process,
 //! 3. performs an MCP session over stdin/stdout: `initialize` →
-//!    `notifications/initialized` (silent) → `tools/list` → `tools/call chat`,
+//!    `notifications/initialized` (silent) → `tools/list` → `tools/call chat` →
+//!    `resources/list` → `resources/read`,
 //! 4. validates every response and prints the transcript.
 //!
 //! Run with: `cargo run --example mcp_client` (uses `modelc` from PATH or the
@@ -126,7 +127,10 @@ fn main() {
         .iter()
         .map(|t| t["name"].as_str().expect("tool name"))
         .collect();
-    assert_eq!(names, vec!["chat", "complete", "embeddings"]);
+    assert_eq!(
+        names,
+        vec!["chat", "complete", "embeddings", "rerank"]
+    );
 
     println!("5. tools/call chat...");
     send(
@@ -142,7 +146,59 @@ fn main() {
         .expect("text content")
         .to_string();
 
-    println!("6. shutting down...");
+    println!("6. tools/call rerank...");
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"rerank","arguments":{
+                    "query":"capital cities",
+                    "documents":["washington","paris","tokyo"],
+                    "top_n":2,
+                    "return_documents":true}}}),
+    );
+    let response = read(&mut reader);
+    assert_eq!(response["result"]["isError"], false);
+    let ranked: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().expect("text"))
+            .expect("rerank envelope");
+    assert_eq!(ranked["results"].as_array().expect("results").len(), 2);
+
+    println!("7. resources/list...");
+    send(&mut stdin, &json!({"jsonrpc":"2.0","id":5,"method":"resources/list"}));
+    let response = read(&mut reader);
+    let uris: Vec<&str> = response["result"]["resources"]
+        .as_array()
+        .expect("resources array")
+        .iter()
+        .map(|r| r["uri"].as_str().expect("resource uri"))
+        .collect();
+    assert_eq!(
+        uris,
+        vec![
+            "modelc://model",
+            "modelc://model/tensors",
+            "modelc://model/tokenizer"
+        ]
+    );
+
+    println!("8. resources/read modelc://model...");
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":6,"method":"resources/read",
+                "params":{"uri":"modelc://model"}}),
+    );
+    let response = read(&mut reader);
+    let overview: Value = serde_json::from_str(
+        response["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("text"),
+    )
+    .expect("overview json");
+    assert_eq!(overview["name"], "mcp_demo");
+    assert_eq!(overview["architecture"], "mlp");
+    println!("   model overview: {overview}");
+
+    println!("9. shutting down...");
     child.kill().expect("kill child");
     child.wait().expect("reap child");
 

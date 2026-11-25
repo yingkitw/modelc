@@ -144,6 +144,7 @@ impl AppState {
             .get("onnx.execution_plan")
             .and_then(|s| crate::onnx_exec::ExecutionPlan::from_json(s).ok());
         let chat_template = model.metadata.get("tokenizer.chat_template").cloned();
+        let metadata = model.metadata.clone();
         let base_tensors = model.tensors.clone();
         let runtime = Runtime::from_raw(&model.tensors);
         // Try the neural draft model first; fall back to prompt-lookup for
@@ -191,6 +192,7 @@ impl AppState {
             onnx_plan,
             transformer_hidden,
             chat_template,
+            metadata,
             profile,
             generation,
             prefix_cache: std::sync::RwLock::new(crate::prefix_cache::PrefixCache::new(
@@ -310,6 +312,10 @@ pub struct AppState {
     /// Jinja2 chat template from model metadata (e.g. `tokenizer.chat_template`), used to
     /// format messages before tokenization for chat endpoints.
     chat_template: Option<String>,
+    /// Model metadata as parsed from the weights file (GGUF KV pairs, Safetensors
+    /// `__metadata__`). Kept so servers can report it — the MCP stdio transport
+    /// exposes it as a read-only resource.
+    metadata: std::collections::HashMap<String, String>,
     profile: bool,
     /// Default generation configuration for text inference endpoints.
     generation: crate::generate::GenerationConfig,

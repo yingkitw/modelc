@@ -873,6 +873,33 @@ fn rank_results(mut scored: Vec<(usize, f32)>, top_n: Option<usize>) -> Vec<(usi
         .collect()
 }
 
+/// Rank `documents` against `query` with the model's embedding path: cosine
+/// similarity, ordered by descending similarity, truncated to `top_n`, and
+/// clamped into the `[0, 1]` range Cohere's contract documents.
+///
+/// Shared by the HTTP `/v1/rerank` endpoint and the MCP `rerank` tool so both
+/// rank identically.
+pub(super) fn rerank_documents(
+    state: &AppState,
+    query: &str,
+    documents: &[String],
+    top_n: Option<usize>,
+) -> Vec<(usize, f32)> {
+    let query_input: Vec<f32> = query.bytes().map(|b| b as f32 / 255.0).collect();
+    let query_emb = run_embeddings(state, &query_input).unwrap_or_default();
+
+    let mut scored = Vec::with_capacity(documents.len());
+    for (idx, doc) in documents.iter().enumerate() {
+        let doc_input: Vec<f32> = doc.bytes().map(|b| b as f32 / 255.0).collect();
+        let doc_emb = run_embeddings(state, &doc_input).unwrap_or_default();
+        scored.push((
+            idx,
+            super::handlers::cosine_similarity(&query_emb, &doc_emb),
+        ));
+    }
+    rank_results(scored, top_n)
+}
+
 /// `POST /v1/rerank` + `/v2/rerank` — Cohere-compatible reranking over the same
 /// embedding + cosine machinery as the native `/reranking` endpoint. Both API
 /// versions' paths share one envelope: results are ordered by descending raw
@@ -885,10 +912,9 @@ pub(super) async fn rerank(
     let _guard = super::metrics::ActiveRequestGuard::new(&state.metrics);
     let _timer = super::metrics::InferenceTimer::new(&state.metrics);
 
-    let query_input: Vec<f32> = req.query.bytes().map(|b| b as f32 / 255.0).collect();
-    let query_emb = run_embeddings(&state, &query_input).unwrap_or_default();
-
-    let mut scored = Vec::with_capacity(req.documents.len());
+    // Object documents rank on their `text` field; one without a string
+    // `text` is a missing-required-fields request.
+    let mut texts = Vec::with_capacity(req.documents.len());
     for (idx, doc) in req.documents.iter().enumerate() {
         let Some(text) = doc.text() else {
             return (
@@ -901,24 +927,20 @@ pub(super) async fn rerank(
             )
                 .into_response();
         };
-        let doc_input: Vec<f32> = text.bytes().map(|b| b as f32 / 255.0).collect();
-        let doc_emb = run_embeddings(&state, &doc_input).unwrap_or_default();
-        scored.push((
-            idx,
-            super::handlers::cosine_similarity(&query_emb, &doc_emb),
-        ));
+        texts.push(text.to_string());
     }
 
-    let results: Vec<CohereRerankResult> = rank_results(scored, req.top_n)
-        .into_iter()
-        .map(|(index, relevance_score)| CohereRerankResult {
-            index,
-            relevance_score,
-            document: req
-                .return_documents
-                .then(|| req.documents[index].echoed()),
-        })
-        .collect();
+    let results: Vec<CohereRerankResult> =
+        rerank_documents(&state, &req.query, &texts, req.top_n)
+            .into_iter()
+            .map(|(index, relevance_score)| CohereRerankResult {
+                index,
+                relevance_score,
+                document: req
+                    .return_documents
+                    .then(|| req.documents[index].echoed()),
+            })
+            .collect();
 
     Json(CohereRerankResponse {
         id: format!("rerank-{}", state.name),

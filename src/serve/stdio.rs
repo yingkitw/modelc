@@ -7,7 +7,8 @@
 //! with the same `AppState` inference plumbing the HTTP endpoints use.
 //!
 //! Methods: `initialize`, `ping`, `tools/list`, `tools/call`
-//! (`chat` / `complete` / `embeddings` tools), `notifications/initialized`
+//! (`chat` / `complete` / `embeddings` tools), `resources/list`,
+//! `resources/read` (read-only model metadata), `notifications/initialized`
 //! (ignored). Unknown methods return JSON-RPC error `-32601`; malformed lines
 //! return `-32700`; tool failures surface as MCP error *results*
 //! (`isError: true`), not protocol errors.
@@ -23,6 +24,17 @@ use super::types::{ChatRequest, CompleteRequest, EmbeddingEntry, EmbeddingsReque
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Protocol versions accepted for `initialize` (echoed back verbatim).
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
+/// Earliest MCP version that defines the resources capability.
+const MCP_RESOURCES_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// URI of the model-overview resource (name, architecture, sizes, metadata).
+const RESOURCE_MODEL: &str = "modelc://model";
+/// URI of the tensor-table resource (name, shape, dtype, bytes per tensor).
+const RESOURCE_TENSORS: &str = "modelc://model/tensors";
+/// URI of the tokenizer-metadata resource (model type, special ids, template).
+const RESOURCE_TOKENIZER: &str = "modelc://model/tokenizer";
+/// Longest metadata value a resource returns before truncating it.
+const METADATA_VALUE_MAX_CHARS: usize = 1024;
 
 /// Serve `model` over stdin/stdout as a newline-delimited JSON-RPC 2.0 server.
 /// Returns when stdin closes (EOF). `--api-key` / `--rate-limit` are HTTP-mode
@@ -95,6 +107,20 @@ pub(super) fn handle_message(state: &super::AppState, line: &str) -> Option<Valu
             let arguments = msg.pointer("/params/arguments").cloned();
             Some(rpc_result(&id, call_tool(state, name, arguments)))
         }
+        "resources/list" => Some(rpc_result(&id, resources_list())),
+        "resources/read" => {
+            let Some(uri) = msg.pointer("/params/uri").and_then(|v| v.as_str()) else {
+                return Some(rpc_error(
+                    &id,
+                    -32602,
+                    "invalid params: resources/read requires a `uri` string",
+                ));
+            };
+            match resources_read(state, uri) {
+                Ok(result) => Some(rpc_result(&id, result)),
+                Err(message) => Some(rpc_error(&id, -32002, &message)),
+            }
+        }
         other => {
             if is_notification {
                 return None;
@@ -133,9 +159,15 @@ fn initialize_result(msg: &Value) -> Value {
     } else {
         MCP_PROTOCOL_VERSION
     };
+    let mut capabilities = json!({ "tools": { "listChanged": false } });
+    // Resources entered MCP in 2025-03-26; a 2024-11-05 client does not know
+    // them, so the capability is only advertised from that version on.
+    if version >= MCP_RESOURCES_PROTOCOL_VERSION {
+        capabilities["resources"] = json!({ "subscribe": false, "listChanged": false });
+    }
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": capabilities,
         "serverInfo": { "name": "modelc", "version": crate::CLI_VERSION }
     })
 }
@@ -189,6 +221,20 @@ fn tools_list() -> Value {
                     "inputs": { "type": "array", "items": { "type": "string" } }
                 }
             }
+        },
+        {
+            "name": "rerank",
+            "description": "Rank documents by relevance to a query (Cohere-style reranking)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "documents": { "type": "array", "items": { "type": "string" } },
+                    "top_n": { "type": "integer" },
+                    "return_documents": { "type": "boolean" }
+                },
+                "required": ["query", "documents"]
+            }
         }
     ])
 }
@@ -202,14 +248,189 @@ fn merge_object(base: &mut Value, add: Value) {
     }
 }
 
+/// The read-only resources this server exposes: model identity, the tensor
+/// table, and the tokenizer metadata the artifact carried.
+fn resources_list() -> Value {
+    json!({
+        "resources": [
+            {
+                "uri": RESOURCE_MODEL,
+                "name": "model",
+                "description": "Model overview: name, architecture, parameter and byte counts, quantization, artifact metadata",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": RESOURCE_TENSORS,
+                "name": "model-tensors",
+                "description": "Tensor table: name, shape, dtype, element count and stored bytes",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": RESOURCE_TOKENIZER,
+                "name": "model-tokenizer",
+                "description": "Tokenizer metadata: model type, BOS/EOS token ids, chat template, raw tokenizer entries",
+                "mimeType": "application/json"
+            }
+        ]
+    })
+}
+
+/// Read one resource. `Err` carries the message for a JSON-RPC error.
+fn resources_read(state: &super::AppState, uri: &str) -> Result<Value, String> {
+    let content = match uri {
+        RESOURCE_MODEL => model_overview(state),
+        RESOURCE_TENSORS => tensor_table(state),
+        RESOURCE_TOKENIZER => tokenizer_metadata(state),
+        other => return Err(format!("resource not found: {other}")),
+    };
+    let text = serde_json::to_string_pretty(&content).unwrap_or_else(|_| "{}".to_string());
+    Ok(json!({
+        "contents": [ { "uri": uri, "mimeType": "application/json", "text": text } ]
+    }))
+}
+
+/// Model overview: identity, size, and the artifact's own metadata.
+fn model_overview(state: &super::AppState) -> Value {
+    json!({
+        "name": state.name,
+        "architecture": state.architecture,
+        "tensor_count": state.tensor_names.len(),
+        "total_params": state.total_params,
+        "total_bytes": state.total_bytes,
+        "quantization": quantization_label(state),
+        "metadata": state.metadata,
+    })
+}
+
+/// The tensor table, sorted by tensor name so the output is deterministic.
+fn tensor_table(state: &super::AppState) -> Value {
+    let mut tensors: Vec<Value> = state
+        .base_tensors
+        .iter()
+        .map(|(name, td)| {
+            json!({
+                "name": name,
+                "shape": td.shape,
+                "dtype": format!("{:?}", td.dtype),
+                "elements": td.element_count(),
+                "bytes": td.byte_len(),
+            })
+        })
+        .collect();
+    tensors.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    json!({ "tensors": tensors })
+}
+
+/// Tokenizer metadata: model type, special token ids, chat template size, and
+/// the raw `tokenizer.*` entries the artifact carried.
+fn tokenizer_metadata(state: &super::AppState) -> Value {
+    let mut entries = serde_json::Map::new();
+    for (key, value) in state
+        .metadata
+        .iter()
+        .filter(|(key, _)| key.starts_with("tokenizer."))
+    {
+        entries.insert(key.clone(), Value::String(truncate(value, METADATA_VALUE_MAX_CHARS)));
+    }
+    json!({
+        "model_type": state.metadata.get("tokenizer.ggml.model"),
+        "bos_token_id": state.metadata.get("tokenizer.ggml.bos_token_id").and_then(|v| v.parse::<i64>().ok()),
+        "eos_token_id": state.metadata.get("tokenizer.ggml.eos_token_id").and_then(|v| v.parse::<i64>().ok()),
+        "chat_template_chars": state.chat_template.as_ref().map(|t| t.chars().count()),
+        "entries": entries,
+    })
+}
+
+/// The artifact's quantization label: "f32" for plain float weights, the
+/// dtype name when the model is quantized, "mixed" when it carries several.
+fn quantization_label(state: &super::AppState) -> String {
+    let mut dtypes: Vec<String> = state
+        .base_tensors
+        .values()
+        .map(|td| format!("{:?}", td.dtype))
+        .collect();
+    dtypes.sort();
+    dtypes.dedup();
+    match dtypes.len() {
+        0 => "none".to_string(),
+        1 => dtypes[0].to_lowercase(),
+        _ => {
+            if dtypes.iter().all(|d| d == "F32") {
+                "f32".to_string()
+            } else {
+                "mixed".to_string()
+            }
+        }
+    }
+}
+
+/// Cap a metadata value so a resource never carries an unbounded blob.
+fn truncate(value: &str, max_chars: usize) -> String {
+    let total = value.chars().count();
+    if total <= max_chars {
+        return value.to_string();
+    }
+    let head: String = value.chars().take(max_chars).collect();
+    format!("{head}… [truncated, {total} chars total]")
+}
+
 fn call_tool(state: &super::AppState, name: &str, arguments: Option<Value>) -> Value {
     let arguments = arguments.unwrap_or_else(|| json!({}));
     match name {
         "chat" => tool_chat(state, &arguments),
         "complete" => tool_complete(state, &arguments),
         "embeddings" => tool_embeddings(state, &arguments),
+        "rerank" => tool_rerank(state, &arguments),
         other => tool_result(format!("Unknown tool: {other}"), true),
     }
+}
+
+/// Rank documents against a query with the same core the `/v1/rerank` endpoint
+/// uses, so an agent reranks through the same numbers the HTTP API returns.
+fn tool_rerank(state: &super::AppState, arguments: &Value) -> Value {
+    let query = arguments
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let documents: Vec<String> = arguments
+        .get("documents")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if query.is_empty() || documents.is_empty() {
+        return tool_result(
+            "invalid rerank arguments: `query` and `documents` are required".to_string(),
+            true,
+        );
+    }
+    let top_n = arguments
+        .get("top_n")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let return_documents = arguments
+        .get("return_documents")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let ranked = super::openai::rerank_documents(state, query, &documents, top_n);
+    let results: Vec<Value> = ranked
+        .iter()
+        .map(|(index, relevance_score)| {
+            let mut entry = json!({ "index": index, "relevance_score": relevance_score });
+            if return_documents {
+                entry["document"] = json!({ "text": documents[*index] });
+            }
+            entry
+        })
+        .collect();
+    tool_result(
+        serde_json::to_string(&json!({ "results": results })).unwrap_or_default(),
+        false,
+    )
 }
 
 fn tool_chat(state: &super::AppState, arguments: &Value) -> Value {
@@ -380,7 +601,13 @@ mod tests {
             name: "serve_fixture".into(),
             architecture: "mlp".into(),
             tensors,
-            metadata: HashMap::new(),
+            metadata: HashMap::from([
+                ("general.architecture".to_string(), "llama".to_string()),
+                ("tokenizer.ggml.model".to_string(), "llama".to_string()),
+                ("tokenizer.ggml.bos_token_id".to_string(), "1".to_string()),
+                ("tokenizer.ggml.eos_token_id".to_string(), "2".to_string()),
+                ("tokenizer.chat_template".to_string(), "{{ bos }}".to_string()),
+            ]),
         }
     }
 
@@ -449,11 +676,78 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().expect("tool name"))
             .collect();
-        assert_eq!(names, vec!["chat", "complete", "embeddings"]);
+        assert_eq!(names, vec!["chat", "complete", "embeddings", "rerank"]);
         assert!(tools[1]["inputSchema"]["required"]
             .as_array()
             .expect("required")
             .contains(&json!("prompt")));
+        // The rerank tool requires a query and documents.
+        let rerank = tools
+            .iter()
+            .find(|t| t["name"] == "rerank")
+            .expect("rerank tool");
+        let required = rerank["inputSchema"]["required"].as_array().expect("required");
+        assert!(required.contains(&json!("query")));
+        assert!(required.contains(&json!("documents")));
+    }
+
+    #[test]
+    fn tools_call_rerank_ranks_documents() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"rerank","arguments":{"query":"capital cities","documents":["washington","paris","tokyo"],"top_n":2}}}"#,
+        );
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+        let envelope: Value = serde_json::from_str(text).expect("json envelope");
+        let results = envelope["results"].as_array().expect("results");
+        assert_eq!(results.len(), 2, "top_n truncates");
+        for r in results {
+            let score = r["relevance_score"].as_f64().expect("score");
+            assert!(
+                (0.0..=1.0).contains(&score),
+                "score is clamped into Cohere's documented range: {score}"
+            );
+            assert!(r["index"].as_u64().is_some());
+            assert!(
+                r.get("document").is_none(),
+                "document text is opt-in, like the HTTP endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_call_rerank_can_return_the_document_text() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"rerank","arguments":{"query":"q","documents":["washington","paris"],"return_documents":true}}}"#,
+        );
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+        let envelope: Value = serde_json::from_str(text).expect("json envelope");
+        let results = envelope["results"].as_array().expect("results");
+        assert_eq!(results.len(), 2);
+        for r in results {
+            let idx = r["index"].as_u64().unwrap() as usize;
+            assert_eq!(
+                r["document"]["text"].as_str().unwrap(),
+                ["washington", "paris"][idx],
+                "document text matches the original index"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_call_rerank_invalid_arguments_is_error_result() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"rerank","arguments":{"query":"q"}}}"#,
+        );
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("invalid rerank arguments"));
     }
 
     #[test]
@@ -539,13 +833,156 @@ mod tests {
     }
 
     #[test]
+    fn resources_list_exposes_the_model_resources() {
+        let resp = call(&state(), r#"{"jsonrpc":"2.0","id":10,"method":"resources/list"}"#);
+        let resources = resp["result"]["resources"].as_array().expect("resources");
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().expect("uri"))
+            .collect();
+        assert_eq!(
+            uris,
+            vec![
+                "modelc://model",
+                "modelc://model/tensors",
+                "modelc://model/tokenizer"
+            ]
+        );
+        for r in resources {
+            assert_eq!(r["mimeType"], "application/json");
+            assert!(!r["name"].as_str().unwrap().is_empty());
+            assert!(!r["description"].as_str().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn resources_read_model_overview_reports_identity_and_sizes() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"modelc://model"}}"#,
+        );
+        assert_eq!(resp["result"]["contents"][0]["uri"], "modelc://model");
+        assert_eq!(
+            resp["result"]["contents"][0]["mimeType"],
+            "application/json"
+        );
+        let overview: Value =
+            serde_json::from_str(resp["result"]["contents"][0]["text"].as_str().expect("text"))
+                .expect("overview json");
+        assert_eq!(overview["name"], "serve_fixture");
+        assert_eq!(overview["architecture"], "mlp");
+        assert_eq!(overview["tensor_count"], 4);
+        assert_eq!(overview["total_params"], 9);
+        assert_eq!(overview["quantization"], "f32");
+        // The artifact's own metadata rides along.
+        assert_eq!(overview["metadata"]["general.architecture"], "llama");
+    }
+
+    #[test]
+    fn resources_read_tensor_table_is_sorted_and_typed() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"modelc://model/tensors"}}"#,
+        );
+        let table: Value =
+            serde_json::from_str(resp["result"]["contents"][0]["text"].as_str().expect("text"))
+                .expect("tensor table json");
+        let tensors = table["tensors"].as_array().expect("tensors");
+        let names: Vec<&str> = tensors
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "layer0.bias",
+                "layer0.weight",
+                "layer1.bias",
+                "layer1.weight"
+            ],
+            "sorted by name"
+        );
+        assert_eq!(tensors[1]["shape"], json!([2, 2]));
+        assert_eq!(tensors[1]["dtype"], "F32");
+        assert_eq!(tensors[1]["elements"], 4);
+        assert_eq!(tensors[1]["bytes"], 16);
+    }
+
+    #[test]
+    fn resources_read_tokenizer_reports_special_ids_and_entries() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"modelc://model/tokenizer"}}"#,
+        );
+        let tokenizer: Value =
+            serde_json::from_str(resp["result"]["contents"][0]["text"].as_str().expect("text"))
+                .expect("tokenizer json");
+        assert_eq!(tokenizer["model_type"], "llama");
+        assert_eq!(tokenizer["bos_token_id"], 1);
+        assert_eq!(tokenizer["eos_token_id"], 2);
+        assert_eq!(tokenizer["chat_template_chars"], 9);
+        assert_eq!(tokenizer["entries"]["tokenizer.ggml.model"], "llama");
+        assert!(
+            tokenizer["entries"].get("general.architecture").is_none(),
+            "only tokenizer.* entries are exposed"
+        );
+    }
+
+    #[test]
+    fn resources_read_unknown_uri_is_resource_not_found() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":14,"method":"resources/read","params":{"uri":"modelc://nope"}}"#,
+        );
+        assert_eq!(resp["error"]["code"], -32002);
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("modelc://nope")
+        );
+    }
+
+    #[test]
+    fn resources_read_without_uri_is_invalid_params() {
+        let resp = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":15,"method":"resources/read","params":{}}"#,
+        );
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn initialize_advertises_resources_only_for_clients_that_know_them() {
+        let modern = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":16,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+        );
+        assert_eq!(
+            modern["result"]["capabilities"]["resources"]["subscribe"],
+            false
+        );
+
+        // The 2024-11-05 spec predates resources — advertising them would point
+        // clients at a method they do not know.
+        let legacy = call(
+            &state(),
+            r#"{"jsonrpc":"2.0","id":17,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        );
+        assert!(
+            legacy["result"]["capabilities"].get("resources").is_none(),
+            "legacy clients must not see the resources capability"
+        );
+    }
+
+    #[test]
     fn unknown_method_returns_jsonrpc_error() {
         let resp = call(
             &state(),
-            r#"{"jsonrpc":"2.0","id":8,"method":"resources/list"}"#,
+            r#"{"jsonrpc":"2.0","id":8,"method":"prompts/list"}"#,
         );
         assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"].as_str().unwrap().contains("resources/list"));
+        assert!(resp["error"]["message"].as_str().unwrap().contains("prompts/list"));
     }
 
     #[test]
@@ -593,7 +1030,7 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
                 |r| {
                     let tools = r["result"]["tools"].as_array().expect("tools");
-                    assert_eq!(tools.len(), 3);
+                    assert_eq!(tools.len(), 4);
                 },
             ),
             (
@@ -622,9 +1059,36 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"warp-speed"}}"#,
                 |r| assert_eq!(r["result"]["isError"], true),
             ),
-            ("{oops", |r| assert_eq!(r["error"]["code"], -32700)),
+            (
+                r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"rerank","arguments":{"query":"capital cities","documents":["washington","paris"],"top_n":1}}}"#,
+                |r| {
+                    assert_eq!(r["result"]["isError"], false);
+                    let envelope: Value =
+                        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap())
+                            .unwrap();
+                    assert_eq!(envelope["results"].as_array().unwrap().len(), 1);
+                },
+            ),
             (
                 r#"{"jsonrpc":"2.0","id":8,"method":"resources/list"}"#,
+                |r| {
+                    let resources = r["result"]["resources"].as_array().expect("resources");
+                    assert_eq!(resources.len(), 3);
+                },
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"modelc://model"}}"#,
+                |r| {
+                    assert_eq!(r["result"]["contents"][0]["uri"], "modelc://model");
+                },
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":"modelc://nope"}}"#,
+                |r| assert_eq!(r["error"]["code"], -32002),
+            ),
+            ("{oops", |r| assert_eq!(r["error"]["code"], -32700)),
+            (
+                r#"{"jsonrpc":"2.0","id":11,"method":"prompts/list"}"#,
                 |r| assert_eq!(r["error"]["code"], -32601),
             ),
         ];

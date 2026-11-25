@@ -1,7 +1,8 @@
 //! End-to-end `modelc serve` tests: spawn the real binary as a child process.
 //!
 //! - `--stdio`: drives a full MCP-style JSON-RPC session (initialize →
-//!   notifications/initialized → tools/list → tools/call) through pipes.
+//!   notifications/initialized → tools/list → tools/call → resources/list →
+//!   resources/read) through pipes.
 //! - default (HTTP) mode: binds a port and answers `/info` with the same shape
 //!   `modelc run` serves — they share the router.
 
@@ -64,7 +65,7 @@ fn serve_stdio_speaks_mcp_jsonrpc() {
     // 2. notification — must not produce a response line.
     send_msg(&mut stdin, &json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
 
-    // 3. tools/list → the three inference tools.
+    // 3. tools/list → the inference tools plus rerank.
     send_msg(&mut stdin, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
     let resp = read_msg(&mut reader);
     let tools = resp["result"]["tools"].as_array().expect("tools array");
@@ -72,7 +73,7 @@ fn serve_stdio_speaks_mcp_jsonrpc() {
         .iter()
         .map(|t| t["name"].as_str().expect("tool name"))
         .collect();
-    assert_eq!(names, vec!["chat", "complete", "embeddings"]);
+    assert_eq!(names, vec!["chat", "complete", "embeddings", "rerank"]);
 
     // 4. tools/call complete on the fixture model → float array, no error.
     send_msg(
@@ -99,8 +100,90 @@ fn serve_stdio_speaks_mcp_jsonrpc() {
         .unwrap()
         .contains("Unknown tool"));
 
-    // 6. Unknown method → JSON-RPC protocol error.
+    // 6. resources/list → the read-only model resources.
     send_msg(&mut stdin, &json!({"jsonrpc":"2.0","id":5,"method":"resources/list"}));
+    let resp = read_msg(&mut reader);
+    let resources = resp["result"]["resources"].as_array().expect("resources array");
+    let uris: Vec<&str> = resources
+        .iter()
+        .map(|r| r["uri"].as_str().expect("resource uri"))
+        .collect();
+    assert_eq!(
+        uris,
+        vec![
+            "modelc://model",
+            "modelc://model/tensors",
+            "modelc://model/tokenizer"
+        ]
+    );
+
+    // 7. resources/read → the model overview, as JSON inside the text content.
+    send_msg(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":6,"method":"resources/read",
+                "params":{"uri":"modelc://model"}}),
+    );
+    let resp = read_msg(&mut reader);
+    let contents = resp["result"]["contents"].as_array().expect("contents");
+    assert_eq!(contents[0]["uri"], "modelc://model");
+    let overview: Value =
+        serde_json::from_str(contents[0]["text"].as_str().expect("text")).expect("overview json");
+    assert_eq!(overview["name"], "test_model");
+    assert_eq!(overview["architecture"], "mlp");
+    assert_eq!(overview["tensor_count"], 2);
+
+    // 8. The tensor table lists every tensor of the artifact.
+    send_msg(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":7,"method":"resources/read",
+                "params":{"uri":"modelc://model/tensors"}}),
+    );
+    let resp = read_msg(&mut reader);
+    let table: Value = serde_json::from_str(
+        resp["result"]["contents"][0]["text"].as_str().expect("text"),
+    )
+    .expect("tensor table json");
+    let tensors = table["tensors"].as_array().expect("tensors");
+    let names: Vec<&str> = tensors
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["bias", "weight"], "sorted by name");
+
+    // 9. tools/call rerank → the same ranking the HTTP endpoint returns.
+    send_msg(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":10,"method":"tools/call",
+                "params":{"name":"rerank","arguments":{
+                    "query":"capital cities",
+                    "documents":["washington","paris","tokyo"],
+                    "top_n":2,
+                    "return_documents":true}}}),
+    );
+    let resp = read_msg(&mut reader);
+    assert_eq!(resp["result"]["isError"], false);
+    let envelope: Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().expect("text"))
+            .expect("rerank envelope");
+    let results = envelope["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2, "top_n truncates");
+    for r in results {
+        let score = r["relevance_score"].as_f64().expect("score");
+        assert!((0.0..=1.0).contains(&score), "score in [0, 1]: {score}");
+        assert!(r["document"]["text"].as_str().is_some());
+    }
+
+    // 10. An unknown resource URI → JSON-RPC error -32002 (resource not found).
+    send_msg(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":11,"method":"resources/read",
+                "params":{"uri":"modelc://nope"}}),
+    );
+    let resp = read_msg(&mut reader);
+    assert_eq!(resp["error"]["code"], -32002);
+
+    // 11. Unknown method → JSON-RPC protocol error.
+    send_msg(&mut stdin, &json!({"jsonrpc":"2.0","id":12,"method":"prompts/list"}));
     let resp = read_msg(&mut reader);
     assert_eq!(resp["error"]["code"], -32601);
 
