@@ -192,6 +192,127 @@ fn serve_stdio_speaks_mcp_jsonrpc() {
 }
 
 #[test]
+fn serve_http_exposes_the_mcp_endpoint() {
+    let (_dir, artifact) = pack_fixture();
+
+    // A different port range from the HTTP-mode test above, so the two can
+    // run in parallel.
+    let port: u16 = 19500 + (std::process::id() % 400) as u16;
+    let mut child = Command::new(bin())
+        .args(["serve", artifact.to_str().unwrap(), "-p", &port.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn modelc serve (http)");
+
+    let base = format!("http://127.0.0.1:{port}");
+    let mut up = false;
+    for _ in 0..100 {
+        if let Ok(resp) = common::http::get(&format!("{base}/info")).send("") {
+            let _ = common::http::read_body(resp);
+            up = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // 1. initialize → a JSON-RPC result over HTTP.
+    let initialize = if up {
+        common::http::post(&format!("{base}/mcp"))
+            .content_type("application/json")
+            .send(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
+                    "params":{"protocolVersion":"2025-06-18"}}"#,
+            )
+            .ok()
+            .map(|r| common::http::read_body(r).expect("body"))
+    } else {
+        None
+    };
+
+    // 2. tools/list → the four tools.
+    let tools = if up {
+        common::http::post(&format!("{base}/mcp"))
+            .content_type("application/json")
+            .send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
+            .ok()
+            .map(|r| common::http::read_body(r).expect("body"))
+    } else {
+        None
+    };
+
+    // 3. resources/read → the model overview.
+    let resources = if up {
+        common::http::post(&format!("{base}/mcp"))
+            .content_type("application/json")
+            .send(
+                r#"{"jsonrpc":"2.0","id":3,"method":"resources/read",
+                    "params":{"uri":"modelc://model"}}"#,
+            )
+            .ok()
+            .map(|r| common::http::read_body(r).expect("body"))
+    } else {
+        None
+    };
+
+    // 4. A notification → 202 with no body.
+    let notification_status = if up {
+        match common::http::post(&format!("{base}/mcp"))
+            .content_type("application/json")
+            .send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+        {
+            Ok(resp) => resp.status(),
+            Err(common::http::HttpError::StatusCode(code)) => code,
+            Err(e) => panic!("request failed: {e}"),
+        }
+    } else {
+        0
+    };
+
+    // 5. A cross-origin request → refused (DNS-rebinding protection).
+    let cross_origin_status = if up {
+        match common::http::post(&format!("{base}/mcp"))
+            .content_type("application/json")
+            .header("origin", "http://evil.example")
+            .send(r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#)
+        {
+            Ok(resp) => resp.status(),
+            Err(common::http::HttpError::StatusCode(code)) => code,
+            Err(e) => panic!("request failed: {e}"),
+        }
+    } else {
+        0
+    };
+
+    // Kill before asserting so a failed assertion can't leak the child process.
+    child.kill().expect("kill child");
+    child.wait().expect("reap child");
+
+    assert!(up, "serve (http) did not come up before the poll budget ran out");
+
+    let initialize: Value = serde_json::from_slice(&initialize.expect("initialize body")).expect("json");
+    assert_eq!(initialize["id"], 1);
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "modelc");
+
+    let tools: Value = serde_json::from_slice(&tools.expect("tools body")).expect("json");
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    assert_eq!(names, vec!["chat", "complete", "embeddings", "rerank"]);
+
+    let resources: Value =
+        serde_json::from_slice(&resources.expect("resources body")).expect("json");
+    assert_eq!(resources["result"]["contents"][0]["uri"], "modelc://model");
+
+    assert_eq!(notification_status, 202, "notifications are accepted");
+    assert_eq!(cross_origin_status, 403, "cross-origin requests are refused");
+}
+
+#[test]
 fn serve_http_mode_serves_the_run_router() {
     let (_dir, artifact) = pack_fixture();
 

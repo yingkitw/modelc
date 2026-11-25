@@ -178,6 +178,14 @@ For each tensor:
 - **Tool-schema DSL**: build JSON-Schema `inputSchema`s with `serde_json::json!` + a tiny `merge_object` helper (sampling properties shared between `chat` and `complete` tools).
 - **Child-process test pattern**: `env!("CARGO_BIN_EXE_modelc")` + `Stdio::piped()` stdin/stdout, `stderr(Stdio::inherit())`, helper fns `send_msg`/`read_msg`, `child.kill()` + `wait()` **before** assertions that might panic — a panicked test otherwise leaks a live child holding its port. Also: `common::http` retries `TimedOut` 10× with a 30s read timeout (300s worst case) — when polling a starting server, rely on connection-refused being non-retryable, never on read timeouts.
 
+### MCP Streamable HTTP transport (`POST /mcp`, `src/serve/mcp_http.rs`, 2026-11-25)
+The MCP specification's *current* standard transport (it replaced HTTP+SSE in `2024-11-05`); stdio is the other one. It is what makes a **hosted** modelc reachable by MCP clients rather than only a local subprocess.
+- **Shared core**: the JSON-RPC handling was extracted out of `stdio::handle_message` into `stdio::handle_value(state, &Value)` — the stdio transport parses a line and calls it, the HTTP transport parses a body and calls it, so the two transports cannot answer differently. New MCP methods belong in `handle_value`, never in a transport.
+- **Spec requirements implemented**: `202 Accepted` with no body for notifications and client responses; `Mcp-Session-Id` issued at `initialize` and echoed on later requests (an id we did not issue → `400`); `MCP-Protocol-Version` validated on every request (unsupported → `400`); `Origin` validated (same-origin **or** both sides loopback → allowed, otherwise `403`); an unparseable body → `400` carrying a JSON-RPC `-32700` body; `GET`/`DELETE` → `405`, which the spec allows for a server with no server→client stream.
+- **Origin validation is the DNS-rebinding defense**: compare the Origin's host with the `Host` header, allowing loopback↔loopback. Strip the scheme and the port first; IPv6 literals arrive as `[::1]`.
+- **Session ids without a uuid crate**: 16 bytes from `/dev/urandom` (unix) shaped as a UUID v4 (version/variant bits set), with a clock+counter fallback elsewhere. The spec says "SHOULD be cryptographically secure"; the UUID shape is what clients expect.
+- **Test seam**: the handlers take `State`, `HeaderMap` and `Bytes`, so unit tests call them directly and read the body with `axum::body::to_bytes` — the repo has no `tower::ServiceExt` dependency, and the integration test drives the endpoint against the real binary instead.
+
 ### Router assembly (`src/serve/mod.rs:251-291`)
 33 routes mounted via `Router::new().route(...)` + `with_state(Arc<AppState>)` (counted 2026-11-25; `/v2/rerank` was the latest). Backpressure middleware (`backpressure_middleware`) exempts `/health`, `/info`, `/props`, `/metrics` so probes and observability work under load.
 

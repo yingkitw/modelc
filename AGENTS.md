@@ -71,6 +71,7 @@ This document defines the continuous improvement cycle for the **modelc** projec
 │   │   ├── stdio.rs         # `modelc serve --stdio`: MCP-compatible newline-delimited JSON-RPC 2.0 server on
 │   │   │                    #   stdin/stdout (initialize/ping/tools.list/tools.call; chat/complete/embeddings
 │   │   │                    #   + resources.list/resources.read for model metadata)
+│   │   ├── mcp_http.rs      # MCP Streamable HTTP transport (POST /mcp — the same JSON-RPC core as stdio)
 │   │   ├── infer.rs         # ONNX / MLP / transformer inference + batched MLP
 │   │   ├── openai.rs        # OpenAI-compatible endpoints (/v1/chat/completions, /v1/completions, /v1/embeddings, /v1/models)
 │   │   ├── openai/types.rs  #   OpenAI wire-schema DTOs (requests, responses, chunks, SamplingParams)

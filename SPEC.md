@@ -65,6 +65,21 @@ One command, two transports. `modelc serve <artifact> [flags]` shares `run`'s fl
 - Inference goes through the same internals as the HTTP handlers (chat template, sampling params, JSON-Schema retry, prefix cache, metrics), so both transports agree on semantics.
 - `--api-key` / `--rate-limit` apply to the HTTP mode only; stdio has no authentication layer.
 
+**MCP over HTTP (`POST /mcp`, HTTP mode):** the same JSON-RPC surface is also served over the **Streamable HTTP** transport — MCP's second standard transport, and the one a *hosted* modelc has to speak for editors and agents to reach it. The JSON-RPC core is shared with the stdio transport, so both answer identically. The endpoint implements the specification's requirements:
+
+- `POST /mcp` carries one JSON-RPC request, notification or response. A request is answered `200 OK` with `Content-Type: application/json` and the JSON-RPC response; a notification or client response is answered `202 Accepted` with no body.
+- `initialize` returns an `Mcp-Session-Id` header (a UUID-shaped id); later requests may present it and the server echoes it back. An id this server did not issue is refused with `400`.
+- The `MCP-Protocol-Version` header is validated on every request; an unsupported version is refused with `400`.
+- The `Origin` header is validated (DNS-rebinding protection): a request is allowed when it is same-origin, or when both the origin and the server address are loopback. Anything else is refused with `403`.
+- An unparseable body is refused with `400` and a JSON-RPC `-32700` error body.
+- `GET /mcp` and `DELETE /mcp` answer `405 Method Not Allowed` — this server has no server→client stream and does not terminate sessions, both of which the specification allows.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+```
+
 **Example session** (`modelc serve my.modelc --stdio`):
 
 ```

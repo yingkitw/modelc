@@ -242,6 +242,7 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 | `POST` | `/v1/embeddings` | **OpenAI embeddings** (`encoding_format` float/base64, `dimensions`, `usage`) |
 | `POST` | `/reranking` | **Reranking** (llama.cpp-compatible; query + documents → sorted by cosine similarity, optional `top_n`) |
 | `POST` | `/v1/rerank` · `/v2/rerank` | **Cohere-compatible reranking** (both Cohere SDK generations; string or `{text}` documents, `top_n`, `return_documents`) |
+| `POST` | `/mcp` | **MCP over HTTP** (Streamable HTTP transport — the same JSON-RPC surface as `serve --stdio`, for hosted servers) |
 | `POST` | `/lora/load` · `/lora/unload` | Hot-swap LoRA adapters without restart |
 | `GET` | `/api/cache/stats` | Prefix cache stats (entries, tokens, KV bytes, utilization) |
 | `POST` | `/api/cache/clear` | Drop every cached prefix snapshot (e.g. after LoRA swap) |
@@ -267,7 +268,7 @@ All responses are `application/json`; streaming endpoints use SSE (`text/event-s
 - **SIMD GEMV** — NEON (aarch64) / AVX (x86_64) K-dimension vectorized dot product, shared bit-for-bit between `run` and `compile` via `src/runtime/gemv.rs`.
 
 ### Serving & operations
-- **One command, two transports** — `modelc serve` runs the same inference stack over HTTP (`--port`/`--bind`) **or over stdio** (`--stdio`): MCP-compatible newline-delimited JSON-RPC 2.0 (`initialize` / `ping` / `tools/list` / `tools/call` / `resources/list` / `resources/read`) so agents and editors can attach directly to a local artifact — with `chat` / `complete` / `embeddings` / `rerank` tools, and the model's metadata (architecture, tensor table, tokenizer) readable as MCP resources.
+- **One command, two transports** — `modelc serve` runs the same inference stack over HTTP (`--port`/`--bind`) **or over stdio** (`--stdio`): MCP-compatible newline-delimited JSON-RPC 2.0 (`initialize` / `ping` / `tools/list` / `tools/call` / `resources/list` / `resources/read`) so agents and editors can attach directly to a local artifact — with `chat` / `complete` / `embeddings` / `rerank` tools, and the model's metadata (architecture, tensor table, tokenizer) readable as MCP resources. The same surface is also served over MCP's **Streamable HTTP** transport at `POST /mcp`, so a *hosted* modelc is reachable by MCP clients too.
 - **OpenAI compatibility** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`; tools, tool_choice, JSON mode / JSON Schema, `n`, `best_of`, `echo`, `suffix`, `logprobs`, `stream_options.include_usage`, `user`, `max_completion_tokens`, `response_format`.
 - **Cohere-compatible reranking** — `/v1/rerank` + `/v2/rerank`: point Cohere SDK clients (`cohere.Client` → `/v1/rerank`, `cohere.ClientV2` → `/v2/rerank`) at the server via `base_url` for RAG reranking; same embedding path as `/reranking`.
 - **Auth & limits** — `--api-key` bearer auth, `--rate-limit` per-IP token bucket, `--max-concurrent` backpressure.

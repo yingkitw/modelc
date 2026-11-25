@@ -17,6 +17,7 @@ use crate::runtime::serve::Runtime;
 pub mod auth;
 mod handlers;
 mod infer;
+mod mcp_http;
 mod metrics;
 mod ollama;
 mod openai;
@@ -275,6 +276,13 @@ pub fn build_router_from_state(state: std::sync::Arc<AppState>) -> Router {
         .route("/v1/models", get(openai::list_models))
         .route("/v1/rerank", post(openai::rerank))
         .route("/v2/rerank", post(openai::rerank))
+        // MCP Streamable HTTP transport — the same JSON-RPC core as `serve --stdio`.
+        .route(
+            "/mcp",
+            post(mcp_http::mcp_endpoint)
+                .get(mcp_http::mcp_get_not_allowed)
+                .delete(mcp_http::mcp_delete_not_allowed),
+        )
         .route("/v1/models/{id}", get(openai::retrieve_model))
         .route("/v1/system", get(handlers::system_info))
         .route("/v1/chat/completions", post(openai::chat_completion))

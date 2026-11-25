@@ -83,6 +83,12 @@ pub(super) fn handle_message(state: &super::AppState, line: &str) -> Option<Valu
             return Some(rpc_error(&Value::Null, -32700, "parse error: invalid JSON"));
         }
     };
+    handle_value(state, &msg)
+}
+
+/// Handle one already-parsed JSON-RPC message. Shared by both MCP transports
+/// (stdio and Streamable HTTP) so they answer identically.
+pub(super) fn handle_value(state: &super::AppState, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let is_notification = msg.get("id").is_none();
     let Some(method) = msg.get("method").and_then(|m| m.as_str()) else {
@@ -95,7 +101,7 @@ pub(super) fn handle_message(state: &super::AppState, line: &str) -> Option<Valu
     };
 
     match method {
-        "initialize" => Some(rpc_result(&id, initialize_result(&msg))),
+        "initialize" => Some(rpc_result(&id, initialize_result(msg))),
         "notifications/initialized" => None,
         "ping" => Some(rpc_result(&id, json!({}))),
         "tools/list" => Some(rpc_result(&id, json!({ "tools": tools_list() }))),
