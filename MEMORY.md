@@ -225,6 +225,14 @@ Read-only model metadata over the same stdio session, so an agent can inspect th
 - **MCP tools** (`tools/list` + `tools/call`): `chat` / `complete` / `embeddings` / `rerank`. A tool result is **JSON text inside the content envelope** (`{content: [{type: "text", text}], isError}`) — parse `text` as JSON rather than expecting a structured object. Tool failures are `isError: true` results; only protocol violations are JSON-RPC errors.
 - **One core per behavior**: the MCP `rerank` tool and the HTTP `/v1/rerank` endpoint both call `openai::rerank_documents` (embed → cosine → order → clamp). The HTTP handler used to inline its own embedding loop, which would have let the two surfaces drift. When adding a tool, put the shared logic in the module that owns the behavior and call it from both transports.
 
+### Competitive surface (research pass 2026-11-25)
+The bar we are measured against — MCP `2025-06-18` transports spec, the llama.cpp server README and vLLM's online-serving docs, all fetched 2026-11-25:
+- **MCP's standard transport is Streamable HTTP**, not stdio: one endpoint taking POST (JSON or SSE response) and GET (SSE for server→client messages), the `Mcp-Session-Id` header for session state, `MCP-Protocol-Version` on every request, `202` for notifications/responses, and `Origin` validation against DNS rebinding. **We ship stdio only.**
+- **Anthropic Messages API** (`/v1/messages`, `/v1/messages/count_tokens`) is shipped by both llama.cpp and vLLM — Claude Code and the Anthropic SDKs speak only that dialect.
+- llama.cpp also has: a router server (`--models-dir`, LRU unload), `--reasoning-format` → `message.reasoning_content`, samplers we lack (top-k, typical-p, dynamic temperature, mirostat, DRY), SSE keep-alive pings, CORS handling, and direct Hugging Face downloads.
+- vLLM also has: the OpenAI **Responses API** (`/v1/responses`), the **Batch API**, Cohere `/v2/embed`, pooling APIs (`/classify`, `/score`, `/pooling`), `/tokenizer_info`, and sleep mode.
+The nine seeded gaps, each with a success criterion, live in TODO.md's "2026-11-25 research pass" section.
+
 ### Streaming protocol
 - All streaming endpoints use SSE (`text/event-stream`)
 - `ReceiverStream<Result<Event, Infallible>>` is the body
